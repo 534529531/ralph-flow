@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.opencode/ralph-flow/node_modules/
+.opencode/ralph-flow/package.json
+.opencode/ralph-flow/package-lock.json
+.opencode/ralph-flow/bun.lock
+.opencode/ralph-flow/.gitignore
+.opencode/ralph-flow/ralph-flow.local.md
+.opencode/ralph-flow/logs/
+.opencode/ralph-flow/workflows/
+/.idea/
+/.opencode/
+/ralph-flow.md
