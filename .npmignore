@@ -1,0 +1,7 @@
+src/
+.idea/
+.gitignore
+.gitattributes
+tsconfig.json
+*.tgz
+.opencode/
