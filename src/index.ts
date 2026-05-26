@@ -6,7 +6,7 @@ import yaml from "js-yaml";
 import { RALPH_COMMANDS } from "./commands.js";
 import { readState, writeState, clearState, markCancelled } from "./state.js";
 import { setup } from "./setup.js";
-import { handleSessionIdle, getStep, buildDoPrompt, buildContinuePrompt, getStepRecords, resetStepRecords } from "./executor.js";
+import { handleSessionIdle, handleContinue, getStep, buildDoPrompt, getStepRecords, resetStepRecords } from "./executor.js";
 import { logWorkflowStart, logWorkflowCancelled, logWorkflowResumed, logStepStart, logError } from "./logger.js";
 import { generateCancellationReport } from "./report.js";
 import type { WorkflowDef, RalphFlowState } from "./types.js";
@@ -201,11 +201,6 @@ ${doPrompt}`;
             return `Workflow "${state.workflow_name}" not found.`;
           }
 
-          const currentStep = getStep(workflow, state.current_step);
-          if (!currentStep) {
-            return `Step "${state.current_step}" not found in workflow.`;
-          }
-
           // 重置步骤记录，避免与历史记录重复
           resetStepRecords();
 
@@ -217,13 +212,7 @@ ${doPrompt}`;
           writeState(directory, newState);
           logWorkflowResumed(directory, state.workflow_name, state.current_step);
 
-          const prompt = buildContinuePrompt(state, currentStep);
-
-          return `Workflow resumed at step "${state.current_step}" (${state.current_phase} phase).
-
----
-
-${prompt}`;
+          return handleContinue(directory, workflow);
         },
       }),
 
@@ -308,7 +297,6 @@ ${workflows.map(w => `- **${w.name}**: ${w.desc}`).join("\n")}`;
 
     event: async ({ event }) => {
       if (event.type === "session.idle") {
-        ensureSetup(directory);
         const sessionId = event.properties.sessionID;
         if (!sessionId) return;
 
@@ -322,7 +310,6 @@ ${workflows.map(w => `- **${w.name}**: ${w.desc}`).join("\n")}`;
       }
 
       if (event.type === "session.deleted") {
-        ensureSetup(directory);
         const state = readState(directory);
         if (state && state.active && !state.paused) {
           const pausedState: RalphFlowState = { ...state, paused: true };
@@ -333,6 +320,13 @@ ${workflows.map(w => `- **${w.name}**: ${w.desc}`).join("\n")}`;
   };
 }
 
-export const RalphFlow: PluginModule = {
+// V1 PluginModule format (opencode >= 1.3.x)
+// Loader detects isRecord(mod.default) with server property
+export default {
+  id: "ralph-flow",
   server: RalphFlowPlugin,
-};
+} satisfies PluginModule;
+
+// Legacy format for older opencode versions
+// Loader iterates Object.entries(mod) and calls function exports
+export { RalphFlowPlugin as RalphFlow };

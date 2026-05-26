@@ -4,31 +4,33 @@
 
 **[opencode](https://opencode.ai) 工作流自动化插件**
 
-自动执行多步骤工作流，将复杂任务转化为自动化流水线。
+将复杂的开发任务转化为自动化的多步骤流水线 —— 每个步骤自带执行、验证和重试机制。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![opencode plugin](https://img.shields.io/badge/opencode-plugin-green.svg)](https://opencode.ai)
 
-[English](README.md) | [中文](README_CN.md)
+[English](README.md) · [中文](README_CN.md)
 
 </div>
 
 ---
 
-## 功能特性
+## ✨ 功能特性
 
-- **多步骤工作流** - 定义包含顺序步骤的复杂工作流
-- **执行/检查阶段** - 每个步骤都有执行和验证阶段
-- **自动重试** - 自动重试失败的步骤，可配置重试次数
-- **手动控制** - 需要时可暂停等待人工干预
-- **YAML 定义** - 简单易读的工作流定义格式
-- **执行日志** - 详细的日志记录，便于调试和审计
+- **多步骤流水线** — 定义步骤序列，每步含执行（DO）和检查（CHECK）两个阶段
+- **自动重试** — 失败步骤携带上下文自动重试，超限后暂停等待人工干预
+- **YAML 驱动** — 零代码创建工作流，仅需一个 `.yaml` 文件
+- **内置工作流** — `loop` 自动化循环、`spec` 结构化规范驱动开发
+- **日志与报告** — JSON Lines 格式日志、分步骤追踪、最终执行报告
+- **即插即用** — 安装一次，工作流自动注册为可用的 slash 命令
 
-## 安装方式
+---
 
-### 方式一：npm
+## 📦 安装方式
 
-在 opencode 配置中添加：
+### 方式一：npm（推荐）
+
+在 opencode 配置（`opencode.json` 或 `.opencode/config.json`）中添加：
 
 ```json
 {
@@ -36,263 +38,273 @@
 }
 ```
 
-### 方式二：本地插件
+### 方式二：本地安装
 
 克隆仓库到 opencode 插件目录：
 
 ```bash
-git clone https://github.com/your-username/ralph-flow.git ~/.config/opencode/plugins/ralph-flow
+git clone https://github.com/534529531/ralph-flow.git ~/.config/opencode/plugins/ralph-flow
+cd ~/.config/opencode/plugins/ralph-flow
+npm run build
 ```
 
-在该文件夹执行`npm run build`
+在 opencode 配置中直接引用构建产物：
 
-之后在plugins目录新建**ralph-flow.ts**文件，粘贴以下内容
+```json
+{
+  "plugin": ["file:///home/user/.config/opencode/plugins/ralph-flow/dist/index.js"]
+}
+```
+
+或在插件目录创建桥接文件：
 
 ```ts
-export { RalphFlow } from "./ralph-flow/dist/index.js";
+export { default } from "./ralph-flow/dist/index.js";
 ```
 
-## 快速开始
+> 首次加载时插件会自动创建工作流目录和依赖，无需手动配置。
 
-### 1. 启动工作流
+---
+
+## 🚀 快速开始
+
+直接让 AI 启动工作流：
 
 ```
 /ralphflow-start
 ```
 
-或直接指定工作流和任务：
+AI 会引导你选择工作流和描述任务。也可以一步到位：
 
 ```
-/ralphflow-start loop "构建一个带认证的 REST API"
+/ralphflow-start loop "用 JWT 和 refresh token 实现用户认证模块"
 ```
 
-### 2. 查看工作流状态
+运行过程中，你可以使用以下命令管理工作流：
 
-```
-/ralphflow-status
-```
+| 命令                    | 功能                  |
+| --------------------- | ------------------- |
+| `/ralphflow-status`   | 查看当前步骤、阶段、失败次数     |
+| `/ralphflow-continue` | 恢复已暂停的工作流           |
+| `/ralphflow-cancel`   | 取消工作流并生成总结报告        |
+| `/ralphflow-list`     | 列出所有可用工作流           |
 
-### 3. 继续已暂停的工作流
+---
 
-```
-/ralphflow-continue
-```
+## 📋 内置工作流
 
-### 4. 取消工作流
+### loop — 自动循环执行
 
-```
-/ralphflow-cancel
-```
+> **适用场景**：开放式任务、Bug 修复、范围明确的功能开发。
 
-### 5. 列出可用工作流
-
-```
-/ralphflow-list
-```
-
-## 工作原理
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      工作流启动                              │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│  步骤：执行阶段（DO）                                         │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │ AI 执行任务                                           │  │
-│  │ 输出：<promise>done</promise>                         │  │
-│  └───────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│  步骤：检查阶段（CHECK）                                      │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │ AI 验证工作成果                                        │  │
-│  │ 输出：<promise-check>true/false</promise-check>       │  │
-│  └───────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-                              │
-              ┌───────────────┴───────────────┐
-              ▼                               ▼
-        ┌─────────┐                     ┌─────────┐
-        │   通过   │                     │   失败   │
-        └─────────┘                     └─────────┘
-              │                               │
-              ▼                               ▼
-    ┌─────────────────┐            ┌─────────────────────┐
-    │  on_pass 步骤   │            │  fail_count++       │
-    │ （或完成工作流）  │            │  on_fail 步骤       │
-    └─────────────────┘            └─────────────────────┘
-                                               │
-                                               ▼
-                                  ┌─────────────────────────┐
-                                  │  是否达到 max_fail_count │
-                                  └─────────────────────────┘
-                                           │
-                                 ┌─────────┴─────────┐
-                                 ▼                   ▼
-                           ┌─────────┐         ┌─────────┐
-                           │   否    │         │   是    │
-                           └─────────┘         └─────────┘
-                                 │                   │
-                                 ▼                   ▼
-                           ┌─────────┐         ┌─────────┐
-                           │  继续   │         │  暂停   │
-                           │  执行   │         │（手动）  │
-                           └─────────┘         └─────────┘
-```
-
-1. `/ralphflow-start` 初始化工作流
-2. 插件注入第一步的**执行阶段**提示词
-3. AI 执行任务，完成后输出 `<promise>done</promise>`
-4. 插件检测到完成标记，转入**检查阶段**
-5. AI 验证工作成果，输出 `<promise-check>true</promise-check>` 或 `<promise-check>false</promise-check>`
-6. 根据结果判断：
-   - **通过**：跳转到 `on_pass` 步骤（或当 `on_pass: done` 时完成工作流）
-   - **失败**：`fail_count` 递增，跳转到 `on_fail` 步骤（携带失败上下文）
-7. 如果 `fail_count` 达到 `max_fail_count`，工作流**暂停**等待人工干预
-8. 使用 `/ralphflow-continue` 重置 `fail_count` 并继续执行
-9. 最后一步检查通过后，工作流完成
-
-## 工作流定义
-
-在 `.opencode/workflows/` 目录下创建 YAML 文件。默认工作流 `loop.yaml` 是单步骤自动循环：
+单步骤工作流，持续执行直到满足所有需求。每轮执行 DO → CHECK 循环，检查通过才算完成。
 
 ```yaml
-manual_phase:
-
+# workflows/loop.yaml（内置）
 steps:
-    - id: loop
-      desc: 自动循环执行任务
-      do: 执行用户指定的任务，持续工作直到任务完全完成
-      input: 用户输入的任务描述
-      output: 任务完成的证明（代码、文件、测试结果等）
-      check: 严格审查模式，使用独立审查和工具验证
-      on_pass: done
-      on_fail: loop
-      max_fail_count: 100
+  - id: loop
+    desc: 自动循环执行任务
+    do: 执行用户指定的任务，持续工作直到完全完成
+    check: 严格审查模式，使用独立审查和工具验证
+    on_pass: done
+    on_fail: loop
+    max_fail_count: 100
 ```
 
-多步骤工作流示例：
+<details>
+<summary>工作原理</summary>
+
+```mermaid
+flowchart TD
+    U["执行 /ralphflow-start"] --> Do["DO 阶段<br/>AI 执行任务"]
+    Do -->|"输出 done 标记"| Check["CHECK 阶段<br/>AI 验证结果"]
+    Check --> Pass{"检查通过？"}
+    Pass -->|是| Done["工作流完成 🎉"]
+    Pass -->|否| Retry["失败计数 + 1<br/>携带上下文重试"]
+    Retry -->|"未超限"| Do
+    Retry -->|"已达上限"| Pause["工作流暂停<br/>使用 /ralphflow-continue 恢复"]
+```
+
+</details>
+
+---
+
+### spec — 规范驱动开发流水线
+
+> **适用场景**：需要需求 → 设计 → 实现的结构化功能开发。
+
+受 [OpenSpec OPSX 工作流](https://github.com/Fission-AI/OpenSpec) 启发，该流水线涵盖七个步骤 —— 从提议到归档。每一步产出构件后自动流入下一步，并在每个关口自动验证。
+
+```mermaid
+flowchart LR
+    P["1. Propose<br/>需求分析"] --> S["2. Specs<br/>规格定义"]
+    S --> D["3. Design<br/>技术设计"]
+    D --> T["4. Tasks<br/>任务拆解"]
+    T --> I["5. Implement<br/>代码实现"]
+    I --> V["6. Verify<br/>验收验证"]
+    V --> A["7. Archive<br/>归档总结"]
+    A --> Done(["完成 🎉"])
+
+    I -.->|"审查不通过"| I
+    V -.->|"测试失败"| I
+```
+
+**各步骤产出的构件：**
+
+| 步骤      | 产出文件                                    | 用途                    |
+| ------- | --------------------------------------- | --------------------- |
+| Propose | `proposal.md`                           | 为什么做、做什么、验收标准          |
+| Specs   | `specs.md`                              | Delta 规格（ADDED / MODIFIED / REMOVED） |
+| Design  | `design.md`                             | 架构设计、数据流、文件变更清单       |
+| Tasks   | `tasks.md`                              | 可勾选的实现任务列表             |
+| Implement | —（代码修改）                               | 逐个任务实现                 |
+| Verify  | `verification.md`                       | 验收报告                   |
+| Archive | `summary.md`                            | 变更总结                   |
+
+所有构件统一存储在 `.opencode/ralph-flow/artifacts/` 目录下。
+
+---
+
+## 🛠️ 自定义工作流
+
+在 `.opencode/ralph-flow/workflows/` 目录下创建 `.yaml` 文件即可定义自己的工作流。
+
+### 结构示例
 
 ```yaml
-manual_phase: analyze.do, execute.check
+manual_phase:                     # 可选：逗号分隔的 "步骤ID.阶段"，需要用户手动继续
 
 steps:
   - id: analyze
-    desc: 任务分析
-    do: 分析用户需求，创建设计文档
+    desc: 需求分析
+    do: 分析用户需求并输出设计文档
     input: 用户需求描述
-    output: design.md, task.md
-    check: 验证设计文档是否清晰完整
-    on_pass: execute
-    on_fail: analyze
-    max_fail_count: 5
+    output: design.md
+    check: 验证设计文档是否完整、技术方案是否合理
+    on_pass: execute              # 检查通过后执行的下一步
+    on_fail: analyze              # 检查失败后进入的步骤
+    max_fail_count: 3
 
   - id: execute
     desc: 代码开发
     do: 根据设计文档实现代码
-    input: design.md 和 task.md
-    output: 开发总结报告
-    check: 验证代码实现是否符合设计
+    input: design.md
+    output: 可工作的代码
+    check: 运行测试并验证实现
     on_pass: done
-    on_fail: problem_fix
-    max_fail_count: 5
-
-  - id: problem_fix
-    desc: 问题修复
-    do: 分析并修复检查失败的问题
-    input: 失败报告
-    output: 修复总结报告
-    check: 运行单元测试验证修复
-    on_pass: execute
-    on_fail: problem_fix
+    on_fail: execute
     max_fail_count: 5
 ```
 
 ### 步骤字段说明
 
-| 字段               | 类型     | 必填  | 说明                        |
-| ---------------- | ------ | --- | ------------------------- |
-| `id`             | string | ✅   | 步骤唯一标识                    |
-| `desc`           | string | ✅   | 步骤描述                      |
-| `do`             | string | ✅   | 任务执行提示词                   |
-| `input`          | string | ✅   | 预期输入说明                    |
-| `output`         | string | ✅   | 预期输出说明                    |
-| `check`          | string | ✅   | 验证标准                      |
-| `on_pass`        | string | ✅   | 通过后的下一步（步骤 id 或 `"done"`） |
-| `on_fail`        | string | ✅   | 失败后的下一步（步骤 id）            |
-| `max_fail_count` | number | ✅   | 最大失败次数                    |
+| 字段               | 必填  | 说明                        |
+| ---------------- | --- | ------------------------- |
+| `id`             | ✅   | 步骤唯一标识                    |
+| `desc`           | ✅   | 步骤描述                      |
+| `do`             | ✅   | 任务执行提示词                   |
+| `input`          | ✅   | 预期输入说明                    |
+| `output`         | ✅   | 预期输出说明                    |
+| `check`          | ✅   | 验证标准                      |
+| `on_pass`        | ✅   | 通过后的下一步（步骤 id 或 `"done"` 表示完成） |
+| `on_fail`        | ✅   | 失败后的下一步（步骤 id）            |
+| `max_fail_count` | ✅   | 最大失败次数（每个步骤独立）            |
 
 ### 完成标记
 
-| 阶段  | 标记                                     | 说明   |
-| --- | -------------------------------------- | ---- |
-| 执行  | `<promise>done</promise>`              | 任务完成 |
-| 检查  | `<promise-check>true</promise-check>`  | 验证通过 |
-| 检查  | `<promise-check>false</promise-check>` | 验证失败 |
+AI 通过 XML 风格的标记来标识完成状态：
 
-> **注意**：标记不区分大小写，允许空格。`<promise>DONE</promise>` 是有效的。
+| 阶段      | 标记                                       | 说明      |
+| ------- | ---------------------------------------- | ------- |
+| DO 执行阶段 | `<promise>done</promise>`                | 任务完成    |
+| CHECK 检查阶段 | `<promise-check>true</promise-check>`    | 验证通过    |
+| CHECK 检查阶段 | `<promise-check>false</promise-check>`   | 验证未通过   |
+
+> 标记**不区分大小写**，允许空格。`<promise>DONE</promise>` 同样有效。
 
 ### 手动阶段
 
-指定需要手动继续的阶段：
+在 `manual_phase` 中指定需要人工确认的阶段：
 
 ```yaml
 manual_phase: analyze.do, execute.check
 ```
 
-此列表中的阶段在会话空闲时**不会**自动继续。
+列入该列表的阶段，AI 完成工作后**不会自动继续**——需要你手动执行 `/ralphflow-continue`。
 
-## 项目结构
+---
+
+## ⚙️ 工作原理
+
+### 核心循环
+
+```mermaid
+flowchart TD
+    Start["执行 /ralphflow-start"] --> State["插件创建工作流状态"]
+    State --> DoPrompt["插件注入 DO 阶段提示词"]
+    DoPrompt --> AI["AI 执行任务"]
+    AI -->|"检测到 done 标记"| DoneTag["session.idle 触发<br/>插件检测到完成标记"]
+    DoneTag --> CheckPrompt["插件注入 CHECK 阶段提示词"]
+    CheckPrompt --> AICheck["AI 验证执行结果"]
+    AICheck -->|"检查通过"| Pass["插件读取 on_pass"]
+    AICheck -->|"检查不通过"| Fail["插件递增失败计数"]
+    Pass -->|"on_pass: done"| Complete["工作流标记完成<br/>生成报告"]
+    Pass -->|"下一步骤 id"| DoPrompt
+    Fail -->|"未超限"| DoPrompt
+    Fail -->|"已达上限"| Pause["工作流暂停<br/>等待 /ralphflow-continue"]
+    Pause -->|用户恢复| DoPrompt
+```
+
+### 多步骤流转
+
+检查通过时，插件读取 `on_pass` 跳转到下一步的 DO 阶段；检查失败时读取 `on_fail` —— 可以重试当前步骤（携带失败上下文），也可以跳转到专门的修复步骤。
+
+### 事件驱动
+
+插件通过 `session.idle` 事件监听 AI 响应，自动检测完成标记并推动工作流前进。`session.deleted` 事件会自动将工作流标记为暂停，方便后续恢复。
+
+---
+
+## 📁 文件结构
 
 所有生成文件统一放在 `.opencode/ralph-flow/` 目录下：
 
 ```
 .opencode/
-└── ralph-flow/            # 插件生成文件统一目录
-    ├── ralph-flow.local.md    # 工作流状态文件
-    ├── workflows/             # 工作流定义
-    │   └── *.yaml
-    ├── logs/                  # 执行日志
-    │   ├── execution.log      # 主执行日志（JSON Lines）
-    │   ├── step-*.log         # 分步骤日志（JSON Lines）
-    │   └── final-report.md    # 工作流完成报告
-    └── package.json           # 依赖文件
+└── ralph-flow/                    # 插件根目录
+    ├── ralph-flow.local.md        # 工作流状态（markdown frontmatter）
+    ├── workflows/                 # 自定义工作流 YAML 定义
+    │   ├── loop.yaml              # 内置：自动循环
+    │   └── spec.yaml              # 内置：规范驱动流水线
+    ├── artifacts/                 # spec 工作流生成的构件
+    │   ├── proposal.md
+    │   ├── specs.md
+    │   ├── design.md
+    │   ├── tasks.md
+    │   ├── verification.md
+    │   └── summary.md
+    ├── logs/                      # 执行日志（JSON Lines）
+    │   ├── execution.log
+    │   ├── step-*.log
+    │   └── final-report.md
+    └── package.json               # 自动管理的依赖文件
 ```
 
-## 配置说明
-
-### 状态文件
-
-工作流状态存储在 `.opencode/ralph-flow/ralph-flow.local.md`：
-
-```markdown
 ---
-active: true
-workflow_name: loop
-current_step: loop
-current_phase: do
-fail_count: 0
-user_task: 构建一个带认证的 REST API
----
-```
 
-### 日志
+## 📟 命令参考
 
-日志以 JSON Lines 格式存储在 `.opencode/ralph-flow/logs/`：
+| Slash 命令              | 工具                      | 功能         |
+| --------------------- | ----------------------- | ---------- |
+| `/ralphflow-start`    | `ralphflow-start`       | 启动工作流      |
+| `/ralphflow-continue` | `ralphflow-continue`    | 恢复暂停的工作流   |
+| `/ralphflow-cancel`   | `ralphflow-cancel`      | 取消并生成报告    |
+| `/ralphflow-status`   | `ralphflow-status`      | 查看当前工作流状态  |
+| `/ralphflow-list`     | `ralphflow-list`        | 列出可用工作流    |
 
-```json
-{"ts":"2026-05-25T10:30:00.000Z","level":"info","event":"workflow_start","workflow":"loop"}
-{"ts":"2026-05-25T10:30:05.000Z","level":"info","event":"step_start","step":"loop","phase":"do"}
-{"ts":"2026-05-25T10:35:00.000Z","level":"info","event":"done_detected","step":"loop","phase":"do"}
-{"ts":"2026-05-25T10:35:10.000Z","level":"info","event":"check_result","step":"loop","phase":"check","passed":true}
-```
+### 日志事件
 
-#### 日志事件类型
+事件以 JSON Lines 格式记录到 `.opencode/ralph-flow/logs/execution.log`：
 
 | 事件                     | 说明              |
 | ---------------------- | --------------- |
@@ -306,44 +318,16 @@ user_task: 构建一个带认证的 REST API
 | `workflow_resumed`     | 工作流被用户恢复        |
 | `workflow_cancelled`   | 工作流被用户取消        |
 
-### 最终报告
+---
 
-工作流完成时，会在 `.opencode/ralph-flow/logs/final-report.md` 生成最终报告：
+## 📝 开源协议
 
-```markdown
-# 工作流执行报告
-
-## 执行摘要
-
-- **工作流**: loop
-- **状态**: completed
-- **总步骤数**: 3
-- **失败次数**: 1
-- **总耗时**: 25分钟
-
-## 步骤执行情况
-
-### 1. loop (do) ✓
-- 状态：通过
-- 耗时：5分钟
-
-### 2. loop (check) ✓
-- 状态：通过
-- 耗时：5分钟
-
-## 建议
-
-（由 LLM 生成）
-```
-
-## 开源协议
-
-本项目基于 MIT 协议开源 - 详见 [LICENSE](LICENSE) 文件。
+MIT — 详见 [LICENSE](LICENSE) 文件。
 
 ---
 
 <div align="center">
 
-**[⬆ 回到顶部](#ralph-flow)**
+**为 [opencode](https://opencode.ai) 构建** · [报告问题](https://github.com/534529531/ralph-flow/issues)
 
 </div>

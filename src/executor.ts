@@ -174,21 +174,135 @@ export function extractFailureReason(text: string): string {
     .trim();
 }
 
+async function routeCheckResult(
+  client: OpencodeClient,
+  sessionId: string,
+  directory: string,
+  workflow: WorkflowDef,
+  state: RalphFlowState,
+  step: StepDef,
+  checkResponse: string,
+  currentFailCount: number,
+  responseTimestamp: string
+): Promise<boolean> {
+  const checkResult = detectCheckTag(checkResponse);
+  if (checkResult === null) return false;
+
+  logCheckResult(directory, step.id, checkResult);
+
+  const checkFailCount = checkResult ? currentFailCount : currentFailCount + 1;
+  const checkRecord = createStepRecord(step.id, "check", checkResult ? "passed" : "failed", checkFailCount, undefined, responseTimestamp);
+  stepRecords.push(checkRecord);
+
+  if (checkResult) {
+    if (step.on_pass === "done") {
+      markCompleted(directory, { ...state, current_step: step.id, current_phase: "check", fail_count: currentFailCount });
+      logWorkflowEnd(directory, state.workflow_name);
+      generateCompletionReport(directory, state.workflow_name, stepRecords);
+      stepRecords = [];
+      currentStepStartTime = null;
+      await injectPrompt(client, sessionId, "## Workflow Completed\n\nAll steps have passed verification. The workflow has been marked as completed.", directory, true);
+    } else {
+      const nextStep = getStep(workflow, step.on_pass);
+      if (nextStep) {
+        writeState(directory, { ...state, current_step: nextStep.id, current_phase: "do", fail_count: 0 });
+        logStepStart(directory, nextStep.id, "do");
+        await processDoCheckCycle(client, sessionId, directory, workflow, state, nextStep, 0);
+      }
+    }
+  } else {
+    const newFailCount = currentFailCount + 1;
+    logFailCountIncrement(directory, step.id, newFailCount);
+
+    if (newFailCount >= step.max_fail_count) {
+      markPaused(directory, { ...state, fail_count: newFailCount });
+      logWorkflowPaused(directory, state.workflow_name, step.id, newFailCount);
+      const pauseMsg = `## Workflow Paused
+
+**Step** \`${step.id}\` - ${step.desc} failed check after ${newFailCount}/${step.max_fail_count} attempts.
+
+### Next Steps
+1. Review the failure reason above and fix the issues
+2. Run \`/ralphflow continue\` to retry from the current step
+3. Or run \`/ralphflow cancel\` to stop the workflow`;
+      await injectPrompt(client, sessionId, pauseMsg, directory, true);
+    } else {
+      const nextStep = getStep(workflow, step.on_fail);
+      if (nextStep) {
+        const failureReason = extractFailureReason(checkResponse);
+        writeState(directory, { ...state, current_step: nextStep.id, current_phase: "do", fail_count: newFailCount });
+        logStepStart(directory, nextStep.id, "do");
+        await processDoCheckCycle(client, sessionId, directory, workflow, state, nextStep, newFailCount, failureReason);
+      }
+    }
+  }
+  return true;
+}
+
+async function processDoCheckCycle(
+  client: OpencodeClient,
+  sessionId: string,
+  directory: string,
+  workflow: WorkflowDef,
+  state: RalphFlowState,
+  step: StepDef,
+  failCount: number,
+  retryContext?: string
+): Promise<void> {
+  const cycleStart = new Date().toISOString();
+
+  const doPrompt = buildDoPrompt(step, state.user_task, retryContext);
+  const doResponse = await injectPrompt(client, sessionId, doPrompt, directory);
+
+  if (doResponse === null || !detectDoneTag(doResponse)) return;
+
+  const doRecord = createStepRecord(step.id, "do", "passed", 0, undefined, cycleStart);
+  stepRecords.push(doRecord);
+
+  const checkState: RalphFlowState = {
+    ...state,
+    current_step: step.id,
+    current_phase: "check",
+    fail_count: failCount,
+  };
+  writeState(directory, checkState);
+  logStepStart(directory, step.id, "check");
+
+  const checkPrompt = buildCheckPrompt(step, state.user_task);
+  const checkResponse = await injectPrompt(client, sessionId, checkPrompt, directory);
+
+  if (checkResponse === null) return;
+
+  await routeCheckResult(client, sessionId, directory, workflow, state, step, checkResponse, failCount, cycleStart);
+}
+
 export async function injectPrompt(
   client: OpencodeClient,
   sessionId: string,
   prompt: string,
-  directory: string
-): Promise<void> {
+  directory: string,
+  noReply: boolean = false
+): Promise<string | null> {
   try {
-    await client.session.prompt({
+    const result = await client.session.prompt({
       path: { id: sessionId },
       body: {
         parts: [{ type: "text", text: prompt }],
+        noReply,
       },
     });
+    if (!noReply) {
+      const data = result as { data?: { parts?: Array<{ type: string; text?: string }> } };
+      const parts = data?.data?.parts ?? [];
+      return parts
+        .filter((p) => p.type === "text")
+        .map((p) => p.text ?? "")
+        .join("\n") || null;
+    }
+    return null;
   } catch (error) {
     logError(directory, "inject_prompt_failed", error);
+    return null;
   }
 }
 
@@ -216,112 +330,74 @@ export async function handleSessionIdle(
     if (state.current_phase === "do") {
       if (detectDoneTag(responseText)) {
         logDoneDetected(directory, state.current_step);
-      
-      // 创建do阶段完成记录
-      const doRecord = createStepRecord(state.current_step, "do", "passed", 0, undefined, currentStepStartTime || now);
-      stepRecords.push(doRecord);
-      
-      const newState: RalphFlowState = {
-        ...state,
-        current_phase: "check",
-        fail_count: 0,
-      };
-      writeState(directory, newState);
-      logStepStart(directory, state.current_step, "check");
-      
-      // 设置check阶段开始时间
-      currentStepStartTime = now;
-      
-      const checkPrompt = buildCheckPrompt(currentStep, state.user_task);
-      await injectPrompt(client, sessionId, checkPrompt, directory);
-      return;
-    }
-  } else {
-    // 检查是否在check阶段检测到done标记
-    if (detectDoneTag(responseText)) {
-      // 忽略done标记，要求LLM重新输出check结果
-      const checkPrompt = buildCheckPrompt(currentStep, state.user_task) + "\n\n请输出check结果，不要输出done标记。";
-      await injectPrompt(client, sessionId, checkPrompt, directory);
-      return;
-    }
-    
-    const checkResult = detectCheckTag(responseText);
-    if (checkResult !== null) {
-      logCheckResult(directory, state.current_step, checkResult);
-      
-      // 创建check阶段记录
-      const checkFailCount = checkResult ? state.fail_count : state.fail_count + 1;
-      const checkRecord = createStepRecord(state.current_step, "check", checkResult ? "passed" : "failed", checkFailCount, undefined, currentStepStartTime || now);
-      stepRecords.push(checkRecord);
-      
-      if (checkResult) {
-        if (currentStep.on_pass === "done") {
-          markCompleted(directory, state);
-          logWorkflowEnd(directory, state.workflow_name);
-          // 生成最终报告
-          generateCompletionReport(directory, state.workflow_name, stepRecords);
-          // 重置记录数组
-          stepRecords = [];
-          currentStepStartTime = null;
-          return;
-        }
-        const nextStep = getStep(workflow, currentStep.on_pass);
-        if (nextStep) {
-          const newState: RalphFlowState = {
-            ...state,
-            current_step: nextStep.id,
-            current_phase: "do",
-            fail_count: 0,
-          };
-          writeState(directory, newState);
-          logStepStart(directory, nextStep.id, "do");
-          
-          const doPrompt = buildDoPrompt(nextStep, state.user_task);
-          await injectPrompt(client, sessionId, doPrompt, directory);
-        }
-      } else {
-        const newFailCount = state.fail_count + 1;
-        logFailCountIncrement(directory, state.current_step, newFailCount);
-        
-        if (newFailCount >= currentStep.max_fail_count) {
-          const pausedState: RalphFlowState = {
-            ...state,
-            fail_count: newFailCount,
-          };
-          markPaused(directory, pausedState);
-          logWorkflowPaused(directory, state.workflow_name, state.current_step, newFailCount);
-          return;
-        }
-        const nextStep = getStep(workflow, currentStep.on_fail);
-        if (nextStep) {
-          const failureReason = extractFailureReason(responseText);
-          const newState: RalphFlowState = {
-            ...state,
-            current_step: nextStep.id,
-            current_phase: "do",
-            fail_count: newFailCount,
-          };
-          writeState(directory, newState);
-          logStepStart(directory, nextStep.id, "do");
-          
-          const doPrompt = buildDoPrompt(nextStep, state.user_task, failureReason);
-          await injectPrompt(client, sessionId, doPrompt, directory);
+
+        const doRecord = createStepRecord(state.current_step, "do", "passed", 0, undefined, currentStepStartTime || now);
+        stepRecords.push(doRecord);
+
+        const newState: RalphFlowState = {
+          ...state,
+          current_phase: "check",
+          fail_count: 0,
+        };
+        writeState(directory, newState);
+        logStepStart(directory, state.current_step, "check");
+
+        currentStepStartTime = now;
+
+        const checkPrompt = buildCheckPrompt(currentStep, state.user_task);
+        const checkResponse = await injectPrompt(client, sessionId, checkPrompt, directory);
+
+        if (checkResponse !== null) {
+          const handled = await routeCheckResult(client, sessionId, directory, workflow, state, currentStep, checkResponse, state.fail_count, currentStepStartTime || now);
+          if (handled) return;
         }
       }
       return;
     }
-  }
 
-  // 如果最后一条助手消息是工作流信息查询结果（状态/列表等），不自动注入继续提示词
-  if (isWorkflowInfoMessage(responseText)) {
-    return;
-  }
+    // check 阶段
+    const checkResult = detectCheckTag(responseText);
+    if (checkResult !== null) {
+      const handled = await routeCheckResult(client, sessionId, directory, workflow, state, currentStep, responseText, state.fail_count, currentStepStartTime || now);
+      if (handled) return;
+    }
 
-  if (!isManualPhase(workflow, state.current_step, state.current_phase)) {
-    const idlePrompt = buildIdlePrompt(currentStep, state.user_task);
-    await injectPrompt(client, sessionId, idlePrompt, directory);
-  }
+    if (detectDoneTag(responseText)) {
+      const checkPrompt = buildCheckPrompt(currentStep, state.user_task) + "\n\n请输出check结果，不要输出done标记。";
+      const reCheckResponse = await injectPrompt(client, sessionId, checkPrompt, directory);
+      if (reCheckResponse !== null) {
+        const handled = await routeCheckResult(client, sessionId, directory, workflow, state, currentStep, reCheckResponse, state.fail_count, now);
+        if (handled) return;
+      }
+      return;
+    }
+
+    if (isWorkflowInfoMessage(responseText)) {
+      return;
+    }
+
+    if (!isManualPhase(workflow, state.current_step, state.current_phase)) {
+      const idlePrompt = buildIdlePrompt(currentStep, state.user_task);
+      const idleResponse = await injectPrompt(client, sessionId, idlePrompt, directory);
+      // 立即处理AI响应中的标记，避免session.idle被丢弃后丢失
+      if (idleResponse !== null) {
+        await routeCheckResult(client, sessionId, directory, workflow, state, currentStep, idleResponse, state.fail_count, currentStepStartTime || now);
+      }
+    }
   } finally {
     isProcessingIdle = false;
   }
+}
+
+export function handleContinue(
+  directory: string,
+  workflow: WorkflowDef
+): string {
+  const state = readState(directory);
+  if (!state || !state.active) return "No active workflow to continue.";
+
+  const step = getStep(workflow, state.current_step);
+  if (!step) return `Step "${state.current_step}" not found.`;
+
+  return buildContinuePrompt(state, step);
 }
