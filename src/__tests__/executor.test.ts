@@ -195,6 +195,19 @@ describe("buildIdlePrompt", () => {
     const prompt = buildIdlePrompt(makeStep());
     expect(prompt).not.toContain("用户需求");
   });
+
+  it("should include done tag hint for do phase", () => {
+    const prompt = buildIdlePrompt(makeStep(), "task", "do");
+    expect(prompt).toContain("<promise>done</promise>");
+    expect(prompt).not.toContain("<promise-check>");
+  });
+
+  it("should include check tag hint for check phase", () => {
+    const prompt = buildIdlePrompt(makeStep(), "task", "check");
+    expect(prompt).toContain("<promise-check>true</promise-check>");
+    expect(prompt).toContain("<promise-check>false</promise-check>");
+    expect(prompt).not.toContain("<promise>done</promise>");
+  });
 });
 
 describe("isWorkflowInfoMessage", () => {

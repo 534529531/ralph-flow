@@ -6,7 +6,6 @@ tsconfig.json
 *.tgz
 .opencode/
 package-lock.json
-workflows/
 node_modules/
 ralph-flow.md
 vitest.config.ts

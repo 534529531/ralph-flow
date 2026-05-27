@@ -12,7 +12,23 @@ export const RALPH_COMMANDS: Record<string, RalphCommandDef> = {
 如果用户只提供了部分信息（例如只说了任务但没选工作流，或只说了工作流名但没描述任务），调用 tool 时传入已有参数，缺失的部分 tool 会自动提示补充。
 如果用户完全没有指定任何信息，则先询问用户选择哪个工作流以及执行什么任务。
 
-工作流名称可用 ralphflow-list 查看。`,
+工作流名称可用 ralphflow-list 查看。
+
+## 工作流机制
+
+工作流每个步骤包含两个阶段：
+
+**do 阶段**（执行）：
+- 执行当前步骤描述的任务
+- 完成后输出 \`<promise>done</promise>\` 标记
+- 系统自动进入 check 阶段
+
+**check 阶段**（检查）：
+- 检查任务是否按要求完成
+- 通过：输出 \`<promise-check>true</promise-check>\`，进入下一步骤
+- 不通过：输出 \`<promise-check>false</promise-check>\` 并说明原因，重新执行 do 阶段
+
+**重要**：你必须在完成任务后输出对应标记，否则系统无法推进工作流。`,
   },
   "ralphflow-continue": {
     description: "Continue a paused workflow",

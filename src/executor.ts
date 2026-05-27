@@ -141,11 +141,16 @@ export function buildContinuePrompt(state: RalphFlowState, step: StepDef): strin
   }
 }
 
-export function buildIdlePrompt(step: StepDef, userTask?: string): string {
+export function buildIdlePrompt(step: StepDef, userTask?: string, phase?: "do" | "check"): string {
   const parts = [`请继续完成当前任务。`];
   parts.push(`当前步骤：${step.id} - ${step.desc}`);
   if (userTask) {
     parts.push(`用户需求：${userTask}`);
+  }
+  if (phase === "check") {
+    parts.push(`\n检查完成后请输出 \`<promise-check>true</promise-check>\`（通过）或 \`<promise-check>false</promise-check>\`（不通过）。`);
+  } else {
+    parts.push(`\n完成后请输出 \`<promise>done</promise>\` 标记。`);
   }
   return parts.join("\n");
 }
@@ -377,7 +382,7 @@ export async function handleSessionIdle(
     }
 
     if (!isManualPhase(workflow, state.current_step, state.current_phase)) {
-      const idlePrompt = buildIdlePrompt(currentStep, state.user_task);
+      const idlePrompt = buildIdlePrompt(currentStep, state.user_task, state.current_phase);
       const idleResponse = await injectPrompt(client, sessionId, idlePrompt, directory);
       // 立即处理AI响应中的标记，避免session.idle被丢弃后丢失
       if (idleResponse !== null) {
