@@ -156,10 +156,10 @@ export function listWorkflows(directory: string): Array<{ name: string; desc: st
             const content = readFileSync(join(dir, file), "utf-8");
             const parsed = yaml.load(content) as any;
             const name = file.replace(/\.(yaml|yml)$/, "");
-            const firstStep = parsed.steps?.[0];
+            const desc = parsed.description || parsed.steps?.[0]?.desc || name;
             workflows.set(name, {
               name,
-              desc: firstStep?.desc || name,
+              desc,
             });
           } catch {}
         }

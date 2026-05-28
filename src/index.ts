@@ -34,6 +34,9 @@ const autoCleanup = (projectDir: string) => {
 };
 
 const RalphFlowPlugin: Plugin = async ({ project, client, $, directory, worktree }) => {
+  // 插件初始化时立即执行 setup，确保 agent 配置文件在会话创建前就存在
+  ensureSetup(directory);
+
   return {
     config: async (input: Config) => {
       input.command = input.command ?? {};
@@ -41,6 +44,19 @@ const RalphFlowPlugin: Plugin = async ({ project, client, $, directory, worktree
         if (!input.command[name]) {
           input.command[name] = def;
         }
+      }
+
+      // 动态注册 ralph-check agent，确保第一次会话就能识别
+      input.agent = input.agent ?? {};
+      if (!input.agent["ralph-check"]) {
+        input.agent["ralph-check"] = {
+          description: "Ralph Flow check phase agent - read-only verification",
+          mode: "all",
+          permission: {
+            edit: "deny",
+            bash: "allow",
+          },
+        };
       }
     },
 

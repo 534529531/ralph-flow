@@ -341,7 +341,7 @@ async function adversarialCheck(
         path: { id: checkSessionId },
         body: {
           model: adversarialConfig?.model,
-          agent: adversarialConfig?.agent || "plan",
+          agent: adversarialConfig?.agent || "ralph-check",
           system: adversarialConfig?.system_prompt || DEFAULT_ADVERSARIAL_SYSTEM_PROMPT,
           parts: [{ type: "text", text: checkPrompt }],
         },

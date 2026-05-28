@@ -276,6 +276,22 @@ sequenceDiagram
 - **Strict verification** — checks against criteria only, not against what the AI "intended" to do
 - **Clean context** — no accumulated context that could influence the judgment
 
+**Check session permissions:**
+
+The CHECK phase uses the `ralph-check` agent by default, with the following permissions:
+
+| Permission | Config | Description |
+|------------|--------|-------------|
+| `edit` | `deny` | Prevents the checker from modifying code |
+| `bash` | `allow` | Allows running verification commands (tests, file checks, etc.) |
+
+The plugin automatically registers the `ralph-check` agent on startup — no manual configuration needed. To override, specify in your workflow YAML:
+
+```yaml
+adversarial_check:
+  agent: "build"  # Use a different agent
+```
+
 **What the user sees:**
 - Check criteria displayed in the main session before verification begins
 - Check result (pass/fail with reasons) injected back into the main session
