@@ -4,17 +4,15 @@ import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import yaml from "js-yaml";
 import { RALPH_COMMANDS } from "./commands.js";
-import { readState, writeState, clearState, markCancelled } from "./state.js";
+import { readState, writeState, clearState, markCancelled, pushState, popState } from "./state.js";
 import { setup } from "./setup.js";
-import { handleSessionIdle, handleContinue, getStep, buildDoPrompt, getStepRecords, resetStepRecords } from "./executor.js";
+import { handleSessionIdle, handleContinue, getStep, buildDoPrompt, buildSubWorkflowUserTask, getStepRecords, resetStepRecords } from "./executor.js";
+import { loadWorkflow, listWorkflows } from "./workflow-loader.js";
+import { isSubWorkflowStep } from "./types.js";
 import { logWorkflowStart, logWorkflowCancelled, logWorkflowResumed, logStepStart, logError } from "./logger.js";
 import { generateCancellationReport } from "./report.js";
-import type { WorkflowDef, RalphFlowState } from "./types.js";
+import type { WorkflowDef, RalphFlowState, StepDef, NormalStepDef } from "./types.js";
 import { RALPH_FLOW_DIR } from "./types.js";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PLUGIN_ROOT = join(__dirname, "..");
-const PLUGIN_WORKFLOWS_DIR = join(PLUGIN_ROOT, "workflows");
 
 const setupDirs = new Set<string>();
 
@@ -23,66 +21,6 @@ function ensureSetup(directory: string): void {
     setup(directory);
     setupDirs.add(directory);
   }
-}
-
-function parseWorkflowFile(filePath: string, workflowName: string): WorkflowDef | null {
-  try {
-    const content = readFileSync(filePath, "utf-8");
-    const parsed = yaml.load(content) as any;
-    return {
-      name: workflowName,
-      manual_phase: (parsed.manual_phase || "").split(",").map((s: string) => s.trim()).filter(Boolean),
-      steps: parsed.steps || [],
-    };
-  } catch {
-    return null;
-  }
-}
-
-function loadWorkflow(directory: string, workflowName: string): WorkflowDef | null {
-  const projectPath = join(directory, ".opencode", RALPH_FLOW_DIR, "workflows", `${workflowName}.yaml`);
-  if (existsSync(projectPath)) {
-    const result = parseWorkflowFile(projectPath, workflowName);
-    if (result) return result;
-  }
-
-  const pluginPath = join(PLUGIN_WORKFLOWS_DIR, `${workflowName}.yaml`);
-  if (existsSync(pluginPath)) {
-    const result = parseWorkflowFile(pluginPath, workflowName);
-    if (result) return result;
-  }
-
-  return null;
-}
-
-function listWorkflows(directory: string): Array<{ name: string; desc: string }> {
-  const workflows: Map<string, { name: string; desc: string }> = new Map();
-
-  const scanDir = (dir: string) => {
-    if (!existsSync(dir)) return;
-    try {
-      const files = readdirSync(dir);
-      for (const file of files) {
-        if (file.endsWith(".yaml") || file.endsWith(".yml")) {
-          try {
-            const content = readFileSync(join(dir, file), "utf-8");
-            const parsed = yaml.load(content) as any;
-            const name = file.replace(/\.(yaml|yml)$/, "");
-            const firstStep = parsed.steps?.[0];
-            workflows.set(name, {
-              name,
-              desc: firstStep?.desc || name,
-            });
-          } catch {}
-        }
-      }
-    } catch {}
-  };
-
-  scanDir(PLUGIN_WORKFLOWS_DIR);
-  scanDir(join(directory, ".opencode", RALPH_FLOW_DIR, "workflows"));
-
-  return Array.from(workflows.values());
 }
 
 const autoCleanup = (projectDir: string) => {
@@ -150,7 +88,7 @@ Use /ralphflow continue to resume, or /ralphflow cancel to cancel it first.`;
           autoCleanup(directory);
 
           // 重置步骤记录
-          resetStepRecords();
+          resetStepRecords(context.sessionID);
 
           const newState: RalphFlowState = {
             active: true,
@@ -165,10 +103,70 @@ Use /ralphflow continue to resume, or /ralphflow cancel to cancel it first.`;
           logWorkflowStart(directory, workflow!);
           logStepStart(directory, firstStep.id, "do");
 
+          if (isSubWorkflowStep(firstStep)) {
+            const subUserTask = buildSubWorkflowUserTask(firstStep, task!);
+            pushState(directory, newState);
+
+            const subWorkflow = loadWorkflow(directory, firstStep.workflow);
+            if (!subWorkflow) {
+              popState(directory);
+              return `子工作流 "${firstStep.workflow}" 未找到。`;
+            }
+
+            const subFirstStep = subWorkflow.steps[0];
+            if (!subFirstStep) {
+              popState(directory);
+              return `子工作流 "${firstStep.workflow}" 没有步骤。`;
+            }
+
+            const subState: RalphFlowState = {
+              active: true,
+              workflow_name: firstStep.workflow,
+              current_step: subFirstStep.id,
+              current_phase: "do",
+              fail_count: 0,
+              user_task: subUserTask,
+              paused: false,
+            };
+            writeState(directory, subState);
+            logStepStart(directory, subFirstStep.id, "do");
+
+            const stepsOverview = workflowDef.steps.map((s, i) =>
+              `  ${i + 1}. **${s.id}**: ${s.desc}${isSubWorkflowStep(s) ? ` (子工作流: ${s.workflow})` : ""}`
+            ).join("\n");
+
+            if (isSubWorkflowStep(subFirstStep)) {
+              return `Workflow "${workflow!}" started.
+
+Task: ${task!}
+
+## Steps Overview
+${stepsOverview}
+
+Starting with sub-workflow: **${firstStep.id}** - ${firstStep.desc} → ${firstStep.workflow}
+
+Sub-workflow "${firstStep.workflow}" first step is also a sub-workflow. Please run the task manually.`;
+            }
+
+            const doPrompt = buildDoPrompt(subFirstStep as NormalStepDef, subUserTask);
+            return `Workflow "${workflow!}" started.
+
+Task: ${task!}
+
+## Steps Overview
+${stepsOverview}
+
+Starting with sub-workflow: **${firstStep.id}** - ${firstStep.desc} → ${firstStep.workflow}
+
+---
+
+${doPrompt}`;
+          }
+
           const doPrompt = buildDoPrompt(firstStep, task!);
 
           const stepsOverview = workflowDef.steps.map((s, i) =>
-            `  ${i + 1}. **${s.id}**: ${s.desc}`
+            `  ${i + 1}. **${s.id}**: ${s.desc}${isSubWorkflowStep(s) ? ` (子工作流: ${s.workflow})` : ""}`
           ).join("\n");
 
           return `Workflow "${workflow!}" started.
@@ -202,24 +200,37 @@ ${doPrompt}`;
           }
 
           // 重置步骤记录，避免与历史记录重复
-          resetStepRecords();
+          resetStepRecords(context.sessionID);
+
+          const previousFailCount = state.fail_count;
+          const previousFailureReason = state.last_failure_reason;
 
           const newState: RalphFlowState = {
             ...state,
             fail_count: 0,
             paused: false,
+            last_failure_reason: undefined,
           };
           writeState(directory, newState);
           logWorkflowResumed(directory, state.workflow_name, state.current_step);
 
-          return handleContinue(directory, workflow);
+          let resumeMsg = "";
+          if (previousFailCount > 0) {
+            resumeMsg = `## Workflow Resumed\n\nPrevious attempts: ${previousFailCount}`;
+            if (previousFailureReason) {
+              resumeMsg += `\n\n### Last Failure Reason\n${previousFailureReason}`;
+            }
+            resumeMsg += "\n\n---\n\n";
+          }
+
+          return resumeMsg + handleContinue(directory, workflow);
         },
       }),
 
       "ralphflow-cancel": tool({
         description: "Cancel the current workflow",
         args: {},
-        async execute() {
+        async execute(_, context) {
           ensureSetup(directory);
           const state = readState(directory);
           if (!state || !state.active) {
@@ -229,9 +240,9 @@ ${doPrompt}`;
           markCancelled(directory, state);
           logWorkflowCancelled(directory, state.workflow_name);
           // 生成取消报告
-          const stepRecords = getStepRecords();
+          const stepRecords = getStepRecords(context.sessionID);
           generateCancellationReport(directory, state.workflow_name, stepRecords);
-          resetStepRecords();
+          resetStepRecords(context.sessionID);
 
           return `Workflow "${state.workflow_name}" cancelled.`;
         },
@@ -262,8 +273,24 @@ ${doPrompt}`;
 - **Current Phase**: ${state.current_phase}
 - **Fail Count**: ${state.fail_count}`;
 
-          if (currentStep) {
+          if (state.last_failure_reason) {
             status += `
+- **Last Failure Reason**: ${state.last_failure_reason}`;
+          }
+
+          if (currentStep) {
+            if (isSubWorkflowStep(currentStep)) {
+              status += `
+
+## Current Step Details
+
+- **Description**: ${currentStep.desc}
+- **Type**: Sub-workflow
+- **Sub-workflow**: ${currentStep.workflow}
+- **Inputs**: ${currentStep.inputs ? JSON.stringify(currentStep.inputs) : "none"}
+- **Max Fail Count**: ${currentStep.max_fail_count}`;
+            } else {
+              status += `
 
 ## Current Step Details
 
@@ -273,6 +300,7 @@ ${doPrompt}`;
 - **Output**: ${currentStep.output}
 - **Check**: ${currentStep.check}
 - **Max Fail Count**: ${currentStep.max_fail_count}`;
+            }
           }
 
           return status;

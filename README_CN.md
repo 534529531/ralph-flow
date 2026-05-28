@@ -18,6 +18,7 @@
 ## ✨ 功能特性
 
 - **多步骤流水线** — 定义步骤序列，每步含执行（DO）和检查（CHECK）两个阶段
+- **独立会话验证** — CHECK 阶段使用独立会话进行审查，避免自我审查偏差，确保严格验证
 - **自动重试** — 失败步骤携带上下文自动重试，超限后暂停等待人工干预
 - **YAML 驱动** — 零代码创建工作流，仅需一个 `.yaml` 文件
 - **内置工作流** — `loop` 自动化循环、`spec` 结构化规范驱动开发
@@ -45,6 +46,7 @@
 ```bash
 git clone https://github.com/534529531/ralph-flow.git ~/.config/opencode/plugins/ralph-flow
 cd ~/.config/opencode/plugins/ralph-flow
+npm install
 npm run build
 ```
 
@@ -244,8 +246,8 @@ flowchart TD
     State --> DoPrompt["插件注入 DO 阶段提示词"]
     DoPrompt --> AI["AI 执行任务"]
     AI -->|"检测到 done 标记"| DoneTag["session.idle 触发<br/>插件检测到完成标记"]
-    DoneTag --> CheckPrompt["插件注入 CHECK 阶段提示词"]
-    CheckPrompt --> AICheck["AI 验证执行结果"]
+    DoneTag --> CheckPrompt["插件创建独立检查会话"]
+    CheckPrompt --> AICheck["独立会话验证执行结果"]
     AICheck -->|"检查通过"| Pass["插件读取 on_pass"]
     AICheck -->|"检查不通过"| Fail["插件递增失败计数"]
     Pass -->|"on_pass: done"| Complete["工作流标记完成<br/>生成报告"]
@@ -253,7 +255,37 @@ flowchart TD
     Fail -->|"未超限"| DoPrompt
     Fail -->|"已达上限"| Pause["工作流暂停<br/>等待 /ralphflow-continue"]
     Pause -->|用户恢复| DoPrompt
+    CheckPrompt -->|"检查完成"| Cleanup["检查会话自动删除"]
 ```
+
+### 独立会话验证
+
+CHECK 阶段使用**独立会话**来验证任务完成情况，避免自我审查偏差：
+
+```mermaid
+sequenceDiagram
+    participant Main as 主会话
+    participant Plugin as 插件
+    participant Check as 检查会话
+
+    Main->>Plugin: DO 阶段完成（done 标记）
+    Plugin->>Main: 展示检查标准
+    Plugin->>Check: 创建新会话，发送检查提示词
+    Check->>Check: 独立验证
+    Check->>Plugin: 返回通过/失败结果
+    Plugin->>Main: 展示检查结果
+    Plugin->>Check: 自动删除会话
+```
+
+**为什么使用独立会话？**
+- **无自我审查偏差** — 检查者没有实现过程的记忆
+- **严格验证** — 仅根据检查标准判断，不受 AI "意图" 影响
+- **干净的上下文** — 没有可能影响判断的累积上下文
+
+**用户体验：**
+- 检查开始前，主会话展示检查标准
+- 检查完成后，结果（通过/失败及原因）注入主会话
+- 失败时，失败上下文会包含在重试的 DO 阶段中
 
 ### 多步骤流转
 

@@ -3,16 +3,12 @@ import {
   buildDoPrompt,
   buildCheckPrompt,
   buildContinuePrompt,
-  buildIdlePrompt,
+  buildSubWorkflowUserTask,
   getStep,
-  getManualPhases,
-  isManualPhase,
-  isWorkflowInfoMessage,
-  extractFailureReason,
 } from "../executor.js";
-import type { WorkflowDef, StepDef, RalphFlowState } from "../types.js";
+import type { WorkflowDef, StepDef, NormalStepDef, SubWorkflowStepDef, RalphFlowState } from "../types.js";
 
-const makeStep = (overrides: Partial<StepDef> = {}): StepDef => ({
+const makeStep = (overrides: Partial<NormalStepDef> = {}): NormalStepDef => ({
   id: "test-step",
   desc: "A test step",
   do: "Perform the test task",
@@ -21,6 +17,16 @@ const makeStep = (overrides: Partial<StepDef> = {}): StepDef => ({
   check: "Verify the output is correct",
   on_pass: "done",
   on_fail: "test-step",
+  max_fail_count: 3,
+  ...overrides,
+});
+
+const makeSubWorkflowStep = (overrides: Partial<SubWorkflowStepDef> = {}): SubWorkflowStepDef => ({
+  id: "sub-step",
+  desc: "A sub-workflow step",
+  workflow: "sub-workflow",
+  on_pass: "done",
+  on_fail: "sub-step",
   max_fail_count: 3,
   ...overrides,
 });
@@ -65,38 +71,6 @@ describe("getStep", () => {
       ],
     });
     expect(getStep(wf, "step2")!.id).toBe("step2");
-  });
-});
-
-describe("getManualPhases", () => {
-  it("should return empty set for empty manual_phase", () => {
-    const wf = makeWorkflow({ manual_phase: [] });
-    expect(getManualPhases(wf).size).toBe(0);
-  });
-
-  it("should return set of manual phases", () => {
-    const wf = makeWorkflow({ manual_phase: ["check.do", "review.do"] });
-    const phases = getManualPhases(wf);
-    expect(phases.size).toBe(2);
-    expect(phases.has("check.do")).toBe(true);
-    expect(phases.has("review.do")).toBe(true);
-  });
-});
-
-describe("isManualPhase", () => {
-  it("should return true if phase is manual", () => {
-    const wf = makeWorkflow({ manual_phase: ["step1.check"] });
-    expect(isManualPhase(wf, "step1", "check")).toBe(true);
-  });
-
-  it("should return false if phase is not manual", () => {
-    const wf = makeWorkflow({ manual_phase: ["step1.check"] });
-    expect(isManualPhase(wf, "step1", "do")).toBe(false);
-  });
-
-  it("should return false for empty manual_phase", () => {
-    const wf = makeWorkflow({ manual_phase: [] });
-    expect(isManualPhase(wf, "step1", "do")).toBe(false);
   });
 });
 
@@ -178,91 +152,38 @@ describe("buildContinuePrompt", () => {
   });
 });
 
-describe("buildIdlePrompt", () => {
-  it("should include step info", () => {
-    const prompt = buildIdlePrompt(makeStep(), "task");
-    expect(prompt).toContain("请继续完成当前任务");
-    expect(prompt).toContain("test-step");
-    expect(prompt).toContain("A test step");
+describe("buildDoPrompt with retry count", () => {
+  it("should include retry count when provided", () => {
+    const step = makeStep();
+    const prompt = buildDoPrompt(step, "task", "Previous failure", 2);
+    expect(prompt).toContain("第 **2** 次重试");
+    expect(prompt).toContain("最大重试次数为 **3** 次");
   });
 
-  it("should include user task when provided", () => {
-    const prompt = buildIdlePrompt(makeStep(), "my task");
-    expect(prompt).toContain("my task");
+  it("should not include retry count when 0", () => {
+    const step = makeStep();
+    const prompt = buildDoPrompt(step, "task", undefined, 0);
+    expect(prompt).not.toContain("重试信息");
   });
 
-  it("should not include user task heading when not provided", () => {
-    const prompt = buildIdlePrompt(makeStep());
-    expect(prompt).not.toContain("用户需求");
-  });
-
-  it("should include done tag hint for do phase", () => {
-    const prompt = buildIdlePrompt(makeStep(), "task", "do");
-    expect(prompt).toContain("<promise>done</promise>");
-    expect(prompt).not.toContain("<promise-check>");
-  });
-
-  it("should include check tag hint for check phase", () => {
-    const prompt = buildIdlePrompt(makeStep(), "task", "check");
-    expect(prompt).toContain("<promise-check>true</promise-check>");
-    expect(prompt).toContain("<promise-check>false</promise-check>");
-    expect(prompt).not.toContain("<promise>done</promise>");
+  it("should not include retry count when undefined", () => {
+    const step = makeStep();
+    const prompt = buildDoPrompt(step, "task");
+    expect(prompt).not.toContain("重试信息");
   });
 });
 
-describe("isWorkflowInfoMessage", () => {
-  it("should detect workflow status message", () => {
-    expect(isWorkflowInfoMessage("## Workflow Status\n- **Workflow**: test")).toBe(true);
+describe("buildCheckPrompt with implementation context", () => {
+  it("should include implementation context when provided", () => {
+    const step = makeStep();
+    const prompt = buildCheckPrompt(step, "user task", "const x = 1;");
+    expect(prompt).toContain("## 实现内容");
+    expect(prompt).toContain("const x = 1;");
   });
 
-  it("should detect available workflows message", () => {
-    expect(isWorkflowInfoMessage("## Available Workflows\n- test")).toBe(true);
-  });
-
-  it("should detect Chinese messages", () => {
-    expect(isWorkflowInfoMessage("请选择工作流，当前可用的有：")).toBe(true);
-    expect(isWorkflowInfoMessage("请描述你要执行的任务")).toBe(true);
-  });
-
-  it("should detect English messages", () => {
-    expect(isWorkflowInfoMessage("No active workflow to continue.")).toBe(true);
-    expect(isWorkflowInfoMessage("No workflows found.")).toBe(true);
-    expect(isWorkflowInfoMessage("There is an active workflow \"test\"")).toBe(true);
-    expect(isWorkflowInfoMessage("Workflow resumed at step")).toBe(true);
-    expect(isWorkflowInfoMessage("Workflow cancelled")).toBe(true);
-  });
-
-  it("should return false for normal messages", () => {
-    expect(isWorkflowInfoMessage("Let me build that for you.")).toBe(false);
-    expect(isWorkflowInfoMessage("## Task completed")).toBe(false);
-  });
-
-  it("should return false for empty string", () => {
-    expect(isWorkflowInfoMessage("")).toBe(false);
-  });
-});
-
-describe("extractFailureReason", () => {
-  it("should remove check tags from text", () => {
-    const text = "Review failed. <promise-check>false</promise-check> Issues found.";
-    const result = extractFailureReason(text);
-    expect(result).toBe("Review failed.  Issues found.");
-  });
-
-  it("should remove true check tags as well", () => {
-    const text = "<promise-check>true</promise-check> All good.";
-    const result = extractFailureReason(text);
-    expect(result).toBe("All good.");
-  });
-
-  it("should handle case-insensitive tags", () => {
-    const text = "<PROMISE-CHECK>FALSE</PROMISE-CHECK> Failed!";
-    const result = extractFailureReason(text);
-    expect(result).toBe("Failed!");
-  });
-
-  it("should trim whitespace", () => {
-    const text = "  <promise-check>false</promise-check>  ";
-    expect(extractFailureReason(text)).toBe("");
+  it("should not include implementation context when not provided", () => {
+    const step = makeStep();
+    const prompt = buildCheckPrompt(step, "user task");
+    expect(prompt).not.toContain("## 实现内容");
   });
 });

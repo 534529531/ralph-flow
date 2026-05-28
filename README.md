@@ -18,6 +18,7 @@ Turn complex development tasks into automated, multi-step pipelines — with bui
 ## ✨ Features
 
 - **Multi-step pipelines** — define sequences of steps, each with an execution and verification phase
+- **Independent session verification** — check phase runs in a separate session, preventing self-review bias and ensuring strict verification
 - **Auto-retry with context** — failed steps retry with failure context; pause and resume at any limit
 - **YAML-defined workflows** — create custom workflows with zero code; just a `.yaml` file
 - **Built-in workflows** — `loop` for open-ended tasks, `spec` for structured spec-driven development
@@ -41,6 +42,7 @@ Or clone locally for development:
 ```bash
 git clone https://github.com/534529531/ralph-flow.git ~/.config/opencode/plugins/ralph-flow
 cd ~/.config/opencode/plugins/ralph-flow
+npm install
 npm run build
 ```
 
@@ -238,8 +240,8 @@ flowchart TD
     State --> DoPrompt["Plugin injects DO phase prompt"]
     DoPrompt --> AI["AI executes the task"]
     AI -->|"done tag detected"| DoneTag["session.idle fires<br/>Plugin detects done tag"]
-    DoneTag --> CheckPrompt["Plugin injects CHECK phase prompt"]
-    CheckPrompt --> AICheck["AI verifies the result"]
+    DoneTag --> CheckPrompt["Plugin creates independent check session"]
+    CheckPrompt --> AICheck["Independent session verifies the result"]
     AICheck -->|"true"| Pass["Plugin checks on_pass"]
     AICheck -->|"false"| Fail["Plugin increments fail_count"]
     Pass -->|"on_pass: done"| Complete["Workflow marked complete<br/>Report generated"]
@@ -247,7 +249,37 @@ flowchart TD
     Fail -->|"below limit"| DoPrompt
     Fail -->|"limit reached"| Pause["Workflow paused<br/>Waiting for /ralphflow-continue"]
     Pause -->|user continues| DoPrompt
+    CheckPrompt -->|"check complete"| Cleanup["Check session auto-deleted"]
 ```
+
+### Independent session verification
+
+The CHECK phase uses an **independent session** to verify task completion, preventing self-review bias:
+
+```mermaid
+sequenceDiagram
+    participant Main as Main Session
+    participant Plugin as Plugin
+    participant Check as Check Session
+
+    Main->>Plugin: DO phase complete (done tag)
+    Plugin->>Main: Shows check criteria
+    Plugin->>Check: Create new session with check prompt
+    Check->>Check: Independent verification
+    Check->>Plugin: Returns pass/fail result
+    Plugin->>Main: Shows check result
+    Plugin->>Check: Auto-delete session
+```
+
+**Why independent sessions?**
+- **No self-review bias** — the checker has no memory of the implementation process
+- **Strict verification** — checks against criteria only, not against what the AI "intended" to do
+- **Clean context** — no accumulated context that could influence the judgment
+
+**What the user sees:**
+- Check criteria displayed in the main session before verification begins
+- Check result (pass/fail with reasons) injected back into the main session
+- Failure context included when retrying the DO phase
 
 ### Multi-step flow
 
