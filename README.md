@@ -74,8 +74,8 @@ A single-step workflow that keeps executing until all requirements are satisfied
 steps:
   - id: loop
     desc: Auto-loop task execution
-    do: Execute the user-defined task and keep working until complete
-    check: Strict review mode with independent audit and tool verification
+    do: Execute the user-defined task, implement each requirement one by one
+    check: Verify from four dimensions: completeness, correctness, quality, and verifiability
     on_pass: done
     on_fail: loop
     max_fail_count: 100

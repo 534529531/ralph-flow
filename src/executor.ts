@@ -353,8 +353,18 @@ async function adversarialCheck(
     }
 
     const checkPrompt = buildCheckPrompt(step, userTask, implementationContext);
+    const systemPrompt = adversarialConfig?.system_prompt || DEFAULT_ADVERSARIAL_SYSTEM_PROMPT;
 
-    logDebug(directory, "adversarial_check_sending_prompt", { stepId: step.id, checkSessionId });
+    const logMaxLength = 3000;
+    const truncate = (text: string) => text.length > logMaxLength ? text.substring(0, logMaxLength) + "...(内容已截断)" : text;
+
+    logDebug(directory, "adversarial_check_sending_prompt", {
+      stepId: step.id,
+      checkSessionId,
+      systemPrompt: truncate(systemPrompt),
+      userPrompt: truncate(checkPrompt),
+      implementationContext: implementationContext ? truncate(implementationContext) : "",
+    });
 
     const response = await Promise.race([
       client.session.prompt({
@@ -362,7 +372,7 @@ async function adversarialCheck(
         body: {
           model: adversarialConfig?.model,
           agent: adversarialConfig?.agent || "ralph-check",
-          system: adversarialConfig?.system_prompt || DEFAULT_ADVERSARIAL_SYSTEM_PROMPT,
+          system: systemPrompt,
           parts: [{ type: "text", text: checkPrompt }],
         },
       }),
