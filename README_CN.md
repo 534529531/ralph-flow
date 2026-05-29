@@ -174,7 +174,7 @@ flowchart LR
 ### 结构示例
 
 ```yaml
-manual_phase:                     # 可选：逗号分隔的 "步骤ID.阶段"，需要用户手动继续
+manual_step:                     # 可选：逗号分隔的步骤 ID，需要用户手动继续
 
 steps:
   - id: analyze
@@ -224,15 +224,15 @@ AI 通过 XML 风格的标记来标识完成状态：
 
 > 标记**不区分大小写**，允许空格。`<promise>DONE</promise>` 同样有效。
 
-### 手动阶段
+### 手动步骤
 
-在 `manual_phase` 中指定需要人工确认的阶段：
+在 `manual_step` 中指定需要人工确认的步骤：
 
 ```yaml
-manual_phase: analyze.do, execute.check
+manual_step: analyze, execute
 ```
 
-列入该列表的阶段，AI 完成工作后**不会自动继续**——需要你手动执行 `/ralphflow-continue`。
+列入该列表的步骤，AI 完成工作后**不会自动继续**——需要你手动执行 `/ralphflow-continue`。
 
 ---
 

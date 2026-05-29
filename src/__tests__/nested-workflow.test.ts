@@ -44,7 +44,7 @@ describe("nested workflow integration", () => {
   });
 
   it("should parse composite workflow with sub-workflow steps", () => {
-    writeWorkflow(testDir, "full-dev", `manual_phase:
+    writeWorkflow(testDir, "full-dev", `manual_step:
 
 steps:
     - id: analyze

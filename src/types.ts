@@ -37,7 +37,7 @@ export interface AdversarialCheckConfig {
 
 export interface WorkflowDef {
   name: string;
-  manual_phase: string[];
+  manual_step: string[];
   steps: StepDef[];
   adversarial_check?: AdversarialCheckConfig;
 }

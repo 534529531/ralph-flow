@@ -1,6 +1,6 @@
 description: 单步骤循环执行，适合简单任务的持续迭代直到完成
 
-manual_phase:
+manual_step:
 
 steps:
     - id: loop

@@ -33,7 +33,7 @@ const makeSubWorkflowStep = (overrides: Partial<SubWorkflowStepDef> = {}): SubWo
 
 const makeWorkflow = (overrides: Partial<WorkflowDef> = {}): WorkflowDef => ({
   name: "test-workflow",
-  manual_phase: [],
+  manual_step: [],
   steps: [makeStep()],
   ...overrides,
 });

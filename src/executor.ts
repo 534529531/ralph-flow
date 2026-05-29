@@ -741,11 +741,21 @@ export async function handleSessionIdle(
         const handled = await routeCheckResult(client, sessionId, directory, workflow, state, currentStep, state.fail_count);
         if (handled) return;
       }
+
+      // 手动步骤：AI 停下来问问题时，不自动注入提示词
+      if (workflow.manual_step.includes(state.current_step)) {
+        logDebug(directory, "manual_step_skip", { step: state.current_step });
+        return;
+      }
+
       return;
     }
 
-    // check 阶段 - 对抗性检查独立进行，主会话无需操作
-    return;
+    // check 阶段 - 触发对抗性检查
+    if (state.current_phase === "check") {
+      const handled = await routeCheckResult(client, sessionId, directory, workflow, state, currentStep, state.fail_count);
+      if (handled) return;
+    }
   } finally {
     sessionState.isProcessingIdle = false;
   }

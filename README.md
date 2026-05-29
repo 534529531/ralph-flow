@@ -168,7 +168,7 @@ Create your own workflow by placing a `.yaml` file in `.opencode/ralph-flow/work
 ### Structure
 
 ```yaml
-manual_phase:                     # Optional: comma-separated "stepId.phase" to require manual continuation
+manual_step:                     # Optional: comma-separated step IDs to require manual continuation
 
 steps:
   - id: analyze
@@ -218,15 +218,15 @@ The AI signals completion using XML-like tags:
 
 > Tags are case-insensitive and allow whitespace. `<promise>DONE</promise>` works.
 
-### Manual phases
+### Manual steps
 
-Add `stepId.phase` to the `manual_phase` list to require user action before proceeding:
+Add step IDs to the `manual_step` list to require user action before proceeding:
 
 ```yaml
-manual_phase: analyze.do, execute.check
+manual_step: analyze, execute
 ```
 
-Phases in this list will **not** auto-continue when the session is idle — the AI waits for your input.
+Steps in this list will **not** auto-continue when the session is idle — the AI waits for your input.
 
 ---
 

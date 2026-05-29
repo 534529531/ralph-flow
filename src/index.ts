@@ -353,6 +353,20 @@ ${workflows.map(w => `- **${w.name}**: ${w.desc}`).join("\n")}`;
         await handleSessionIdle(client, sessionId, directory, workflow);
       }
 
+      if (event.type === "session.compacted") {
+        const sessionId = event.properties.sessionID;
+        if (!sessionId) return;
+
+        const state = readState(directory);
+        if (!state || !state.active || state.paused) return;
+
+        const workflow = loadWorkflow(directory, state.workflow_name);
+        if (!workflow) return;
+
+        // 压缩完成后，自动继续工作流
+        await handleSessionIdle(client, sessionId, directory, workflow);
+      }
+
       if (event.type === "session.deleted") {
         const state = readState(directory);
         if (state && state.active && !state.paused) {

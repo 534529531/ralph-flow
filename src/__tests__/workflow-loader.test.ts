@@ -29,7 +29,7 @@ describe("parseWorkflowFile", () => {
 
   it("should parse normal workflow", () => {
     const filePath = join(testDir, "test.yaml");
-    writeFileSync(filePath, `manual_phase:
+    writeFileSync(filePath, `manual_step:
 
 steps:
     - id: step1
@@ -53,7 +53,7 @@ steps:
 
   it("should parse workflow with sub-workflow step", () => {
     const filePath = join(testDir, "test.yaml");
-    writeFileSync(filePath, `manual_phase:
+    writeFileSync(filePath, `manual_step:
 
 steps:
     - id: sub
@@ -76,7 +76,7 @@ steps:
 
   it("should parse mixed workflow with normal and sub-workflow steps", () => {
     const filePath = join(testDir, "test.yaml");
-    writeFileSync(filePath, `manual_phase:
+    writeFileSync(filePath, `manual_step:
 
 steps:
     - id: normal
@@ -134,7 +134,7 @@ describe("loadWorkflow", () => {
   });
 
   it("should load workflow from project directory", () => {
-    writeWorkflow(testDir, "my-workflow", `manual_phase:
+    writeWorkflow(testDir, "my-workflow", `manual_step:
 
 steps:
     - id: step1
@@ -154,7 +154,7 @@ steps:
   });
 
   it("should load workflow with sub-workflow steps", () => {
-    writeWorkflow(testDir, "composite", `manual_phase:
+    writeWorkflow(testDir, "composite", `manual_step:
 
 steps:
     - id: sub
@@ -192,7 +192,7 @@ describe("listWorkflows", () => {
   });
 
   it("should list workflows from project directory", () => {
-    writeWorkflow(testDir, "wf1", `manual_phase:
+    writeWorkflow(testDir, "wf1", `manual_step:
 
 steps:
     - id: step1
@@ -206,7 +206,7 @@ steps:
       max_fail_count: 3
 `);
 
-    writeWorkflow(testDir, "wf2", `manual_phase:
+    writeWorkflow(testDir, "wf2", `manual_step:
 
 steps:
     - id: step1

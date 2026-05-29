@@ -116,7 +116,7 @@ export function parseWorkflowFile(filePath: string, workflowName: string): Workf
 
     return {
       name: workflowName,
-      manual_phase: (parsed.manual_phase || "").split(",").map((s: string) => s.trim()).filter(Boolean),
+      manual_step: (parsed.manual_step || "").split(",").map((s: string) => s.trim()).filter(Boolean),
       steps: validSteps,
       adversarial_check,
     };

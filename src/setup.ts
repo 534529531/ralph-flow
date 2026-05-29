@@ -26,7 +26,7 @@ function setupWorkflows(projectDir: string): void {
       if (file.endsWith(".yaml") || file.endsWith(".yml")) {
         const src = join(pluginWorkflowsDir, file);
         const dest = join(projectWorkflowsDir, file);
-        if (existsSync(src) && !existsSync(dest)) {
+        if (existsSync(src)) {
           try {
             cpSync(src, dest);
           } catch (copyError) {
