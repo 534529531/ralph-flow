@@ -4,7 +4,7 @@
 
 **Workflow automation plugin for [opencode](https://opencode.ai)**
 
-Turn complex development tasks into automated, multi-step pipelines — with built-in execution, verification, and retry.
+Make AI actually follow complex workflows — execute, verify, retry until done.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![opencode plugin](https://img.shields.io/badge/opencode-plugin-green.svg)](https://opencode.ai)
@@ -15,87 +15,59 @@ Turn complex development tasks into automated, multi-step pipelines — with bui
 
 ---
 
-## ✨ Features
+## The Problem
 
-- **Multi-step pipelines** — define sequences of steps, each with an execution and verification phase
-- **Independent session verification** — check phase runs in a separate session, preventing self-review bias and ensuring strict verification
-- **Auto-retry with context** — failed steps retry with failure context; pause and resume at any limit
-- **YAML-defined workflows** — create custom workflows with zero code; just a `.yaml` file
-- **Built-in workflows** — `loop` for open-ended tasks, `spec` for structured spec-driven development
-- **Execution logs & reports** — JSON Lines logging, per-step traces, and final completion reports
-- **Zero manual wiring** — install once, workflows auto-register as slash commands
+You tell an AI: "Implement user auth, write tests, update docs, and make sure all tests pass."
 
----
+What actually happens:
+- AI writes some code and stops
+- Tests are never run
+- Docs are forgotten
+- No verification that anything actually works
 
-## 📦 Installation
+**Even when you ask AI to verify itself, it fails:**
+- The AI is both player and referee — it lowers the bar for its own work
+- It's overconfident — "looks good to me" without actually checking
+- It blames external factors — "the test environment is broken", "existing code has issues", "dependencies are outdated"
 
-The plugin is published on npm:
+**AI doesn't follow multi-step workflows.** It loses context, skips steps, and never truly verifies its own work.
 
-```json
-{
-  "plugin": ["@yibener/ralph-flow"]
-}
-```
+## The Solution
 
-Or clone locally for development:
-
-```bash
-git clone https://github.com/534529531/ralph-flow.git ~/.config/opencode/plugins/ralph-flow
-cd ~/.config/opencode/plugins/ralph-flow
-npm install
-npm run build
-```
-
-Then reference the built module directly in your opencode config:
-
-```json
-{
-  "plugin": ["file:///home/user/.config/opencode/plugins/ralph-flow/dist/index.js"]
-}
-```
-
-Or create a bridge file in your plugins directory:
-
-```ts
-export { default } from "./ralph-flow/dist/index.js";
-```
-
-> On first load, the plugin auto-creates the workflow directory and its dependencies. No manual setup needed.
+ralph-flow forces AI to follow structured workflows with **independent verification at every step**. It's not just prompt engineering — it's a state machine that won't let the AI skip steps or claim "done" without proof.
 
 ---
 
-## 🚀 Quick Start
+## ralph-flow vs ralph-loop
 
-Start a workflow with automatic execution:
+| | ralph-loop | ralph-flow |
+|---|---|---|
+| **Type** | Prompt technique | opencode plugin |
+| **How it works** | Instructions in system prompt | Event-driven state machine |
+| **Verification** | Self-review (biased) | Independent session (unbiased) |
+| **Multi-step** | Single loop | Multi-step pipelines with branching |
+| **State management** | None | Full state tracking, pause/resume |
+| **Failure handling** | Retry blindly | Retry with failure context |
+| **Logging** | None | JSON Lines execution logs |
+| **Setup** | Copy prompt to AGENTS.md | Install plugin, auto-registers commands |
 
-```
-/ralphflow-start
-```
-
-The AI will prompt you to choose a workflow and describe your task. Or specify everything at once:
-
-```
-/ralphflow-start loop "Build a user authentication module with JWT and refresh tokens"
-```
-
-During execution, manage the workflow with these commands:
-
-| Command                  | What it does                          |
-| ------------------------ | ------------------------------------- |
-| `/ralphflow-status`      | Show current step, phase, fail count  |
-| `/ralphflow-continue`    | Resume a paused workflow              |
-| `/ralphflow-cancel`      | Cancel and generate a summary report  |
-| `/ralphflow-list`        | List all available workflows          |
+**ralph-flow is the evolution of ralph-loop** — same core idea (execute → verify → retry), but built as a proper plugin with state management, independent verification, and multi-step support.
 
 ---
 
-## 📋 Built-in Workflows
+## Built-in Workflows
 
 ### loop — Auto-loop execution
+
+> Based on [opencode-ralph-loop](https://github.com/charfeng1/opencode-ralph-loop)
 
 > **Best for**: open-ended tasks, bug fixes, feature development where the scope is clear.
 
 A single-step workflow that keeps executing until all requirements are satisfied. Each cycle runs DO → CHECK, passing only when review criteria are met.
+
+```
+/ralphflow-start loop "Build a user authentication module with JWT and refresh tokens"
+```
 
 ```yaml
 # workflows/loop.yaml (built-in)
@@ -109,67 +81,107 @@ steps:
     max_fail_count: 100
 ```
 
-<details>
-<summary>How it works</summary>
-
-```mermaid
-flowchart TD
-    U["You: /ralphflow-start"] --> Do["DO Phase<br/>AI executes the task"]
-    Do -->|"outputs done tag"| Check["CHECK Phase<br/>AI verifies the result"]
-    Check --> Pass{"Check passed?"}
-    Pass -->|Yes| Done["Workflow Complete 🎉"]
-    Pass -->|No| Retry["Fail Count + 1<br/>Retry with context"]
-    Retry -->|"limit not reached"| Do
-    Retry -->|"limit reached"| Pause["Workflow Paused<br/>Use /ralphflow-continue"]
-```
-
-</details>
-
----
-
 ### spec — Spec-driven development pipeline
+
+> Based on [OpenSpec](https://github.com/Fission-AI/OpenSpec)
 
 > **Best for**: structured feature work that benefits from requirements → design → implementation.
 
-Inspired by [OpenSpec's OPSX workflow](https://github.com/Fission-AI/OpenSpec), this pipeline walks through seven steps — from proposal to archive. Each step produces an artifact that feeds the next, with automated verification at every gate.
+A seven-step pipeline from proposal to archive. Each step produces an artifact that feeds the next, with automated verification at every gate.
+
+```
+/ralphflow-start spec "Add user authentication with OAuth2 support"
+```
 
 ```mermaid
 flowchart LR
-    P["1. Propose<br/>Requirements analysis"] --> S["2. Specs<br/>Delta specifications"]
-    S --> D["3. Design<br/>Technical architecture"]
-    D --> T["4. Tasks<br/>Implementation checklist"]
-    T --> I["5. Implement<br/>Write code"]
-    I --> V["6. Verify<br/>Acceptance testing"]
-    V --> A["7. Archive<br/>Summary report"]
-    A --> Done(["Complete 🎉"])
-
-    I -.->|"review failed"| I
-    V -.->|"tests failing"| I
+    P["1. Propose"] --> S["2. Specs"]
+    S --> D["3. Design"]
+    D --> T["4. Tasks"]
+    T --> I["5. Implement"]
+    I --> V["6. Verify"]
+    V --> A["7. Archive"]
 ```
 
-**Artifacts produced:**
+---
 
-| Step    | Artifact                          | Purpose                          |
-| ------- | --------------------------------- | -------------------------------- |
-| Propose | `.opencode/ralph-flow/artifacts/proposal.md`   | Why, what, scope, acceptance criteria    |
-| Specs   | `.opencode/ralph-flow/artifacts/specs.md`      | Delta specs (ADDED / MODIFIED / REMOVED) |
-| Design  | `.opencode/ralph-flow/artifacts/design.md`     | Architecture, data flow, file list       |
-| Tasks   | `.opencode/ralph-flow/artifacts/tasks.md`      | Checkbox task list                       |
-| Implement | — (code changes)                              | Task-by-task implementation              |
-| Verify  | `.opencode/ralph-flow/artifacts/verification.md` | Acceptance report                     |
-| Archive | `.opencode/ralph-flow/artifacts/summary.md`    | Change log summary                       |
+## How It Works
+
+```mermaid
+flowchart TD
+    Start["/ralphflow-start"] --> State["Create workflow state"]
+    State --> DO["DO Phase: AI executes task"]
+    DO --> DoneTag["Detects done tag"]
+    DoneTag --> CHECK["CHECK Phase: Independent session verifies"]
+    CHECK --> Pass{"Pass?"}
+    Pass -->|Yes| Next["Next step (or complete)"]
+    Pass -->|No| Fail["Fail count + 1"]
+    Fail --> BelowLimit{"Below limit?"}
+    BelowLimit -->|Yes| DO
+    BelowLimit -->|No| Pause["Paused — use /ralphflow-continue"]
+    Next --> Done{"All steps done?"}
+    Done -->|No| DO
+    Done -->|Yes| Complete["Workflow complete"]
+    Pause -->|User resumes| DO
+```
+
+The CHECK phase uses a **separate AI session** with no memory of the implementation — it judges strictly against criteria, not against what the AI "intended" to do.
+
+---
+
+## ✨ Features
+
+- 🔄 **Auto-loop with failure context** — retries carry failure reasons so AI learns from mistakes (up to 100 attempts)
+- 🔍 **Independent verification** — separate check session prevents self-review bias; configure which agent to use via `adversarial_check.agent`
+- 📦 **Natural language YAML** — `do`, `check`, `input`, `output` are all plain English descriptions, no DSL to learn
+- 🔀 **Branching & recovery** — route failures to specific steps (`on_fail: fix-build`), not just retry blindly
+- 🛠️ **Fully customizable** — copy any built-in workflow and modify it; add your own steps, change verification criteria
+- 📊 **Execution logs** — JSON Lines logging with per-step traces and final reports
+
+---
+
+## 📦 Installation
+
+Add to your opencode config (`~/.config/opencode/opencode.json` for global, or `opencode.json` in project root):
+
+```json
+{
+  "plugin": ["@yibener/ralph-flow"]
+}
+```
+
+Or clone locally:
+
+```bash
+git clone https://github.com/534529531/ralph-flow.git ~/.config/opencode/plugins/ralph-flow
+cd ~/.config/opencode/plugins/ralph-flow
+npm install && npm run build
+```
+
+> On first load, the plugin auto-creates the workflow directory and dependencies.
+
+---
+
+## 🚀 Quick Start
+
+```
+/ralphflow-start loop "Build a user authentication module with JWT and refresh tokens"
+```
+
+| Command | What it does |
+|---------|--------------|
+| `/ralphflow-status` | Show current step, phase, fail count |
+| `/ralphflow-continue` | Resume a paused workflow |
+| `/ralphflow-cancel` | Cancel and generate summary report |
+| `/ralphflow-list` | List all available workflows |
 
 ---
 
 ## 🛠️ Custom Workflows
 
-Create your own workflow by placing a `.yaml` file in `.opencode/ralph-flow/workflows/`.
-
-### Structure
+Place a `.yaml` file in `.opencode/ralph-flow/workflows/`:
 
 ```yaml
-manual_step:                     # Optional: comma-separated step IDs to require manual continuation
-
 steps:
   - id: analyze
     desc: Task Analysis
@@ -177,8 +189,8 @@ steps:
     input: User requirements
     output: design.md
     check: Verify the design is complete and technically sound
-    on_pass: execute              # Next step when check passes
-    on_fail: analyze              # Next step when check fails
+    on_pass: execute
+    on_fail: analyze
     max_fail_count: 3
 
   - id: execute
@@ -192,173 +204,20 @@ steps:
     max_fail_count: 5
 ```
 
-### Step fields
+**Completion tags:** `<promise>done</promise>`, `<promise-check>true/false</promise-check>`
 
-| Field            | Required | Description                                    |
-| ---------------- | -------- | ---------------------------------------------- |
-| `id`             | ✅        | Unique step identifier                         |
-| `desc`           | ✅        | Human-readable description                     |
-| `do`             | ✅        | Task prompt (what the AI should do)            |
-| `input`          | ✅        | Expected inputs                                |
-| `output`         | ✅        | Expected outputs                               |
-| `check`          | ✅        | Verification criteria prompt                   |
-| `on_pass`        | ✅        | Next step id on success, or `"done"` to finish |
-| `on_fail`        | ✅        | Next step id on failure                        |
-| `max_fail_count` | ✅        | Max failures before pausing (per step)         |
-
-### Completion tags
-
-The AI signals completion using XML-like tags:
-
-| Phase | Tag                                       | Meaning       |
-| ----- | ----------------------------------------- | ------------- |
-| DO    | `<promise>done</promise>`                 | Task finished |
-| CHECK | `<promise-check>true</promise-check>`     | Passed        |
-| CHECK | `<promise-check>false</promise-check>`    | Failed        |
-
-> Tags are case-insensitive and allow whitespace. `<promise>DONE</promise>` works.
-
-### Manual steps
-
-Add step IDs to the `manual_step` list to require user action before proceeding:
-
-```yaml
-manual_step: analyze, execute
-```
-
-Steps in this list will **not** auto-continue when the session is idle — the AI waits for your input.
+See [Custom Workflows Guide](docs/custom-workflows.md) for branching, recovery, and advanced patterns.
 
 ---
 
-## ⚙️ How It Works
+## 📚 Documentation
 
-### Core cycle
-
-```mermaid
-flowchart TD
-    Start(["You run /ralphflow-start"]) --> State["Plugin creates workflow state"]
-    State --> DoPrompt["Plugin injects DO phase prompt"]
-    DoPrompt --> AI["AI executes the task"]
-    AI -->|"done tag detected"| DoneTag["session.idle fires<br/>Plugin detects done tag"]
-    DoneTag --> CheckPrompt["Plugin creates independent check session"]
-    CheckPrompt --> AICheck["Independent session verifies the result"]
-    AICheck -->|"true"| Pass["Plugin checks on_pass"]
-    AICheck -->|"false"| Fail["Plugin increments fail_count"]
-    Pass -->|"on_pass: done"| Complete["Workflow marked complete<br/>Report generated"]
-    Pass -->|"next step id"| DoPrompt
-    Fail -->|"below limit"| DoPrompt
-    Fail -->|"limit reached"| Pause["Workflow paused<br/>Waiting for /ralphflow-continue"]
-    Pause -->|user continues| DoPrompt
-    CheckPrompt -->|"check complete"| Cleanup["Check session auto-deleted"]
-```
-
-### Independent session verification
-
-The CHECK phase uses an **independent session** to verify task completion, preventing self-review bias:
-
-```mermaid
-sequenceDiagram
-    participant Main as Main Session
-    participant Plugin as Plugin
-    participant Check as Check Session
-
-    Main->>Plugin: DO phase complete (done tag)
-    Plugin->>Main: Shows check criteria
-    Plugin->>Check: Create new session with check prompt
-    Check->>Check: Independent verification
-    Check->>Plugin: Returns pass/fail result
-    Plugin->>Main: Shows check result
-    Plugin->>Check: Auto-delete session
-```
-
-**Why independent sessions?**
-- **No self-review bias** — the checker has no memory of the implementation process
-- **Strict verification** — checks against criteria only, not against what the AI "intended" to do
-- **Clean context** — no accumulated context that could influence the judgment
-
-**Check session permissions:**
-
-The CHECK phase uses the `ralph-check` agent by default, with the following permissions:
-
-| Permission | Config | Description |
-|------------|--------|-------------|
-| `edit` | `deny` | Prevents the checker from modifying code |
-| `bash` | `allow` | Allows running verification commands (tests, file checks, etc.) |
-
-The plugin automatically registers the `ralph-check` agent on startup — no manual configuration needed. To override, specify in your workflow YAML:
-
-```yaml
-adversarial_check:
-  agent: "build"  # Use a different agent
-```
-
-**What the user sees:**
-- Check criteria displayed in the main session before verification begins
-- Check result (pass/fail with reasons) injected back into the main session
-- Failure context included when retrying the DO phase
-
-### Multi-step flow
-
-When a check passes, the plugin reads `on_pass` and transitions to the next step's DO phase. When it fails, the plugin reads `on_fail` — either retrying the same step (with failure context) or jumping to a recovery step.
-
-### Session events
-
-The plugin hooks into `session.idle` to detect completion tags and drive the workflow forward automatically. `session.deleted` marks the workflow as paused so you can resume later.
-
----
-
-## 📁 File Structure
-
-All generated files are scoped under `.opencode/ralph-flow/`:
-
-```
-.opencode/
-└── ralph-flow/                    # Plugin root
-    ├── ralph-flow.local.md        # Workflow state (markdown frontmatter)
-    ├── workflows/                 # Custom workflow YAML definitions
-    │   ├── loop.yaml              # Built-in: auto-loop
-    │   └── spec.yaml              # Built-in: spec-driven pipeline
-    ├── artifacts/                 # Generated by spec workflow
-    │   ├── proposal.md
-    │   ├── specs.md
-    │   ├── design.md
-    │   ├── tasks.md
-    │   ├── verification.md
-    │   └── summary.md
-    ├── logs/                      # Execution logs (JSON Lines)
-    │   ├── execution.log
-    │   ├── step-*.log
-    │   └── final-report.md
-    └── package.json               # Auto-managed dependencies
-```
-
----
-
-## 📟 Command Reference
-
-| Slash Command           | Tool                      | Description                    |
-| ----------------------- | ------------------------- | ------------------------------ |
-| `/ralphflow-start`      | `ralphflow-start`         | Start a workflow               |
-| `/ralphflow-continue`   | `ralphflow-continue`      | Resume a paused workflow       |
-| `/ralphflow-cancel`     | `ralphflow-cancel`        | Cancel and generate report     |
-| `/ralphflow-status`     | `ralphflow-status`        | Show current workflow state    |
-| `/ralphflow-list`       | `ralphflow-list`          | List available workflows       |
-
-### Log events
-
-Events are logged to `.opencode/ralph-flow/logs/execution.log` in JSON Lines format:
-
-| Event                  | Description                            |
-| ---------------------- | -------------------------------------- |
-| `workflow_start`       | Workflow started                       |
-| `workflow_end`         | Workflow completed                     |
-| `step_start`           | Step phase started                     |
-| `done_detected`        | `<promise>done</promise>` detected     |
-| `check_result`         | Check result (true / false)            |
-| `fail_count_increment` | Failure count increased                |
-| `workflow_paused`      | Paused (max failures reached)          |
-| `workflow_resumed`     | Resumed by user                        |
-| `workflow_cancelled`   | Cancelled by user                      |
+| Topic | Description |
+|-------|-------------|
+| [Documentation Home](docs/README.md) | Start here for guided reading order |
+| [Custom Workflows](docs/custom-workflows.md) | Create workflows, configure verification, nesting |
+| [How It Works](docs/how-it-works.md) | Architecture, events, state, file structure |
+| [Commands Reference](docs/commands.md) | All commands and log events |
 
 ---
 

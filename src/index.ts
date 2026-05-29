@@ -4,7 +4,7 @@ import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import yaml from "js-yaml";
 import { RALPH_COMMANDS } from "./commands.js";
-import { readState, writeState, clearState, markCancelled, pushState, popState } from "./state.js";
+import { readState, writeState, clearState, pushState, popState } from "./state.js";
 import { setup } from "./setup.js";
 import { handleSessionIdle, handleContinue, getStep, buildDoPrompt, buildSubWorkflowUserTask, getStepRecords, resetStepRecords } from "./executor.js";
 import { loadWorkflow, listWorkflows } from "./workflow-loader.js";
@@ -253,7 +253,7 @@ ${doPrompt}`;
             return "No active workflow to cancel.";
           }
 
-          markCancelled(directory, state);
+          clearState(directory);
           logWorkflowCancelled(directory, state.workflow_name);
           // 生成取消报告
           const stepRecords = getStepRecords(context.sessionID);

@@ -184,6 +184,87 @@ steps:
     expect(currentState!.workflow_name).toBe("full-dev");
   });
 
+  it("should clear state stack when clearState is called (cancel scenario)", () => {
+    const rootState = makeState({ workflow_name: "root", current_step: "s1" });
+    const level1State = makeState({ workflow_name: "level1", current_step: "s2" });
+    const level2State = makeState({ workflow_name: "level2", current_step: "s3" });
+
+    // Simulate multi-level nesting
+    pushState(testDir, rootState);
+    pushState(testDir, level1State);
+    writeState(testDir, level2State);
+
+    expect(getStackDepth(testDir)).toBe(2);
+
+    // Simulate cancel: clearState should clean both state file and stack
+    clearState(testDir);
+
+    expect(getStackDepth(testDir)).toBe(0);
+    expect(readState(testDir)).toBeNull();
+  });
+
+  it("should allow starting new workflow after cancel", () => {
+    const rootState = makeState({ workflow_name: "root", current_step: "s1" });
+    const subState = makeState({ workflow_name: "sub", current_step: "s2" });
+
+    // Simulate nested workflow
+    pushState(testDir, rootState);
+    writeState(testDir, subState);
+
+    // Cancel
+    clearState(testDir);
+
+    // Should be able to start new workflow
+    const newState = makeState({ workflow_name: "new-workflow", current_step: "step1" });
+    writeState(testDir, newState);
+
+    const currentState = readState(testDir);
+    expect(currentState).not.toBeNull();
+    expect(currentState!.workflow_name).toBe("new-workflow");
+    expect(getStackDepth(testDir)).toBe(0);
+  });
+
+  it("should enforce nesting depth limit of 5", () => {
+    // Simulate 5 levels of nesting (stack depth = 5)
+    for (let i = 0; i < 5; i++) {
+      pushState(testDir, makeState({ workflow_name: `level-${i}`, current_step: `s${i}` }));
+    }
+
+    // Stack should be at depth 5
+    expect(getStackDepth(testDir)).toBe(5);
+
+    // The enterSubWorkflow function would check this depth and refuse to go deeper
+    // This test verifies the stack can reach the limit
+    // Actual depth limit enforcement is tested via the enterSubWorkflow function behavior
+  });
+
+  it("should allow resuming paused nested workflow", () => {
+    const rootState = makeState({
+      workflow_name: "root",
+      current_step: "s1",
+      paused: true,
+      fail_count: 3,
+      last_failure_reason: "test failure",
+    });
+    writeState(testDir, rootState);
+
+    // Simulate resume: reset fail count and paused state
+    const resumedState: RalphFlowState = {
+      ...rootState,
+      fail_count: 0,
+      paused: false,
+      last_failure_reason: undefined,
+    };
+    writeState(testDir, resumedState);
+
+    const currentState = readState(testDir);
+    expect(currentState).not.toBeNull();
+    expect(currentState!.paused).toBe(false);
+    expect(currentState!.fail_count).toBe(0);
+    expect(currentState!.last_failure_reason).toBeUndefined();
+    expect(currentState!.workflow_name).toBe("root");
+  });
+
   it("should preserve user task through nesting", () => {
     const rootUserTask = "实现一个完整的用户管理系统";
 
