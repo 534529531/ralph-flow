@@ -3,6 +3,7 @@ import {
   parseCheckResult,
   extractResponseText,
   getAdversarialFailureReason,
+  getAdversarialCheckReason,
 } from "../executor.js";
 
 describe("parseCheckResult", () => {
@@ -126,5 +127,34 @@ describe("getAdversarialFailureReason", () => {
   it("should handle multi-line reason", () => {
     const text = "原因1\n原因2\n原因3\n<promise-check>false</promise-check>";
     expect(getAdversarialFailureReason(text)).toBe("原因1\n原因2\n原因3");
+  });
+});
+
+describe("getAdversarialCheckReason", () => {
+  it("should extract pass reason from passed check", () => {
+    const text = "所有测试通过\n代码质量良好\n<promise-check>true</promise-check>";
+    expect(getAdversarialCheckReason(text)).toBe("所有测试通过\n代码质量良好");
+  });
+
+  it("should extract fail reason from failed check", () => {
+    const text = "缺少单元测试\n<promise-check>false</promise-check>";
+    expect(getAdversarialCheckReason(text)).toBe("缺少单元测试");
+  });
+
+  it("should return empty string when only tag present", () => {
+    const text = "<promise-check>true</promise-check>";
+    expect(getAdversarialCheckReason(text)).toBe("");
+  });
+
+  it("should truncate long content", () => {
+    const longReason = "a".repeat(1500);
+    const text = longReason + "\n<promise-check>true</promise-check>";
+    const result = getAdversarialCheckReason(text);
+    expect(result.length).toBe(1003);
+    expect(result.endsWith("...")).toBe(true);
+  });
+
+  it("should be the same function as getAdversarialFailureReason", () => {
+    expect(getAdversarialCheckReason).toBe(getAdversarialFailureReason);
   });
 });

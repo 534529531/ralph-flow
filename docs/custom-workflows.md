@@ -99,6 +99,7 @@ adversarial_check:
     - All functions have error handling
     - No hardcoded secrets
     - Tests cover edge cases
+  timeout_ms: 1800000               # Custom timeout (ms), default is 20 minutes
 ```
 
 | Field | Description | Default |
@@ -106,11 +107,13 @@ adversarial_check:
 | `agent` | Which agent to use for verification | `ralph-check` |
 | `model` | Specific model for verification (providerID + modelID) | Same as main session |
 | `system_prompt` | Custom system prompt for the checker | Built-in verification prompt |
+| `timeout_ms` | Check timeout in milliseconds | `900000` (15 minutes) |
 
 **Use cases:**
 - Use a **cheaper model** for verification (e.g., Haiku for checking Sonnet's work)
 - Use a **stricter agent** that only reads, never writes
 - Customize the **system prompt** for domain-specific verification criteria
+- Increase **timeout** for complex tasks that require longer verification
 
 ---
 

@@ -33,6 +33,7 @@ export interface AdversarialCheckConfig {
   };
   agent?: string;
   system_prompt?: string;
+  timeout_ms?: number;
 }
 
 export interface WorkflowDef {
@@ -71,7 +72,7 @@ export interface StepExecutionRecord {
   failCount: number;
   startTime: string;
   endTime?: string;
-  error?: string;
+  reason?: string;
 }
 
 export const RALPH_FLOW_DIR = "ralph-flow" as const;

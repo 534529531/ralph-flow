@@ -116,6 +116,33 @@ steps:
     const result = parseWorkflowFile(filePath, "test");
     expect(result).toBeNull();
   });
+
+  it("should parse workflow with adversarial_check config", () => {
+    const filePath = join(testDir, "test.yaml");
+    writeFileSync(filePath, `manual_step:
+
+adversarial_check:
+  timeout_ms: 1800000
+  agent: "build"
+
+steps:
+    - id: step1
+      desc: Step 1
+      do: Do something
+      input: input
+      output: output
+      check: check
+      on_pass: done
+      on_fail: step1
+      max_fail_count: 3
+`);
+
+    const result = parseWorkflowFile(filePath, "test");
+    expect(result).not.toBeNull();
+    expect(result!.adversarial_check).toBeDefined();
+    expect(result!.adversarial_check!.timeout_ms).toBe(1800000);
+    expect(result!.adversarial_check!.agent).toBe("build");
+  });
 });
 
 describe("loadWorkflow", () => {

@@ -64,8 +64,8 @@ function generateReportMarkdown(report: WorkflowReport): string {
       lines.push(`- 失败次数：${step.failCount}`);
     }
     
-    if (step.error) {
-      lines.push(`- 失败原因：${step.error}`);
+    if (step.reason) {
+      lines.push(`- ${step.status === "passed" ? "通过原因" : "失败原因"}：${step.reason}`);
     }
     
     if (step.startTime && step.endTime) {
@@ -88,7 +88,7 @@ export function createStepRecord(
   phase: "do" | "check",
   status: "passed" | "failed",
   failCount: number,
-  error?: string,
+  reason?: string,
   startTime?: string
 ): StepExecutionRecord {
   const now = new Date().toISOString();
@@ -99,7 +99,7 @@ export function createStepRecord(
     failCount,
     startTime: startTime || now,
     endTime: now,
-    error,
+    reason,
   };
 }
 

@@ -20,9 +20,9 @@ describe("createStepRecord", () => {
     expect(record.failCount).toBe(3);
   });
 
-  it("should include error when provided", () => {
+  it("should include reason when provided", () => {
     const record = createStepRecord("step3", "check", "failed", 1, "Missing tests");
-    expect(record.error).toBe("Missing tests");
+    expect(record.reason).toBe("Missing tests");
   });
 
   it("should use provided start time", () => {
@@ -40,8 +40,8 @@ describe("createStepRecord", () => {
     expect(record.endTime! <= after).toBe(true);
   });
 
-  it("should handle undefined error", () => {
+  it("should handle undefined reason", () => {
     const record = createStepRecord("step6", "do", "passed", 0, undefined);
-    expect(record.error).toBeUndefined();
+    expect(record.reason).toBeUndefined();
   });
 });

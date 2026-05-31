@@ -2,6 +2,9 @@ description: 单步骤循环执行，适合简单任务的持续迭代直到完�
 
 manual_step:
 
+adversarial_check:
+  timeout_ms: 1800000  # 30 分钟
+
 steps:
   - id: loop
     desc: 自动循环执行任务

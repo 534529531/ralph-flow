@@ -132,7 +132,7 @@ The CHECK phase uses a **separate AI session** with no memory of the implementat
 ## ✨ Features
 
 - 🔄 **Auto-loop with failure context** — retries carry failure reasons so AI learns from mistakes (up to 100 attempts)
-- 🔍 **Independent verification** — separate check session prevents self-review bias; configure which agent to use via `adversarial_check.agent`
+- 🔍 **Independent verification** — separate check session prevents self-review bias; configure agent, model, and timeout via `adversarial_check`
 - 📦 **Natural language YAML** — `do`, `check`, `input`, `output` are all plain English descriptions, no DSL to learn
 - 🔀 **Branching & recovery** — route failures to specific steps (`on_fail: fix-build`), not just retry blindly
 - 🛠️ **Fully customizable** — copy any built-in workflow and modify it; add your own steps, change verification criteria

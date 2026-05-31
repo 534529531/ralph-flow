@@ -6,10 +6,10 @@ import yaml from "js-yaml";
 import { RALPH_COMMANDS } from "./commands.js";
 import { readState, writeState, clearState, pushState, popState } from "./state.js";
 import { setup } from "./setup.js";
-import { handleSessionIdle, handleContinue, getStep, buildDoPrompt, buildSubWorkflowUserTask, getStepRecords, resetStepRecords } from "./executor.js";
+import { handleSessionIdle, handleContinue, getStep, buildDoPrompt, buildSubWorkflowUserTask, getStepRecords, resetStepRecords, resetAdversarialCheckActive } from "./executor.js";
 import { loadWorkflow, listWorkflows } from "./workflow-loader.js";
 import { isSubWorkflowStep } from "./types.js";
-import { logWorkflowStart, logWorkflowCancelled, logWorkflowResumed, logStepStart, logError } from "./logger.js";
+import { logWorkflowStart, logWorkflowCancelled, logWorkflowResumed, logStepStart, logError, logWarn } from "./logger.js";
 import { generateCancellationReport } from "./report.js";
 import type { WorkflowDef, RalphFlowState, StepDef, NormalStepDef } from "./types.js";
 import { RALPH_FLOW_DIR } from "./types.js";
@@ -31,6 +31,7 @@ const autoCleanup = (projectDir: string) => {
     } catch {}
   }
   clearState(projectDir);
+  resetAdversarialCheckActive(projectDir);
 };
 
 const RalphFlowPlugin: Plugin = async ({ project, client, $, directory, worktree }) => {
@@ -55,6 +56,7 @@ const RalphFlowPlugin: Plugin = async ({ project, client, $, directory, worktree
           permission: {
             edit: "deny",
             bash: "allow",
+            external_directory: "allow",
           },
         };
       }
@@ -86,7 +88,7 @@ Use /ralphflow continue to resume, or /ralphflow cancel to cancel it first.`;
             }
             const available = listWorkflows(directory);
             if (available.length === 0) {
-              return "No workflows found. Please create a workflow definition in .opencode/ralph-flow/workflows/\n\nCall the ralphflow-start tool again with a workflow name once one is created.";
+              return "没有找到工作流。请在 .opencode/ralph-flow/workflows/ 目录创建工作流定义文件，然后再次调用 ralphflow-start 工具。";
             }
             return `请选择工作流，当前可用的有：\n${available.map(w => `- ${w.name}: ${w.desc}`).join("\n")}`;
           }
@@ -97,7 +99,7 @@ Use /ralphflow continue to resume, or /ralphflow cancel to cancel it first.`;
 
           const firstStep = workflowDef.steps[0];
           if (!firstStep) {
-            return "Workflow has no steps defined.";
+            return "工作流没有定义任何步骤。";
           }
 
           // 自动清理旧产物
@@ -207,22 +209,24 @@ ${doPrompt}`;
           ensureSetup(directory);
           const state = readState(directory);
           if (!state || !state.active) {
-            return "No active workflow to continue.";
+            return "没有活跃的工作流可以继续。";
           }
 
           const workflow = loadWorkflow(directory, state.workflow_name);
           if (!workflow) {
-            return `Workflow "${state.workflow_name}" not found.`;
+            return `工作流 "${state.workflow_name}" 未找到。`;
           }
 
-          // 重置步骤记录，避免与历史记录重复
+          // 重置步骤记录和并发标记，避免与历史记录重复
           resetStepRecords(context.sessionID);
+          resetAdversarialCheckActive(directory);
 
           const previousFailCount = state.fail_count;
           const previousFailureReason = state.last_failure_reason;
 
           const newState: RalphFlowState = {
             ...state,
+            current_phase: "do",
             fail_count: 0,
             paused: false,
             last_failure_reason: undefined,
@@ -232,9 +236,9 @@ ${doPrompt}`;
 
           let resumeMsg = "";
           if (previousFailCount > 0) {
-            resumeMsg = `## Workflow Resumed\n\nPrevious attempts: ${previousFailCount}`;
+            resumeMsg = `## 工作流已恢复\n\n之前尝试次数: ${previousFailCount}`;
             if (previousFailureReason) {
-              resumeMsg += `\n\n### Last Failure Reason\n${previousFailureReason}`;
+              resumeMsg += `\n\n### 上次失败原因\n${previousFailureReason}`;
             }
             resumeMsg += "\n\n---\n\n";
           }
@@ -250,10 +254,11 @@ ${doPrompt}`;
           ensureSetup(directory);
           const state = readState(directory);
           if (!state || !state.active) {
-            return "No active workflow to cancel.";
+            return "没有活跃的工作流可以取消。";
           }
 
           clearState(directory);
+          resetAdversarialCheckActive(directory);
           logWorkflowCancelled(directory, state.workflow_name);
           // 生成取消报告
           const stepRecords = getStepRecords(context.sessionID);
@@ -271,51 +276,51 @@ ${doPrompt}`;
           ensureSetup(directory);
           const state = readState(directory);
           if (!state) {
-            return "No workflow state found.";
+            return "没有找到工作流状态。";
           }
 
           if (!state.active) {
-            return `Workflow "${state.workflow_name}" is not active (status: completed/cancelled).`;
+            return `工作流 "${state.workflow_name}" 未激活（状态: 已完成/已取消）。`;
           }
 
           const workflow = loadWorkflow(directory, state.workflow_name);
           const currentStep = workflow ? getStep(workflow, state.current_step) : null;
 
-          let status = `## Workflow Status
+          let status = `## 工作流状态
 
-- **Workflow**: ${state.workflow_name}
-- **Status**: ${state.paused ? "paused" : "running"}
-- **Current Step**: ${state.current_step}
-- **Current Phase**: ${state.current_phase}
-- **Fail Count**: ${state.fail_count}`;
+- **工作流**: ${state.workflow_name}
+- **状态**: ${state.paused ? "已暂停" : "运行中"}
+- **当前步骤**: ${state.current_step}
+- **当前阶段**: ${state.current_phase}
+- **失败次数**: ${state.fail_count}`;
 
           if (state.last_failure_reason) {
             status += `
-- **Last Failure Reason**: ${state.last_failure_reason}`;
+- **上次失败原因**: ${state.last_failure_reason}`;
           }
 
           if (currentStep) {
             if (isSubWorkflowStep(currentStep)) {
               status += `
 
-## Current Step Details
+## 当前步骤详情
 
-- **Description**: ${currentStep.desc}
-- **Type**: Sub-workflow
-- **Sub-workflow**: ${currentStep.workflow}
-- **Inputs**: ${currentStep.inputs ? JSON.stringify(currentStep.inputs) : "none"}
-- **Max Fail Count**: ${currentStep.max_fail_count}`;
+- **描述**: ${currentStep.desc}
+- **类型**: 子工作流
+- **子工作流**: ${currentStep.workflow}
+- **输入**: ${currentStep.inputs ? JSON.stringify(currentStep.inputs) : "无"}
+- **最大失败次数**: ${currentStep.max_fail_count}`;
             } else {
               status += `
 
-## Current Step Details
+## 当前步骤详情
 
-- **Description**: ${currentStep.desc}
-- **Task**: ${currentStep.do}
-- **Input**: ${currentStep.input}
-- **Output**: ${currentStep.output}
-- **Check**: ${currentStep.check}
-- **Max Fail Count**: ${currentStep.max_fail_count}`;
+- **描述**: ${currentStep.desc}
+- **任务**: ${currentStep.do}
+- **输入**: ${currentStep.input}
+- **输出**: ${currentStep.output}
+- **检查**: ${currentStep.check}
+- **最大失败次数**: ${currentStep.max_fail_count}`;
             }
           }
 
@@ -330,9 +335,9 @@ ${doPrompt}`;
           ensureSetup(directory);
           const workflows = listWorkflows(directory);
           if (workflows.length === 0) {
-            return "No workflows found. Create workflow definitions in .opencode/ralph-flow/workflows/";
+            return "没有找到工作流。请在 .opencode/ralph-flow/workflows/ 目录创建工作流定义文件。";
           }
-          return `## Available Workflows
+          return `## 可用工作流
 
 ${workflows.map(w => `- **${w.name}**: ${w.desc}`).join("\n")}`;
         },
@@ -365,6 +370,18 @@ ${workflows.map(w => `- **${w.name}**: ${w.desc}`).join("\n")}`;
 
         // 压缩完成后，自动继续工作流
         await handleSessionIdle(client, sessionId, directory, workflow);
+      }
+
+      if (event.type === "session.error") {
+        const error = event.properties.error;
+        if (error?.name === "MessageAbortedError") {
+          const state = readState(directory);
+          if (state && state.active && !state.paused) {
+            logWarn(directory, "session_aborted", { step: state.current_step, phase: state.current_phase });
+            const pausedState: RalphFlowState = { ...state, paused: true };
+            writeState(directory, pausedState);
+          }
+        }
       }
 
       if (event.type === "session.deleted") {

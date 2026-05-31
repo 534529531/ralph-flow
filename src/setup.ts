@@ -78,8 +78,10 @@ permission:
 ## 输出格式
 
 检查完成后输出：
-- \`<promise-check>true</promise-check>\` - 通过
-- \`<promise-check>false</promise-check>\` - 不通过（附原因）
+- 通过：先说明通过原因，最后一行输出 \`<promise-check>true</promise-check>\`
+- 不通过：先说明失败原因，最后一行输出 \`<promise-check>false</promise-check>\`
+
+标签必须独占最后一行。
 `;
 
   try {

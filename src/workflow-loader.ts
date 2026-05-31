@@ -111,6 +111,7 @@ export function parseWorkflowFile(filePath: string, workflowName: string): Workf
         model: adv.model,
         agent: adv.agent,
         system_prompt: adv.system_prompt,
+        timeout_ms: typeof adv.timeout_ms === "number" ? adv.timeout_ms : undefined,
       };
     }
 

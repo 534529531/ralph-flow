@@ -112,7 +112,7 @@ describe("buildCheckPrompt", () => {
   it("should include check criteria", () => {
     const step = makeStep();
     const prompt = buildCheckPrompt(step, "user task");
-    expect(prompt).toContain("## 任务检查");
+    expect(prompt).toContain("## 检查依据");
     expect(prompt).toContain(step.check);
     expect(prompt).toContain("<promise-check>true</promise-check>");
     expect(prompt).toContain("<promise-check>false</promise-check>");
@@ -134,6 +134,25 @@ describe("buildCheckPrompt", () => {
     expect(prompt).toContain("test-step");
     expect(prompt).toContain("Verify the output is correct");
   });
+
+  it("should include step.do task description", () => {
+    const step = makeStep({ do: "Implement user authentication" });
+    const prompt = buildCheckPrompt(step, "user task");
+    expect(prompt).toContain("## Do 阶段任务");
+    expect(prompt).toContain("Implement user authentication");
+  });
+
+  it("should include autonomous exploration guidance", () => {
+    const prompt = buildCheckPrompt(makeStep(), "user task");
+    expect(prompt).toContain("自主探索项目验证任务完成情况");
+    expect(prompt).toContain("不要依赖任何外部提供的");
+  });
+
+  it("should not include implementation context", () => {
+    const prompt = buildCheckPrompt(makeStep(), "user task");
+    expect(prompt).not.toContain("## 实现内容");
+    expect(prompt).not.toContain("防欺骗警告");
+  });
 });
 
 describe("buildContinuePrompt", () => {
@@ -144,11 +163,12 @@ describe("buildContinuePrompt", () => {
     expect(prompt).toContain("<promise>done</promise>");
   });
 
-  it("should build check prompt when in check phase", () => {
+  it("should build do prompt when in check phase (continue always re-executes task)", () => {
     const state = makeState({ current_phase: "check" });
     const step = makeStep();
     const prompt = buildContinuePrompt(state, step);
-    expect(prompt).toContain("<promise-check>true</promise-check>");
+    // continue时始终返回do prompt，因为check阶段由独立的对抗性检查会话处理
+    expect(prompt).toContain("<promise>done</promise>");
   });
 });
 
@@ -170,20 +190,5 @@ describe("buildDoPrompt with retry count", () => {
     const step = makeStep();
     const prompt = buildDoPrompt(step, "task");
     expect(prompt).not.toContain("重试信息");
-  });
-});
-
-describe("buildCheckPrompt with implementation context", () => {
-  it("should include implementation context when provided", () => {
-    const step = makeStep();
-    const prompt = buildCheckPrompt(step, "user task", "const x = 1;");
-    expect(prompt).toContain("## 实现内容");
-    expect(prompt).toContain("const x = 1;");
-  });
-
-  it("should not include implementation context when not provided", () => {
-    const step = makeStep();
-    const prompt = buildCheckPrompt(step, "user task");
-    expect(prompt).not.toContain("## 实现内容");
   });
 });
