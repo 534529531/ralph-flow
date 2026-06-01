@@ -269,7 +269,7 @@ export function parseCheckResult(responseText: string): boolean {
 export function getAdversarialCheckReason(responseText: string): string {
   const lines = responseText.trim().split("\n");
   const reason = lines.slice(0, -1).join("\n").trim();
-  const maxLength = 1000;
+  const maxLength = 5000;
   if (reason.length > maxLength) {
     return reason.substring(0, maxLength) + "...";
   }

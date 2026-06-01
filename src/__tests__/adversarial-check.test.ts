@@ -100,15 +100,15 @@ describe("getAdversarialFailureReason", () => {
     expect(getAdversarialFailureReason(text)).toBe("失败原因1\n失败原因2");
   });
 
-  it("should truncate to 1000 characters", () => {
-    const longReason = "a".repeat(1500);
+  it("should truncate to 5000 characters", () => {
+    const longReason = "a".repeat(6000);
     const text = longReason + "\n<promise-check>false</promise-check>";
     const result = getAdversarialFailureReason(text);
-    expect(result.length).toBe(1003); // 1000 + "..."
+    expect(result.length).toBe(5003); // 5000 + "..."
     expect(result.endsWith("...")).toBe(true);
   });
 
-  it("should not truncate if under 1000 characters", () => {
+  it("should not truncate if under 5000 characters", () => {
     const shortReason = "a".repeat(500);
     const text = shortReason + "\n<promise-check>false</promise-check>";
     expect(getAdversarialFailureReason(text)).toBe(shortReason);
@@ -147,10 +147,10 @@ describe("getAdversarialCheckReason", () => {
   });
 
   it("should truncate long content", () => {
-    const longReason = "a".repeat(1500);
+    const longReason = "a".repeat(6000);
     const text = longReason + "\n<promise-check>true</promise-check>";
     const result = getAdversarialCheckReason(text);
-    expect(result.length).toBe(1003);
+    expect(result.length).toBe(5003);
     expect(result.endsWith("...")).toBe(true);
   });
 
