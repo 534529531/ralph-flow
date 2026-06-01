@@ -73,6 +73,9 @@ export function parseState(content: string): RalphFlowState | null {
       case "paused":
         state.paused = value === "true";
         break;
+      case "session_id":
+        if (value) state.session_id = value;
+        break;
       case "last_failure_reason":
         if (value === "") {
           inFailureReason = true;
@@ -102,6 +105,10 @@ export function serializeState(state: RalphFlowState): string {
     `user_task: ${encodeUserTask(state.user_task)}`,
     `paused: ${state.paused}`,
   ];
+
+  if (state.session_id) {
+    lines.push(`session_id: ${state.session_id}`);
+  }
 
   if (state.last_failure_reason) {
     const reasonLines = state.last_failure_reason.split("\n");

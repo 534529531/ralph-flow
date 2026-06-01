@@ -116,6 +116,7 @@ Use /ralphflow continue to resume, or /ralphflow cancel to cancel it first.`;
             fail_count: 0,
             user_task: task!,
             paused: false,
+            session_id: context.sessionID,
           };
           writeState(directory, newState);
           logWorkflowStart(directory, workflow!);
@@ -145,6 +146,7 @@ Use /ralphflow continue to resume, or /ralphflow cancel to cancel it first.`;
               fail_count: 0,
               user_task: subUserTask,
               paused: false,
+              session_id: context.sessionID,
             };
             writeState(directory, subState);
             logStepStart(directory, subFirstStep.id, "do");
@@ -230,6 +232,7 @@ ${doPrompt}`;
             fail_count: 0,
             paused: false,
             last_failure_reason: undefined,
+            session_id: context.sessionID,
           };
           writeState(directory, newState);
           logWorkflowResumed(directory, state.workflow_name, state.current_step);
@@ -243,7 +246,7 @@ ${doPrompt}`;
             resumeMsg += "\n\n---\n\n";
           }
 
-          return resumeMsg + handleContinue(directory, workflow);
+          return resumeMsg + handleContinue(directory, workflow, context.sessionID);
         },
       }),
 
@@ -352,6 +355,9 @@ ${workflows.map(w => `- **${w.name}**: ${w.desc}`).join("\n")}`;
         const state = readState(directory);
         if (!state || !state.active) return;
 
+        // 只处理工作流所属会话的 idle 事件，忽略子agent会话
+        if (state.session_id && state.session_id !== sessionId) return;
+
         const workflow = loadWorkflow(directory, state.workflow_name);
         if (!workflow) return;
 
@@ -365,6 +371,9 @@ ${workflows.map(w => `- **${w.name}**: ${w.desc}`).join("\n")}`;
         const state = readState(directory);
         if (!state || !state.active || state.paused) return;
 
+        // 只处理工作流所属会话的 compacted 事件
+        if (state.session_id && state.session_id !== sessionId) return;
+
         const workflow = loadWorkflow(directory, state.workflow_name);
         if (!workflow) return;
 
@@ -377,6 +386,10 @@ ${workflows.map(w => `- **${w.name}**: ${w.desc}`).join("\n")}`;
         if (error?.name === "MessageAbortedError") {
           const state = readState(directory);
           if (state && state.active && !state.paused) {
+            // 只处理工作流所属会话的 error 事件
+            const errorSessionId = event.properties.sessionID;
+            if (state.session_id && errorSessionId && state.session_id !== errorSessionId) return;
+
             logWarn(directory, "session_aborted", { step: state.current_step, phase: state.current_phase });
             const pausedState: RalphFlowState = { ...state, paused: true };
             writeState(directory, pausedState);
@@ -387,6 +400,10 @@ ${workflows.map(w => `- **${w.name}**: ${w.desc}`).join("\n")}`;
       if (event.type === "session.deleted") {
         const state = readState(directory);
         if (state && state.active && !state.paused) {
+          // session.deleted 事件的 properties 是 Session 对象，取其 id
+          const deletedSessionId = (event.properties as { info?: { id?: string } })?.info?.id;
+          if (state.session_id && deletedSessionId && state.session_id !== deletedSessionId) return;
+
           const pausedState: RalphFlowState = { ...state, paused: true };
           writeState(directory, pausedState);
         }

@@ -460,6 +460,7 @@ export async function enterSubWorkflow(
     fail_count: 0,
     user_task: subUserTask,
     paused: false,
+    session_id: sessionId,
   };
   writeState(directory, subState);
 
@@ -701,9 +702,15 @@ async function processDoCheckCycle(
     const doPrompt = buildDoPrompt(step, state.user_task, retryContext, failCount);
     const doResult = await injectPrompt(client, sessionId, doPrompt, directory);
 
+    // 每次注入后检查 paused 状态（用户按 ESC 触发 abort 会设置 paused）
+    const currentState = readState(directory);
+    if (currentState?.paused) {
+      logDebug(directory, "do_cycle_paused_detected", { step: step.id });
+      return;
+    }
+
     if (doResult.success && doResult.data !== null && detectDoneTag(doResult.data)) {
       // 检查状态是否已经被 handleSessionIdle 更新到 check 阶段
-      const currentState = readState(directory);
       if (currentState && currentState.current_phase === "check" && currentState.current_step === step.id) {
         logDebug(directory, "processDoCheckCycle_skip_already_in_check", { stepId: step.id });
         return;
@@ -823,6 +830,9 @@ export async function handleSessionIdle(
     const state = readState(directory);
     if (!state || !state.active) return;
 
+    // 防御性检查：确保是工作流所属会话，而非子agent会话
+    if (state.session_id && state.session_id !== sessionId) return;
+
     // 暂停状态（会话关闭或超过最大失败次数）不自动继续
     if (state.paused) return;
 
@@ -868,7 +878,8 @@ export async function handleSessionIdle(
 function setupSubWorkflowChain(
   directory: string,
   step: SubWorkflowStepDef,
-  userTask: string
+  userTask: string,
+  sessionId?: string
 ): string {
   if (getStackDepth(directory) > 5) {
     return `嵌套深度超过限制（5 层）。可能存在循环引用，请检查工作流定义。`;
@@ -895,9 +906,10 @@ function setupSubWorkflowChain(
       fail_count: 0,
       user_task: subUserTask,
       paused: false,
+      session_id: sessionId,
     };
     pushState(directory, intermediateState);
-    return setupSubWorkflowChain(directory, firstStep, subUserTask);
+    return setupSubWorkflowChain(directory, firstStep, subUserTask, sessionId);
   }
 
   const subState: RalphFlowState = {
@@ -908,6 +920,7 @@ function setupSubWorkflowChain(
     fail_count: 0,
     user_task: subUserTask,
     paused: false,
+    session_id: sessionId,
   };
   writeState(directory, subState);
 
@@ -916,7 +929,8 @@ function setupSubWorkflowChain(
 
 export function handleContinue(
   directory: string,
-  workflow: WorkflowDef
+  workflow: WorkflowDef,
+  sessionId?: string
 ): string {
   const state = readState(directory);
   if (!state || !state.active) return "没有活跃的工作流可以继续。";
@@ -938,7 +952,7 @@ export function handleContinue(
       }
       if (isSubWorkflowStep(subStep)) {
         pushState(directory, state);
-        const result = setupSubWorkflowChain(directory, subStep, state.user_task);
+        const result = setupSubWorkflowChain(directory, subStep, state.user_task, sessionId);
         if (result.startsWith("子工作流") || result.startsWith("嵌套深度")) {
           while (getStackDepth(directory) > 0) popState(directory);
         }
@@ -949,7 +963,7 @@ export function handleContinue(
 
     // Case 2: 父工作流因子工作流失败而暂停，需要重新启动子工作流
     pushState(directory, state);
-    const result = setupSubWorkflowChain(directory, step, state.user_task);
+    const result = setupSubWorkflowChain(directory, step, state.user_task, sessionId);
     if (result.startsWith("子工作流") || result.startsWith("嵌套深度")) {
       while (getStackDepth(directory) > 0) popState(directory);
     }

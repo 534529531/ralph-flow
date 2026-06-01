@@ -53,6 +53,7 @@ export interface RalphFlowState {
   paused: boolean;
   last_failure_reason?: string;
   parent?: RalphFlowState;
+  session_id?: string;
 }
 
 export interface PluginConfig {
