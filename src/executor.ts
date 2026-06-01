@@ -106,6 +106,7 @@ export function getStep(workflow: WorkflowDef, stepId: string): StepDef | null {
 
 export function buildDoPrompt(step: NormalStepDef, userTask?: string, retryContext?: string, retryCount?: number): string {
   const sections: string[] = [];
+  const isRetry = retryContext || (retryCount && retryCount > 0);
 
   if (userTask) {
     sections.push(`## 用户需求
@@ -114,7 +115,7 @@ ${userTask}`);
   }
 
   if (retryContext) {
-    sections.push(`## 上次检查失败原因
+    sections.push(`## 上次失败原因
 
 ${retryContext}`);
   }
@@ -138,20 +139,31 @@ ${retryContext}`);
 
 **输入说明**：${step.input}
 
-**输出要求**：${step.output}
+**输出要求**：${step.output}`);
 
----
+  if (isRetry) {
+    sections.push(`---
 
-请执行上述任务。
+## 执行指令
 
-## 完成标准
+上次执行未通过，原因见上方。请执行以下操作：
 
-只有满足以下所有条件才能输出 \`<promise>done</promise>\` 标记：
-1. 任务要求全部完成
-2. 输出要求全部生成
-3. 遇到问题必须解决，不能跳过
+1. **针对上述失败原因进行修复**，不要重复之前未通过的做法
+2. 完成实际工作（修改代码、创建文件、执行命令等）
+3. 所有任务要求和输出要求都满足后，在回复的**最后一行**单独输出 \`<promise>done</promise>\`
+
+不要只描述你打算怎么做，直接去做。不要在工作未完成时输出 done 标记。`);
+  } else {
+    sections.push(`---
+
+## 执行指令
+
+请执行上述任务。完成实际工作（修改代码、创建文件、执行命令等），不要只做分析或规划。
+
+所有任务要求和输出要求都满足后，在回复的**最后一行**单独输出 \`<promise>done</promise>\`。
 
 如果遇到无法解决的问题，说明具体问题，不要输出 done 标记。`);
+  }
 
   return sections.join("\n\n");
 }
@@ -697,64 +709,35 @@ async function processDoCheckCycle(
   const sessionState = getSessionState(sessionId);
   const cycleStart = new Date().toISOString();
 
-  // 重新注入循环：不再依赖 session.idle 事件（会被 isProcessingIdle 阻塞）
-  while (true) {
-    const doPrompt = buildDoPrompt(step, state.user_task, retryContext, failCount);
-    const doResult = await injectPrompt(client, sessionId, doPrompt, directory);
+  const doPrompt = buildDoPrompt(step, state.user_task, retryContext, failCount);
+  const doResult = await injectPrompt(client, sessionId, doPrompt, directory);
 
-    // 每次注入后检查 paused 状态（用户按 ESC 触发 abort 会设置 paused）
-    const currentState = readState(directory);
-    if (currentState?.paused) {
-      logDebug(directory, "do_cycle_paused_detected", { step: step.id });
-      return;
-    }
+  // abort 导致注入失败 → 不做任何事，让 session.error 事件处理器处理暂停
+  if (!doResult.success) return;
 
-    if (doResult.success && doResult.data !== null && detectDoneTag(doResult.data)) {
-      // 检查状态是否已经被 handleSessionIdle 更新到 check 阶段
-      if (currentState && currentState.current_phase === "check" && currentState.current_step === step.id) {
-        logDebug(directory, "processDoCheckCycle_skip_already_in_check", { stepId: step.id });
-        return;
-      }
+  // 检查 paused（abort 事件处理器可能已经设置了 paused）
+  const currentState = readState(directory);
+  if (currentState?.paused) return;
 
-      const doRecord = createStepRecord(step.id, "do", "passed", 0, undefined, cycleStart);
-      sessionState.stepRecords.push(doRecord);
-      sessionState.doReinjectCount = 0;
+  if (doResult.data !== null && detectDoneTag(doResult.data)) {
+    const doRecord = createStepRecord(step.id, "do", "passed", 0, undefined, cycleStart);
+    sessionState.stepRecords.push(doRecord);
+    sessionState.doReinjectCount = 0;
 
-      const checkState: RalphFlowState = {
-        ...state,
-        current_step: step.id,
-        current_phase: "check",
-        fail_count: failCount,
-      };
-      writeState(directory, checkState);
-      logStepStart(directory, step.id, "check");
+    const checkState: RalphFlowState = {
+      ...state,
+      current_step: step.id,
+      current_phase: "check",
+      fail_count: failCount,
+    };
+    writeState(directory, checkState);
+    logStepStart(directory, step.id, "check");
 
-      await routeCheckResult(client, sessionId, directory, workflow, checkState, step, failCount);
-      return;
-    }
-
-    // 未检测到 done 标记 → 重新注入
-    sessionState.doReinjectCount++;
-    if (sessionState.doReinjectCount > MAX_DO_REINJECT) {
-      logWarn(directory, "do_reinject_limit_reached", { step: step.id, count: sessionState.doReinjectCount });
-      const pausedState: RalphFlowState = { ...state, paused: true, last_failure_reason: `do 阶段重试次数已达上限（${MAX_DO_REINJECT}次），AI 未在响应中输出 <promise>done</promise> 标记` };
-      writeState(directory, pausedState);
-      logWorkflowPaused(directory, state.workflow_name, step.id, sessionState.doReinjectCount);
-      const pauseMsg = `## 工作流暂停
-
-步骤 \`${step.id}\` do 阶段已重试 ${sessionState.doReinjectCount} 次，仍未输出完成标记。
-
-### 后续操作
-1. 检查 AI 输出，确认任务是否已完成但缺少标记
-2. 运行 \`/ralphflow continue\` 重试
-3. 运行 \`/ralphflow cancel\` 取消工作流`;
-      await injectPrompt(client, sessionId, pauseMsg, directory, true).catch(() => {});
-      return;
-    }
-
-    logDebug(directory, "do_reinject_cycle", { step: step.id, count: sessionState.doReinjectCount });
-    // 继续循环重新注入
+    await routeCheckResult(client, sessionId, directory, workflow, checkState, step, failCount);
+    return;
   }
+
+  // 未检测到 done 标记 → 返回，由 handleSessionIdle 通过 idle 事件驱动后续注入
 }
 
 export async function injectPrompt(
@@ -860,8 +843,28 @@ export async function handleSessionIdle(
         return;
       }
 
-      // 未检测到 done 标记且非手动步骤 → 调用 processDoCheckCycle（内部有重注入循环）
-      await processDoCheckCycle(client, sessionId, directory, workflow, state, currentStep, state.fail_count);
+      // 未检测到 done 标记且非手动步骤 → 注入继续提示（事件驱动，无阻塞循环）
+      sessionState.doReinjectCount++;
+      if (sessionState.doReinjectCount > MAX_DO_REINJECT) {
+        logWarn(directory, "do_reinject_limit_reached", { step: state.current_step, count: sessionState.doReinjectCount });
+        const pausedState: RalphFlowState = { ...state, paused: true, last_failure_reason: `do 阶段重试次数已达上限（${MAX_DO_REINJECT}次），AI 未在响应中输出 <promise>done</promise> 标记` };
+        writeState(directory, pausedState);
+        logWorkflowPaused(directory, state.workflow_name, state.current_step, sessionState.doReinjectCount);
+        const pauseMsg = `## 工作流暂停
+
+步骤 \`${state.current_step}\` do 阶段已重试 ${sessionState.doReinjectCount} 次，仍未输出完成标记。
+
+### 后续操作
+1. 检查 AI 输出，确认任务是否已完成但缺少标记
+2. 运行 \`/ralphflow continue\` 重试
+3. 运行 \`/ralphflow cancel\` 取消工作流`;
+        await injectPrompt(client, sessionId, pauseMsg, directory, true).catch(() => {});
+        return;
+      }
+
+      logDebug(directory, "do_idle_reinject", { step: state.current_step, count: sessionState.doReinjectCount });
+      const doPrompt = buildDoPrompt(currentStep as NormalStepDef, state.user_task, state.last_failure_reason, state.fail_count);
+      await injectPrompt(client, sessionId, doPrompt, directory);
       return;
     }
 

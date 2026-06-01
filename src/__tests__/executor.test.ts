@@ -97,7 +97,7 @@ describe("buildDoPrompt", () => {
 
   it("should include retry context", () => {
     const prompt = buildDoPrompt(makeStep(), "task", "Previous attempt failed because of X");
-    expect(prompt).toContain("## 上次检查失败原因");
+    expect(prompt).toContain("## 上次失败原因");
     expect(prompt).toContain("Previous attempt failed because of X");
   });
 
