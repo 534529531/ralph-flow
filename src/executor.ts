@@ -10,7 +10,6 @@ import type { OpencodeClient } from "@opencode-ai/sdk";
 interface SessionState {
   stepRecords: StepExecutionRecord[];
   currentStepStartTime: string | null;
-  isProcessingIdle: boolean;
   doReinjectCount: number;
 }
 
@@ -35,7 +34,6 @@ function getSessionState(sessionId: string): SessionState {
     state = {
       stepRecords: [],
       currentStepStartTime: null,
-      isProcessingIdle: false,
       doReinjectCount: 0,
     };
     sessionStates.set(sessionId, state);
@@ -61,7 +59,6 @@ export function resetStepRecords(sessionId?: string): void {
     state.stepRecords = [];
     state.currentStepStartTime = new Date().toISOString();
     state.doReinjectCount = 0;
-    state.isProcessingIdle = false;
   } else {
     sessionStates.clear();
   }
@@ -339,14 +336,7 @@ async function adversarialCheck(
 
 ### 检查依据
 
-${step.check}
-
-### 独立会话指令
-
-独立会话收到的指令：
----
-${checkPrompt}
----`;
+${step.check}`;
 
     const notifyResult = await injectPrompt(client, sessionId, notifyMsg, directory, true);
     
@@ -480,8 +470,6 @@ export async function enterSubWorkflow(
 
   if (isSubWorkflowStep(firstStep)) {
     await enterSubWorkflow(client, sessionId, directory, subWorkflow, subState, firstStep);
-  } else {
-    await processDoCheckCycle(client, sessionId, directory, subWorkflow, subState, firstStep, 0);
   }
 }
 
@@ -516,14 +504,15 @@ async function resumeParentWorkflow(
 
     const nextStep = getStep(parentWorkflow, parentStep.on_pass);
     if (nextStep) {
-      const updatedState = { ...parentState, current_step: nextStep.id, current_phase: "do" as const, fail_count: 0 };
+      const updatedState = { ...parentState, current_step: nextStep.id, current_phase: "do" as const, fail_count: 0, last_failure_reason: undefined };
       writeState(directory, updatedState);
       logStepStart(directory, nextStep.id, "do");
 
       if (isSubWorkflowStep(nextStep)) {
         await enterSubWorkflow(client, sessionId, directory, parentWorkflow, updatedState, nextStep);
       } else {
-        await processDoCheckCycle(client, sessionId, directory, parentWorkflow, updatedState, nextStep, 0);
+        const doPrompt = buildDoPrompt(nextStep, parentState.user_task);
+        await injectPrompt(client, sessionId, doPrompt, directory);
       }
     }
   } else {
@@ -549,14 +538,15 @@ async function resumeParentWorkflow(
 
     const nextStep = getStep(parentWorkflow, parentStep.on_fail);
     if (nextStep) {
-      const updatedState = { ...parentState, current_step: nextStep.id, current_phase: "do" as const, fail_count: newFailCount };
+      const updatedState = { ...parentState, current_step: nextStep.id, current_phase: "do" as const, fail_count: newFailCount, last_failure_reason: failureReason };
       writeState(directory, updatedState);
       logStepStart(directory, nextStep.id, "do");
 
       if (isSubWorkflowStep(nextStep)) {
         await enterSubWorkflow(client, sessionId, directory, parentWorkflow, updatedState, nextStep);
       } else {
-        await processDoCheckCycle(client, sessionId, directory, parentWorkflow, updatedState, nextStep, newFailCount, failureReason);
+        const doPrompt = buildDoPrompt(nextStep, parentState.user_task, failureReason, newFailCount);
+        await injectPrompt(client, sessionId, doPrompt, directory);
       }
     }
   }
@@ -636,14 +626,15 @@ async function routeCheckResult(
     } else {
       const nextStep = getStep(workflow, step.on_pass);
       if (nextStep) {
-        const nextState = { ...state, current_step: nextStep.id, current_phase: "do" as const, fail_count: 0 };
+        const nextState = { ...state, current_step: nextStep.id, current_phase: "do" as const, fail_count: 0, last_failure_reason: undefined };
         writeState(directory, nextState);
         logStepStart(directory, nextStep.id, "do");
 
         if (isSubWorkflowStep(nextStep)) {
           await enterSubWorkflow(client, sessionId, directory, workflow, nextState, nextStep);
         } else {
-          await processDoCheckCycle(client, sessionId, directory, workflow, nextState, nextStep, 0);
+          const doPrompt = buildDoPrompt(nextStep, state.user_task);
+          await injectPrompt(client, sessionId, doPrompt, directory);
         }
       }
     }
@@ -677,14 +668,15 @@ ${reason || "未知"}
     } else {
       const nextStep = getStep(workflow, step.on_fail);
       if (nextStep) {
-        const nextState = { ...state, current_step: nextStep.id, current_phase: "do" as const, fail_count: newFailCount };
+        const nextState = { ...state, current_step: nextStep.id, current_phase: "do" as const, fail_count: newFailCount, last_failure_reason: reason };
         writeState(directory, nextState);
         logStepStart(directory, nextStep.id, "do");
 
         if (isSubWorkflowStep(nextStep)) {
           await enterSubWorkflow(client, sessionId, directory, workflow, nextState, nextStep);
         } else {
-          await processDoCheckCycle(client, sessionId, directory, workflow, nextState, nextStep, newFailCount, reason);
+          const doPrompt = buildDoPrompt(nextStep, state.user_task, reason, newFailCount);
+          await injectPrompt(client, sessionId, doPrompt, directory);
         }
       }
     }
@@ -693,52 +685,6 @@ ${reason || "未知"}
 }
 
 const MAX_DO_REINJECT = 5;
-
-async function processDoCheckCycle(
-  client: OpencodeClient,
-  sessionId: string,
-  directory: string,
-  workflow: WorkflowDef,
-  state: RalphFlowState,
-  step: StepDef,
-  failCount: number,
-  retryContext?: string
-): Promise<void> {
-  if (isSubWorkflowStep(step)) return;
-
-  const sessionState = getSessionState(sessionId);
-  const cycleStart = new Date().toISOString();
-
-  const doPrompt = buildDoPrompt(step, state.user_task, retryContext, failCount);
-  const doResult = await injectPrompt(client, sessionId, doPrompt, directory);
-
-  // abort 导致注入失败 → 不做任何事，让 session.error 事件处理器处理暂停
-  if (!doResult.success) return;
-
-  // 检查 paused（abort 事件处理器可能已经设置了 paused）
-  const currentState = readState(directory);
-  if (currentState?.paused) return;
-
-  if (doResult.data !== null && detectDoneTag(doResult.data)) {
-    const doRecord = createStepRecord(step.id, "do", "passed", 0, undefined, cycleStart);
-    sessionState.stepRecords.push(doRecord);
-    sessionState.doReinjectCount = 0;
-
-    const checkState: RalphFlowState = {
-      ...state,
-      current_step: step.id,
-      current_phase: "check",
-      fail_count: failCount,
-    };
-    writeState(directory, checkState);
-    logStepStart(directory, step.id, "check");
-
-    await routeCheckResult(client, sessionId, directory, workflow, checkState, step, failCount);
-    return;
-  }
-
-  // 未检测到 done 标记 → 返回，由 handleSessionIdle 通过 idle 事件驱动后续注入
-}
 
 export async function injectPrompt(
   client: OpencodeClient,
@@ -807,50 +753,47 @@ export async function handleSessionIdle(
   workflow: WorkflowDef
 ): Promise<void> {
   const sessionState = getSessionState(sessionId);
-  if (sessionState.isProcessingIdle) return;
-  sessionState.isProcessingIdle = true;
-  try {
-    const state = readState(directory);
-    if (!state || !state.active) return;
+  const state = readState(directory);
+  if (!state || !state.active) return;
 
-    // 防御性检查：确保是工作流所属会话，而非子agent会话
-    if (state.session_id && state.session_id !== sessionId) return;
+  // 防御性检查：确保是工作流所属会话，而非子agent会话
+  if (state.session_id && state.session_id !== sessionId) return;
 
-    // 暂停状态（会话关闭或超过最大失败次数）不自动继续
-    if (state.paused) return;
+  // 暂停状态（会话关闭或超过最大失败次数）不自动继续
+  if (state.paused) return;
 
-    const currentStep = getStep(workflow, state.current_step);
-    if (!currentStep || isSubWorkflowStep(currentStep)) return;
+  const currentStep = getStep(workflow, state.current_step);
+  if (!currentStep || isSubWorkflowStep(currentStep)) return;
 
-    const messageResult = await getLastAssistantMessage(client, sessionId, directory);
-    if (!messageResult.success) {
-      logWarn(directory, "get_last_message_failed", { error: messageResult.error });
+  const messageResult = await getLastAssistantMessage(client, sessionId, directory);
+  if (!messageResult.success) {
+    logWarn(directory, "get_last_message_failed", { error: messageResult.error });
+    return;
+  }
+  
+  const responseText = messageResult.data;
+  const now = new Date().toISOString();
+
+  if (state.current_phase === "do") {
+    if (detectDoneTag(responseText)) {
+      await handleDoPhaseDone(client, sessionId, directory, workflow, state, currentStep, sessionState, sessionState.currentStepStartTime || now);
       return;
     }
-    
-    const responseText = messageResult.data;
-    const now = new Date().toISOString();
 
-    if (state.current_phase === "do") {
-      if (detectDoneTag(responseText)) {
-        await handleDoPhaseDone(client, sessionId, directory, workflow, state, currentStep, sessionState, sessionState.currentStepStartTime || now);
-        return;
-      }
+    // 手动步骤：AI 停下来问问题时，不自动注入提示词
+    if (workflow.manual_step.includes(state.current_step)) {
+      logDebug(directory, "manual_step_skip", { step: state.current_step });
+      return;
+    }
 
-      // 手动步骤：AI 停下来问问题时，不自动注入提示词
-      if (workflow.manual_step.includes(state.current_step)) {
-        logDebug(directory, "manual_step_skip", { step: state.current_step });
-        return;
-      }
-
-      // 未检测到 done 标记且非手动步骤 → 注入继续提示（事件驱动，无阻塞循环）
-      sessionState.doReinjectCount++;
-      if (sessionState.doReinjectCount > MAX_DO_REINJECT) {
-        logWarn(directory, "do_reinject_limit_reached", { step: state.current_step, count: sessionState.doReinjectCount });
-        const pausedState: RalphFlowState = { ...state, paused: true, last_failure_reason: `do 阶段重试次数已达上限（${MAX_DO_REINJECT}次），AI 未在响应中输出 <promise>done</promise> 标记` };
-        writeState(directory, pausedState);
-        logWorkflowPaused(directory, state.workflow_name, state.current_step, sessionState.doReinjectCount);
-        const pauseMsg = `## 工作流暂停
+    // 未检测到 done 标记且非手动步骤 → 注入继续提示（事件驱动，无阻塞循环）
+    sessionState.doReinjectCount++;
+    if (sessionState.doReinjectCount > MAX_DO_REINJECT) {
+      logWarn(directory, "do_reinject_limit_reached", { step: state.current_step, count: sessionState.doReinjectCount });
+      const pausedState: RalphFlowState = { ...state, paused: true, last_failure_reason: `do 阶段重试次数已达上限（${MAX_DO_REINJECT}次），AI 未在响应中输出 <promise>done</promise> 标记` };
+      writeState(directory, pausedState);
+      logWorkflowPaused(directory, state.workflow_name, state.current_step, sessionState.doReinjectCount);
+      const pauseMsg = `## 工作流暂停
 
 步骤 \`${state.current_step}\` do 阶段已重试 ${sessionState.doReinjectCount} 次，仍未输出完成标记。
 
@@ -858,23 +801,19 @@ export async function handleSessionIdle(
 1. 检查 AI 输出，确认任务是否已完成但缺少标记
 2. 运行 \`/ralphflow continue\` 重试
 3. 运行 \`/ralphflow cancel\` 取消工作流`;
-        await injectPrompt(client, sessionId, pauseMsg, directory, true).catch(() => {});
-        return;
-      }
-
-      logDebug(directory, "do_idle_reinject", { step: state.current_step, count: sessionState.doReinjectCount });
-      const doPrompt = buildDoPrompt(currentStep as NormalStepDef, state.user_task, state.last_failure_reason, state.fail_count);
-      await injectPrompt(client, sessionId, doPrompt, directory);
+      await injectPrompt(client, sessionId, pauseMsg, directory, true).catch(() => {});
       return;
     }
 
-    // check 阶段 - 触发对抗性检查
-    if (state.current_phase === "check") {
-      const handled = await routeCheckResult(client, sessionId, directory, workflow, state, currentStep, state.fail_count);
-      if (handled) return;
-    }
-  } finally {
-    sessionState.isProcessingIdle = false;
+    logDebug(directory, "do_idle_reinject", { step: state.current_step, count: sessionState.doReinjectCount });
+    const doPrompt = buildDoPrompt(currentStep as NormalStepDef, state.user_task, state.last_failure_reason, state.fail_count);
+    await injectPrompt(client, sessionId, doPrompt, directory);
+    return;
+  }
+
+  // check 阶段 - 触发对抗性检查
+  if (state.current_phase === "check") {
+    await routeCheckResult(client, sessionId, directory, workflow, state, currentStep, state.fail_count);
   }
 }
 
