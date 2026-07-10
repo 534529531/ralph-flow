@@ -837,6 +837,24 @@ export function createEngine(projectDir: string, platform: Platform) {
     return path.join(getRalphFlowDir(), "workflows");
   }
 
+  // Global user workflows, available across ALL projects and surviving plugin
+  // updates (built-ins live inside the managed npm package, which is
+  // overwritten on update and not user-editable when installed online). Lives
+  // under opencode's own global config home so users find it next to their
+  // other opencode config. Honors XDG_CONFIG_HOME.
+  function getGlobalConfigHome(): string | null {
+    const xdg = process.env.XDG_CONFIG_HOME;
+    if (xdg && path.isAbsolute(xdg)) return path.join(xdg, "opencode");
+    const home = process.env.HOME || process.env.USERPROFILE || "";
+    if (!home) return null;
+    return path.join(home, ".config", "opencode");
+  }
+
+  function getGlobalWorkflowsDir(): string | null {
+    const cfg = getGlobalConfigHome();
+    return cfg ? path.join(cfg, RALPH_FLOW_DIR, "workflows") : null;
+  }
+
   function parseWorkflowFile(filePath: string, workflowName: string, problems?: string[]): WorkflowDef | null {
     // Validation failures are collected into `problems` (when provided) so tool
     // responses can tell the user WHY a workflow is unusable.
@@ -965,9 +983,16 @@ export function createEngine(projectDir: string, platform: Platform) {
 
   function loadWorkflow(workflowName: string, problems?: string[]): WorkflowDef | null {
     if (!isValidWorkflowName(workflowName)) return null;
+    const globalDir = getGlobalWorkflowsDir();
+    // Resolution order: project > global user > plugin built-in. A same-named
+    // workflow at an earlier tier shadows the later ones.
     const searchPaths = [
       path.join(getProjectWorkflowsDir(), `${workflowName}.yaml`),
       path.join(getProjectWorkflowsDir(), `${workflowName}.yml`),
+      ...(globalDir ? [
+        path.join(globalDir, `${workflowName}.yaml`),
+        path.join(globalDir, `${workflowName}.yml`),
+      ] : []),
       path.join(getPluginWorkflowsDir(), `${workflowName}.yaml`),
       path.join(getPluginWorkflowsDir(), `${workflowName}.yml`),
     ];
@@ -1028,11 +1053,13 @@ export function createEngine(projectDir: string, platform: Platform) {
         console.error(`[ralph-flow] Error scanning dir ${dir}:`, e.message);
       }
     };
-    // Scan project dir first, then plugin — the first VALID writer wins, so a
-    // valid project workflow shadows a same-named built-in while an invalid one
-    // falls through to it. This matches loadWorkflow's resolution order exactly,
-    // so list and execution agree.
+    // Scan project → global → plugin — the first VALID writer wins, so a valid
+    // project workflow shadows a same-named global one which shadows a built-in,
+    // while an invalid one falls through. Matches loadWorkflow's resolution
+    // order exactly, so list and execution agree.
     scanDir(getProjectWorkflowsDir());
+    const globalDir = getGlobalWorkflowsDir();
+    if (globalDir) scanDir(globalDir);
     scanDir(getPluginWorkflowsDir());
     return Array.from(workflows.values());
   }
@@ -1141,7 +1168,7 @@ export function createEngine(projectDir: string, platform: Platform) {
   }
 
   interface WorkflowCandidate {
-    source: "project" | "plugin";
+    source: "project" | "global" | "plugin";
     sourceLabel: string;
     file: string;
     filePath: string;
@@ -1154,14 +1181,16 @@ export function createEngine(projectDir: string, platform: Platform) {
   }
 
   /**
-   * Diagnose every workflow file in both search dirs. Returns per-name entries
-   * in loadWorkflow's exact resolution order (project .yaml, project .yml,
-   * plugin .yaml, plugin .yml) so "which file actually runs" is derivable, plus
-   * yaml files that aren't workflow-shaped at all.
+   * Diagnose every workflow file in all search dirs. Returns per-name entries
+   * in loadWorkflow's exact resolution order (project, global user, plugin
+   * built-in) so "which file actually runs" is derivable, plus yaml files that
+   * aren't workflow-shaped at all.
    */
   function diagnoseWorkflowFiles(): { byName: Map<string, WorkflowCandidate[]>; strays: WorkflowCandidate[] } {
+    const globalDir = getGlobalWorkflowsDir();
     const sources = [
       { source: "project" as const, label: "项目自定义", dir: getProjectWorkflowsDir() },
+      ...(globalDir ? [{ source: "global" as const, label: "全局用户", dir: globalDir }] : []),
       { source: "plugin" as const, label: "插件内置", dir: getPluginWorkflowsDir() },
     ];
     const byName = new Map<string, WorkflowCandidate[]>(); // name -> candidate[] in resolution order
@@ -1179,7 +1208,9 @@ export function createEngine(projectDir: string, platform: Platform) {
         const name = file.replace(/\.(yaml|yml)$/, "");
         const relPath = source === "project"
           ? `.opencode/${RALPH_FLOW_DIR}/workflows/${file}`
-          : `<插件目录>/workflows/${file}`;
+          : source === "global"
+            ? `~/.config/opencode/${RALPH_FLOW_DIR}/workflows/${file}`
+            : `<插件目录>/workflows/${file}`;
         const candidate: WorkflowCandidate = { source, sourceLabel: label, file, filePath, relPath, name };
 
         try {
@@ -1278,9 +1309,10 @@ export function createEngine(projectDir: string, platform: Platform) {
         launchable++;
         const shadowed = candidates.filter((c) => c !== effective);
         let sourceNote = `${effective.relPath}（${effective.sourceLabel}`;
-        const shadowedValid = shadowed.find((c) => c.verdict === "valid");
-        if (effective.source === "project" && shadowedValid && shadowedValid.source === "plugin") {
-          sourceNote += `，遮蔽了同名内置 ${shadowedValid.relPath}`;
+        // A valid candidate LATER in resolution order is shadowed by this one.
+        const shadowedValid = shadowed.find((c) => c.verdict === "valid" && candidates.indexOf(c) > candidates.indexOf(effective));
+        if (shadowedValid) {
+          sourceNote += `，遮蔽了同名${shadowedValid.sourceLabel} ${shadowedValid.relPath}`;
         }
         sourceNote += "）";
         lines.push(`- 生效文件：${sourceNote}`);
@@ -1321,7 +1353,7 @@ export function createEngine(projectDir: string, platform: Platform) {
     if (detailLines.length > 0) {
       sections.push(`## 工作流详情\n\n${detailLines.join("\n\n")}`);
     } else {
-      sections.push(`## 工作流详情\n\n两个目录（项目 .opencode/ralph-flow/workflows/ 与插件内置 workflows/）里都没有找到工作流定义文件。可以用 /ralphflow-create 交互式创建一个。`);
+      sections.push(`## 工作流详情\n\n三个目录（项目 .opencode/ralph-flow/workflows/、全局 ~/.config/opencode/ralph-flow/workflows/、插件内置 workflows/）里都没有找到工作流定义文件。可以用 /ralphflow-create 交互式创建一个。`);
     }
 
     if (strays.length > 0) {
@@ -1334,8 +1366,9 @@ export function createEngine(projectDir: string, platform: Platform) {
 
     const projectDirExists = fs.existsSync(getProjectWorkflowsDir());
     const hasProjectWorkflow = names.some((n) => byName.get(n)!.some((c) => c.source === "project"));
-    if (!hasProjectWorkflow) {
-      sections.push(`## 提示\n\n本项目还没有自定义工作流${projectDirExists ? "" : "（.opencode/ralph-flow/workflows/ 目录尚未创建）"}。内置工作流开箱即用；要定制自己的流程，可以运行 /ralphflow-create 交互式创建。`);
+    const hasGlobalWorkflow = names.some((n) => byName.get(n)!.some((c) => c.source === "global"));
+    if (!hasProjectWorkflow && !hasGlobalWorkflow) {
+      sections.push(`## 提示\n\n还没有自定义工作流${projectDirExists ? "" : "（.opencode/ralph-flow/workflows/ 目录尚未创建）"}。内置工作流开箱即用；要定制自己的流程，可以运行 /ralphflow-create 交互式创建。放在 \`.opencode/ralph-flow/workflows/\` 只对本项目生效；放在全局 \`~/.config/opencode/ralph-flow/workflows/\` 则所有项目可用（且插件更新不会覆盖）。`);
     }
 
     return sections.join("\n\n");
@@ -2036,19 +2069,20 @@ ${renderStepText(step.check)}
   }
 
   function ensureProjectWorkflows(): void {
-    const projectWfDir = getProjectWorkflowsDir();
-    try {
-      // Only ensure the project workflows dir exists as a place for the user to
-      // drop *custom* workflows. Built-in workflows are intentionally NOT copied
-      // here: loadWorkflow falls back to the plugin dir, so built-ins always
-      // resolve to the latest shipped version. Seeding copies would shadow the
-      // plugin dir and go stale on plugin updates. To customize a built-in, the
-      // user explicitly copies it into this dir to shadow it.
-      if (!fs.existsSync(projectWfDir)) {
-        fs.mkdirSync(projectWfDir, { recursive: true });
+    // Ensure the project AND global user workflow dirs exist as places for the
+    // user to drop *custom* workflows. Built-in workflows are intentionally NOT
+    // copied into either: loadWorkflow falls back to the plugin dir, so
+    // built-ins always resolve to the latest shipped version. Seeding copies
+    // would shadow the plugin dir and go stale on plugin updates. The global
+    // dir matters most for online installs, where the plugin package itself is
+    // a managed, non-editable location.
+    for (const dir of [getProjectWorkflowsDir(), getGlobalWorkflowsDir()]) {
+      if (!dir) continue;
+      try {
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      } catch (e: any) {
+        console.error("[ralph-flow] Error initializing workflows dir:", dir, e.message);
       }
-    } catch (e: any) {
-      console.error("[ralph-flow] Error initializing project workflows:", e.message);
     }
   }
 
@@ -2061,6 +2095,7 @@ ${renderStepText(step.check)}
     // paths
     getRalphFlowDir, getInstancesRoot, getReportsDir, getInstanceDir, instPath,
     getArtifactsDir, getArtifactsRelDir, getPluginWorkflowsDir, getProjectWorkflowsDir,
+    getGlobalWorkflowsDir, getGlobalConfigHome,
     // instance infra
     generateInstanceId, isValidInstanceId, instanceExists,
     writeArtifactsDirName, writeExtraDirs, readExtraDirs,

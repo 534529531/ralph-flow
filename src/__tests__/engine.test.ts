@@ -67,6 +67,80 @@ afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
+// ─── Global user workflows ───────────────────────────────────────────────────
+
+describe("global workflows", () => {
+  let globalHome: string;
+  let savedXdg: string | undefined;
+
+  function writeGlobalWorkflow(name: string, content: string): void {
+    const dir = path.join(globalHome, "opencode", "ralph-flow", "workflows");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${name}.yaml`), content);
+  }
+
+  beforeEach(() => {
+    globalHome = fs.mkdtempSync(path.join(os.tmpdir(), "ralph-flow-xdg-"));
+    savedXdg = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = globalHome; // getGlobalConfigHome reads this at call time
+    engine = makeEngine(); // fresh engine so nothing is bound
+  });
+
+  afterEach(() => {
+    if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = savedXdg;
+    fs.rmSync(globalHome, { recursive: true, force: true });
+  });
+
+  it("getGlobalWorkflowsDir points into the opencode config home", () => {
+    expect(engine.getGlobalWorkflowsDir()).toBe(path.join(globalHome, "opencode", "ralph-flow", "workflows"));
+  });
+
+  it("loads a workflow from the global dir", () => {
+    writeGlobalWorkflow("my-global", SIMPLE_WF);
+    const wf = engine.loadWorkflow("my-global");
+    expect(wf).not.toBeNull();
+    expect(wf!.steps.length).toBe(2);
+  });
+
+  it("lists global workflows alongside built-ins", () => {
+    writeGlobalWorkflow("my-global", SIMPLE_WF);
+    const names = engine.listWorkflows().map((w) => w.name);
+    expect(names).toContain("my-global");
+    expect(names).toContain("loop"); // built-in still present
+  });
+
+  it("resolution order: project shadows global shadows plugin", () => {
+    // global shadows a built-in (loop)
+    writeGlobalWorkflow("loop", SIMPLE_WF);
+    expect(engine.loadWorkflow("loop")!.description).toBe("test workflow");
+
+    // project shadows global
+    writeProjectWorkflow("loop", SIMPLE_WF.replace("test workflow", "project wins"));
+    expect(engine.loadWorkflow("loop")!.description).toBe("project wins");
+  });
+
+  it("an invalid global file falls through to the built-in", () => {
+    const builtIn = engine.loadWorkflow("loop")!.description;
+    writeGlobalWorkflow("loop", "steps: []");
+    expect(engine.loadWorkflow("loop")!.description).toBe(builtIn);
+  });
+
+  it("doctor reports the global source and its shadowing", () => {
+    writeGlobalWorkflow("loop", SIMPLE_WF); // global shadows built-in
+    const report = engine.buildDoctorReport();
+    expect(report).toContain("全局用户");
+    expect(report).toContain("~/.config/opencode/ralph-flow/workflows/loop.yaml");
+    expect(report).toContain("遮蔽了同名插件内置");
+  });
+
+  it("ensureProjectWorkflows creates both the project and the global dir", () => {
+    engine.ensureProjectWorkflows();
+    expect(fs.existsSync(engine.getProjectWorkflowsDir())).toBe(true);
+    expect(fs.existsSync(engine.getGlobalWorkflowsDir()!)).toBe(true);
+  });
+});
+
 // ─── Workflow loading / validation ───────────────────────────────────────────
 
 describe("workflow loading", () => {
@@ -310,7 +384,7 @@ steps:
     fs.mkdirSync(instDir, { recursive: true });
     fs.writeFileSync(path.join(instDir, "state.json"), "{ not json");
     const report = engine.buildDoctorReport();
-    expect(report).toContain("遮蔽了同名内置");
+    expect(report).toContain("遮蔽了同名插件内置");
     expect(report).toContain("notes.yaml");
     expect(report).toContain("corrupt-1");
   });

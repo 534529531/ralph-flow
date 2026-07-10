@@ -3,25 +3,35 @@
  *
  * - Writes the read-only ralph-check agent definition (the opencode
  *   counterpart of the Claude version's --allowedTools whitelist).
- * - Syncs the plugin's skills into .opencode/skills/ (opencode discovers
- *   skills from files only; a managed marker keeps user-authored skills
- *   untouched while plugin-owned copies follow plugin updates).
- * - Cleans up pre-2.0 leftovers: workflows the old setup used to copy (and
- *   overwrite on every startup) into the project dir would now SHADOW the
- *   plugin's updated built-ins — they are parked as *.pre-2.0-backup.
+ * - Syncs the plugin's skills into the GLOBAL ~/.config/opencode/skills/
+ *   (opencode discovers skills from fixed filesystem locations only; the
+ *   global one keeps the user's project tree clean). A managed marker keeps
+ *   user-authored skills untouched while plugin-owned copies follow updates.
+ * - Cleans up leftovers: pre-2.0 workflow copies that would SHADOW the
+ *   plugin's updated built-ins (parked as *.pre-2.0-backup), and the
+ *   per-project skill copies a 2.0.x–2.1.x setup used to write.
  *
  * The Claude version needs none of this (skills/agents ship inside the plugin
  * package; built-ins were never copied), so this file is adapter-only.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, cpSync, renameSync, statSync } from "fs";
-import { join, dirname } from "path";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, cpSync, renameSync, rmSync, statSync } from "fs";
+import { join, dirname, isAbsolute } from "path";
 import { fileURLToPath } from "url";
 import { RALPH_FLOW_DIR } from "./engine.js";
 
 function getPluginRoot(): string {
   const __filename = fileURLToPath(import.meta.url);
   return dirname(dirname(__filename));
+}
+
+/** opencode's global config home (honors XDG_CONFIG_HOME), or null. */
+function getGlobalConfigHome(): string | null {
+  const xdg = process.env.XDG_CONFIG_HOME;
+  if (xdg && isAbsolute(xdg)) return join(xdg, "opencode");
+  const home = process.env.HOME || process.env.USERPROFILE || "";
+  if (!home) return null;
+  return join(home, ".config", "opencode");
 }
 
 const MANAGED_MARKER = ".ralph-flow-managed";
@@ -74,15 +84,23 @@ permission:
 }
 
 /**
- * Copy the plugin's bundled skills into the project's .opencode/skills/.
- * Only dirs carrying the managed marker (or not existing yet) are written, so
- * a user's own skill with the same name is never clobbered. Managed copies are
+ * Sync the plugin's bundled skills into opencode's GLOBAL skills dir
+ * (~/.config/opencode/skills/), NOT the project — opencode's `skill` tool only
+ * discovers skills from fixed filesystem locations, and the global one keeps
+ * the user's project tree clean while making the c-to-rust / everything2rust
+ * skills available in every project (the closest analogue to the Claude Code
+ * plugin, which loads its skills straight from the plugin package).
+ *
+ * Only dirs carrying the managed marker (or not existing yet) are written, so a
+ * user's own skill with the same name is never clobbered. Managed copies are
  * refreshed on every startup so they track the installed plugin version.
  */
-function setupSkills(projectDir: string): void {
+function setupSkills(): void {
   const pluginSkillsDir = join(getPluginRoot(), "skills");
   if (!existsSync(pluginSkillsDir)) return;
-  const projectSkillsDir = join(projectDir, ".opencode", "skills");
+  const cfgHome = getGlobalConfigHome();
+  if (!cfgHome) return;
+  const globalSkillsDir = join(cfgHome, "skills");
 
   let entries: string[];
   try { entries = readdirSync(pluginSkillsDir); } catch { return; }
@@ -91,7 +109,7 @@ function setupSkills(projectDir: string): void {
     try {
       if (!statSync(src).isDirectory()) continue;
     } catch { continue; }
-    const dest = join(projectSkillsDir, name);
+    const dest = join(globalSkillsDir, name);
     if (existsSync(dest) && !existsSync(join(dest, MANAGED_MARKER))) continue; // user-authored — hands off
     try {
       cpSync(src, dest, { recursive: true });
@@ -100,6 +118,26 @@ function setupSkills(projectDir: string): void {
       console.error(`[ralph-flow] skill sync failed (${name}):`, e);
     }
   }
+}
+
+/**
+ * Remove skill copies a previous 2.0.x–2.1.x wrote into the PROJECT
+ * (.opencode/skills/), which polluted the user's tree. Only our own managed
+ * copies are removed; user-authored skills are left untouched.
+ */
+function cleanupProjectSkillCopies(projectDir: string): void {
+  const projectSkillsDir = join(projectDir, ".opencode", "skills");
+  if (!existsSync(projectSkillsDir)) return;
+  let entries: string[];
+  try { entries = readdirSync(projectSkillsDir); } catch { return; }
+  for (const name of entries) {
+    const dir = join(projectSkillsDir, name);
+    if (existsSync(join(dir, MANAGED_MARKER))) {
+      try { rmSync(dir, { recursive: true, force: true }); } catch {}
+    }
+  }
+  // Drop the skills dir if it is now empty (never remove a non-empty one).
+  try { readdirSync(projectSkillsDir).length === 0 && rmSync(projectSkillsDir, { recursive: false }); } catch {}
 }
 
 /**
@@ -127,6 +165,7 @@ function cleanupLegacyWorkflowCopies(projectDir: string): void {
 
 export function setup(projectDir: string): void {
   cleanupLegacyWorkflowCopies(projectDir);
+  cleanupProjectSkillCopies(projectDir);
   setupCheckAgent(projectDir);
-  setupSkills(projectDir);
+  setupSkills();
 }
