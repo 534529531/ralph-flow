@@ -43,16 +43,15 @@ Each workflow step has two phases:
 - Execute the current step's task based on the prompt you receive
 - Complete the actual work (write code, create files, run commands)
 - When all task requirements are met, output \`<promise>done</promise>\` on the **last line** of your response
-- For normal steps, the system detects the done tag and prompts you to call \`ralphflow_continue\`
-- For **manual steps**, the system stops the session and asks the USER to review — do NOT call \`ralphflow_continue\` yourself; only the user's /ralphflow-continue counts as approval
+- For **normal steps**, that's it — the system **automatically** runs the independent CHECK when you go idle. You do NOT call any tool.
+- For **manual steps**, the system stops the session and asks the USER to review — only the user's /ralphflow-continue starts the verification.
 
-**CHECK Phase** (verification):
-- When prompted after the done tag is detected (or when the user approves a manual step), call the \`ralphflow_continue\` tool
-- An independent verifier session will verify your work against the step's check criteria
-- If verification passes, the workflow advances to the next step automatically
-- If verification fails, you will receive the failure reason and must retry
+**CHECK Phase** (verification, automatic for normal steps):
+- After your done tag, an independent verifier session verifies your work against the step's check criteria (you'll see a "🔍 CHECK 阶段" message, then a "检查结果：通过/未通过" message).
+- If it passes, the workflow advances to the next step automatically and injects the next DO prompt.
+- If it fails, you receive the failure reason and re-do the step.
 
-**Important**: You MUST output \`<promise>done</promise>\` when done. Do NOT call \`ralphflow_continue\` until the system prompts you to after detecting the tag.
+**Important**: You MUST output \`<promise>done</promise>\` when done, on its own last line. Do NOT call \`ralphflow_continue\` for normal steps — verification is automatic. \`ralphflow_continue\` is only for: approving a manual review, resuming a paused workflow, or attaching to an interrupted instance.
 
 ## Pause and Resume
 
@@ -84,7 +83,7 @@ This helps users track workflow progress without needing to manually check statu
 
 User input: $ARGUMENTS
 
-**Normal flow**: When the system detects your \`<promise>done</promise>\` tag and prompts you, call \`ralphflow_continue\` to trigger independent verification and advance the workflow.
+**Normal steps are automatic**: after your \`<promise>done</promise>\` tag, the system runs the independent verification and advances on its own — you do NOT call this tool. \`ralphflow_continue\` is only for the three cases below.
 
 **Manual review approval**: When the user runs this command after a 📋 manual-step review, calling \`ralphflow_continue\` is their approval — it starts the independent verification. (Never call it on your own initiative during a manual review.)
 

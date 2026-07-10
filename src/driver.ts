@@ -1,22 +1,27 @@
 /**
- * Ralph Flow Driver — opencode adapter, structural mirror of the Claude Code
- * plugin's hooks/done-detect.js (Stop hook).
+ * Ralph Flow Driver — opencode's session.idle handler.
  *
- * Claude Code fires a Stop hook whose JSON output can block the stop and show
- * a systemMessage; here the equivalent signal is the `session.idle` event, and
- * the equivalents of the hook's outputs are:
- *   - decision:"block" + systemMessage  →  injectPrompt(...)          (drives the model)
- *   - systemMessage only (session stops) →  injectPrompt(..., noReply) (user-facing note)
- *   - {} (silent allow)                  →  return without injecting
+ * This is opencode-native (not a mirror of the Claude Stop hook). Because the
+ * check runs while the session is IDLE (the model already finished emitting the
+ * done tag), the driver can freely inject visible messages around it — the
+ * transparent, automatic UX of the original opencode plugin:
  *
- * All dedup/counter markers keep the exact filenames of the hook version so
- * the two implementations stay diffable.
+ *   done detected → transition to check → inject a visible "CHECK phase +
+ *   criteria" message → run the independent verifier → inject a visible
+ *   "check result + reason" message → advance / retry / pause.
+ *
+ * The model does NOT call a tool for normal steps; ralphflow_continue is only
+ * for manual-review approval, resume, and cross-session attach.
+ *
+ * Driving the model uses promptAsync (non-blocking); user-facing notes use
+ * prompt+noReply.
  */
 
 import fs from "fs";
 import path from "path";
-import type { Engine, WorkflowDef, NormalStepDef } from "./engine.js";
+import type { Engine, WorkflowDef, NormalStepDef, RalphFlowState } from "./engine.js";
 import { isSubWorkflowStep, MANUAL_GATE_MARKER, DONE_TAG_MARKER } from "./engine.js";
+import { adversarialCheck } from "./check.js";
 
 type Client = any;
 
@@ -86,6 +91,121 @@ export async function injectPrompt(
     return true;
   } catch {
     return false;
+  }
+}
+
+// ─── Check orchestration (idle-driven & tool-driven share this) ──────────────
+
+const PAUSE_REASON_CN: Record<string, string> = {
+  max_failures: "已达最大失败次数",
+  config_error: "工作流配置错误",
+  check_error: "验证进程未能运行（额度/API/超时）",
+};
+
+/**
+ * Run the independent check for a step whose DO just completed, injecting the
+ * visible CHECK-phase and result messages, then advance / retry / pause the
+ * workflow. The session is IDLE while this runs (the model finished emitting
+ * done), so the visible injections are safe.
+ *
+ * Preconditions: `state` is the instance's current state in "do" phase, its
+ * done reached (normal auto-flow or a user-approved manual gate). This function
+ * transitions to check, runs, and applies the result.
+ */
+export async function runCheckAndAdvance(
+  client: Client,
+  engine: Engine,
+  sessionId: string,
+  instId: string,
+  workflow: WorkflowDef,
+  step: NormalStepDef,
+  state: RalphFlowState
+): Promise<void> {
+  // Record DO completion and transition to check.
+  engine.logEvent(instId, "info", "done_detected", { step: state.current_step });
+  engine.addStepRecord(instId, state.current_step, "do", "passed", 0);
+  engine.clearManualStepMarker(instId);
+  engine.clearManualGate(instId);
+  engine.clearReinjectCounter(instId);
+  engine.clearDoPromptCache(instId);
+  engine.clearDoneTagDetected(instId);
+  engine.writeState({ ...state, current_phase: "check" }, instId);
+  engine.recordStepStart(instId, state.current_step, "check");
+  engine.logEvent(instId, "info", "step_start", { step: state.current_step, phase: "check" });
+
+  const checkPrompt = engine.buildCheckPrompt(instId, step, state.user_task);
+
+  // Visible: what is being checked.
+  await injectPrompt(client, sessionId,
+    `## 🔍 CHECK 阶段\n\n正在用**独立只读会话**验证步骤 \`${step.id}\`（约需 1 分钟，独立于本对话）。\n\n### 检查依据\n\n${engine.renderStepText(instId, step.check)}`,
+    true);
+
+  let checkResult;
+  try {
+    checkResult = await adversarialCheck(client, engine, instId, sessionId, step, checkPrompt, state.user_task, workflow.adversarial_check);
+  } catch (err: any) {
+    engine.logEvent(instId, "error", "adversarial_check_uncaught", { stepId: step.id, error: err.message });
+    const st = engine.readState(instId);
+    if (st && st.active && st.current_phase === "check" && st.current_step === state.current_step && st.workflow_name === state.workflow_name) {
+      engine.writeState({ ...st, paused: true, pause_reason: "check_error", last_failure_reason: `对抗性检查崩溃：${err.message}` }, instId);
+    }
+    await injectPrompt(client, sessionId, `## ⚠️ 验证未能运行\n\n对抗性检查崩溃：${err.message}\n\n工作流已暂停（不计入失败次数，已完成的工作保持原样）。问题解决后运行 \`/ralphflow-continue\` 重新验证。`, true);
+    return;
+  }
+
+  // Re-check state: a cancel or a concurrent continue may have moved on.
+  const cur = engine.readState(instId);
+  if (!cur || !cur.active || cur.current_phase !== "check"
+      || cur.workflow_name !== state.workflow_name || cur.current_step !== state.current_step) {
+    engine.logEvent(instId, "warn", "check_result_discarded", { reason: "state changed during check" });
+    return;
+  }
+
+  // Infra failure: verifier produced no verdict — pause in check, no fail burn.
+  if (checkResult.infra) {
+    engine.writeState({ ...cur, paused: true, pause_reason: "check_error", last_failure_reason: checkResult.reason }, instId);
+    engine.logEvent(instId, "warn", "workflow_paused", { workflow: cur.workflow_name, step: cur.current_step, reason: "check_infra_error" });
+    await injectPrompt(client, sessionId,
+      `## ⚠️ 验证未能运行\n\n${checkResult.reason}\n\n这是验证进程自身的问题（额度/API/超时），**不是**工作成果的问题：本次不计入失败次数，已完成的工作无需重做。问题解决后运行 \`/ralphflow-continue\` 直接重新验证。`,
+      true);
+    return;
+  }
+
+  // Visible: the verdict and its reason (its own clean message).
+  await injectPrompt(client, sessionId,
+    `## ${checkResult.passed ? "检查结果：通过 ✓" : "检查结果：未通过 ✗"}（步骤 \`${step.id}\`）\n\n### ${checkResult.passed ? "通过原因" : "失败原因"}\n\n${checkResult.reason || "（验证者未给出原因）"}`,
+    true);
+
+  engine.addStepRecord(instId, cur.current_step, "check", checkResult.passed ? "passed" : "failed", cur.fail_count || 0, checkResult.reason);
+  const result = checkResult.passed
+    ? engine.handleCheckPassed(instId, cur, workflow, step, checkResult)
+    : engine.handleCheckFailed(instId, cur, workflow, step, checkResult);
+
+  if (result.completed) {
+    await injectPrompt(client, sessionId, `## 🎉 工作流完成\n\n所有步骤已通过独立验证。`, true);
+    return;
+  }
+  if (result.paused) {
+    const paused = engine.readState(instId);
+    const why = paused?.pause_reason ? (PAUSE_REASON_CN[paused.pause_reason] || paused.pause_reason) : "未知原因";
+    await injectPrompt(client, sessionId,
+      `## ⏸️ 工作流已暂停\n\n原因：${why}。\n\n${paused?.last_failure_reason || ""}\n\n修复问题后运行 \`/ralphflow-continue\` 从当前步骤恢复。`,
+      true);
+    return;
+  }
+
+  // Advanced to the next step's DO phase — drive the model with its DO prompt.
+  const next = engine.readState(instId);
+  if (next && next.active && !next.paused && next.current_phase === "do") {
+    engine.clearDoneTagDetected(instId);
+    engine.clearManualGate(instId);
+    const nextWf = next.workflow_name === workflow.name ? workflow : engine.loadWorkflow(next.workflow_name);
+    if (nextWf?.manual_step?.includes(next.current_step)) engine.writeManualStepMarker(instId);
+    engine.markPromptDelivered(next.current_step, instId);
+    // handleCheckPassed already built & cached the next DO prompt.
+    const doPrompt = readTextFile(path.join(engine.getInstanceDir(instId), ".do-prompt-cache"));
+    await injectPrompt(client, sessionId,
+      `## ▶️ 下一步：\`${next.current_step}\`\n\n---\n\n${doPrompt}`);
   }
 }
 
@@ -220,20 +340,15 @@ export async function handleSessionIdle(
 
     // ── Case 1: Done tag detected ────────────────────────────────────────────
     if (hasDoneTag) {
-      // A done tag only means something during the DO phase. One emitted while
-      // a check is running must NOT leave a marker behind — a stale marker
-      // would make the driver tell the model to skip the NEXT step's work.
+      // A done tag only means something during the DO phase.
       if (statePhase !== "do") return;
 
       removeFile(reinjectFile);
-
-      // Persist that done was reached — used by Case 2, and by the attach
-      // logic to distinguish "died mid-DO" from "done, awaiting check".
       writeFileSafe(doneTagDetectedFile, Date.now().toString());
 
-      // Manual step: the review gate sits BEFORE the check phase. Do NOT drive
-      // the model — let the session stop so the USER can review. The user's
-      // /ralphflow-continue is the approval that starts the verification.
+      // Manual step: the review gate sits BEFORE the check. Do NOT run the
+      // check — stop so the USER can review. Their /ralphflow-continue is the
+      // approval that starts verification.
       if (fileExists(manualStepMarker)) {
         writeFileSafe(manualGateMarker, Date.now().toString());
         await injectPrompt(client, sessionId,
@@ -242,31 +357,25 @@ export async function handleSessionIdle(
         return;
       }
 
-      // Build step progress info
-      let stepInfo = "";
-      if (stateStep) {
-        stepInfo = `**Current Step**: \`${stateStep}\``;
-        if (stateFailCount > 0) stepInfo += ` (failed ${stateFailCount}x)`;
+      // Normal step: run the independent check automatically (idle-driven),
+      // injecting the visible CHECK-phase and result messages. The model does
+      // not need to call any tool.
+      if (currentStep && !isSubWorkflowStep(currentStep)) {
+        await runCheckAndAdvance(client, engine, sessionId, mine.id, workflow!, currentStep as NormalStepDef, state);
       }
-
-      // Update dedup file to prevent duplicates
-      writeFileSafe(phaseReportFile, `check:${stateStep}`);
-
-      await injectPrompt(client, sessionId,
-        `## ✅ DO 阶段完成\n\n${stepInfo}\n\n调用 \`ralphflow_continue\` 以启动 CHECK 阶段，对步骤 \`${stateStep}\` 运行独立验证。`);
       return;
     }
 
-    // ── Case 2: Workflow active, report current phase (with dedup) ──────────
+    // ── Case 2: done was reached earlier but we're still in DO ──────────────
     if (fileExists(doneTagDetectedFile) && statePhase === "do") {
-      // Manual gate active: the user is reviewing. Stay completely silent so
-      // the user can chat freely; the gate is only released by their
-      // ralphflow_continue.
+      // Manual gate active: the user is reviewing. Stay silent so they can chat
+      // freely; the gate is only released by their /ralphflow-continue.
       if (fileExists(manualGateMarker)) return;
-      // Non-manual: done tag was output but ralphflow_continue not yet called —
-      // keep reminding the model to call it instead of re-injecting the DO prompt.
-      await injectPrompt(client, sessionId,
-        `## ✅ DO 阶段已完成\n\n步骤 \`${stateStep}\` 已输出完成标记。请立即调用 \`ralphflow_continue\` 工具继续验证阶段。\n\n不要继续执行 DO 阶段的任务。`);
+      // Non-manual anomaly (e.g. a check that crashed and reset to DO): the done
+      // was reached, so re-run the check rather than nagging.
+      if (currentStep && !isSubWorkflowStep(currentStep)) {
+        await runCheckAndAdvance(client, engine, sessionId, mine.id, workflow!, currentStep as NormalStepDef, state);
+      }
       return;
     }
 

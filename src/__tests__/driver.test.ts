@@ -51,6 +51,8 @@ let injected: Array<{ sessionId: string; text: string; noReply: boolean }>;
 let lastAssistantText: string;
 let lastHasToolUse: boolean;
 
+let checkVerdict = "true"; // controls the mock verifier's result
+
 function makeClient() {
   const record = (args: any) => {
     injected.push({
@@ -73,10 +75,18 @@ function makeClient() {
           },
         ],
       }),
-      // The driver drives via promptAsync (non-blocking); prompt is used by the
-      // check session. Both record so assertions on `injected` work either way.
+      // Independent verifier session.
+      create: async () => ({ data: { id: "chk-" + Math.random().toString(36).slice(2) } }),
+      delete: async () => ({}),
+      abort: async () => ({}),
+      // Driver drives via promptAsync; the verifier session uses prompt.
       promptAsync: async (args: any) => record(args),
-      prompt: async (args: any) => record(args),
+      prompt: async (args: any) => {
+        if (String(args.path.id).startsWith("chk-")) {
+          return { data: { parts: [{ type: "text", text: `check reason\n<promise-check>${checkVerdict}</promise-check>` }] } };
+        }
+        return record(args);
+      },
     },
   };
 }
@@ -126,6 +136,7 @@ beforeEach(() => {
   injected = [];
   lastAssistantText = "";
   lastHasToolUse = false;
+  checkVerdict = "true";
 });
 
 afterEach(() => {
@@ -176,15 +187,30 @@ describe("handleSessionIdle", () => {
     expect(messagesCalls).toBe(1); // only the first drive got past the guard
   });
 
-  it("done tag on a normal step → instructs calling ralphflow_continue and persists the marker", async () => {
+  it("done tag on a normal step → auto-runs the check with visible messages, then advances", async () => {
+    checkVerdict = "true";
     const instId = startInstance("build");
     lastAssistantText = "did the work\n<promise>done</promise>";
     await handleSessionIdle(makeClient(), engine, "sess-1");
-    expect(injected.length).toBe(1);
-    expect(injected[0].text).toContain("DO 阶段完成");
-    expect(injected[0].text).toContain("ralphflow_continue");
-    expect(injected[0].noReply).toBe(false); // drives the model
-    expect(fs.existsSync(path.join(engine.getInstanceDir(instId), ".done-tag-detected"))).toBe(true);
+    const texts = injected.map((i) => i.text);
+    // visible CHECK-phase notice (with criteria) + visible result, both noReply
+    expect(texts.some((t) => t.includes("🔍 CHECK 阶段") && t.includes("检查依据"))).toBe(true);
+    expect(texts.some((t) => t.includes("检查结果：通过 ✓"))).toBe(true);
+    // advanced to the next step (review) and injected its DO prompt (drives model)
+    expect(engine.readState(instId)!.current_step).toBe("review");
+    expect(texts.some((t) => t.includes("下一步") && t.includes("review"))).toBe(true);
+  });
+
+  it("normal-step check that fails re-issues the step (no manual tool call)", async () => {
+    checkVerdict = "false";
+    const instId = startInstance("build");
+    lastAssistantText = "did the work\n<promise>done</promise>";
+    await handleSessionIdle(makeClient(), engine, "sess-1");
+    const texts = injected.map((i) => i.text);
+    expect(texts.some((t) => t.includes("检查结果：未通过 ✗"))).toBe(true);
+    // stayed on build, fail_count incremented, retry DO prompt injected
+    expect(engine.readState(instId)!.current_step).toBe("build");
+    expect(engine.readState(instId)!.fail_count).toBe(1);
   });
 
   it("done tag on a MANUAL step → stops for user review (noReply), arms the gate", async () => {
@@ -299,14 +325,19 @@ describe("handleSessionIdle", () => {
     expect(injected.length).toBe(1); // marker consumed, keep-alive resumes
   });
 
-  it("done-tag marker present without gate → reminds to call ralphflow_continue", async () => {
-    startInstance("build");
-    lastAssistantText = "did it\n<promise>done</promise>";
+  it("manual step: done → gate (silent to re-idle), no auto-check", async () => {
+    // A manual step must NOT auto-run the check; it stops for user review.
+    const instId = startInstance("review"); // review is in manual_step
+    lastAssistantText = "prepared\n<promise>done</promise>";
     await handleSessionIdle(makeClient(), engine, "sess-1");
+    expect(injected.some((i) => i.text.includes("📋") && i.text.includes("等待你的审查"))).toBe(true);
+    // no check ran → still in do, no verdict message
+    expect(engine.readState(instId)!.current_phase).toBe("do");
+    expect(injected.some((i) => i.text.includes("检查结果"))).toBe(false);
+    // a subsequent idle while the gate is up stays silent
     injected = [];
-    lastAssistantText = "ok what now"; // model chattered without calling the tool
+    lastAssistantText = "let me explain";
     await handleSessionIdle(makeClient(), engine, "sess-1");
-    expect(injected.length).toBe(1);
-    expect(injected[0].text).toContain("请立即调用 `ralphflow_continue`");
+    expect(injected.length).toBe(0);
   });
 });

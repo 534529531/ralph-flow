@@ -115,6 +115,12 @@ export async function adversarialCheck(
 
   engine.logEvent(instId, "info", "adversarial_check_start", { stepId: step.id, agent, model: model ? `${model.providerID}/${model.modelID}` : "agent-default", timeout_ms: timeout, extra_dirs: extraDirs });
 
+  // Log the (near-)full prompts sent to the verifier, so the execution log is a
+  // faithful record of exactly what was checked (matches the original opencode
+  // plugin's behavior). Truncated to keep the log line bounded.
+  const truncate = (t: string) => (t.length > 3000 ? t.substring(0, 3000) + "…(截断)" : t);
+  engine.logEvent(instId, "info", "adversarial_check_prompt", { stepId: step.id, systemPrompt: truncate(systemPrompt), checkPrompt: truncate(checkPrompt) });
+
   // Create the independent verifier session.
   let checkSessionId: string;
   try {
