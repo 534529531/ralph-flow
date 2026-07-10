@@ -63,6 +63,12 @@ function fileExists(filePath: string): boolean {
 
 // ─── Prompt injection (replaces hook JSON output) ────────────────────────────
 
+// The driver drives the model by posting a message. It MUST use promptAsync
+// ("start if needed and return immediately"), NOT prompt (which blocks until
+// the whole model turn completes). If it blocked, the drive would hold the
+// per-session in-flight guard across the entire turn, and the session.idle
+// fired when that turn finishes — the one carrying the model's new output, e.g.
+// a done tag — would be dropped as "already driving", stalling the workflow.
 export async function injectPrompt(
   client: Client,
   sessionId: string,
@@ -70,13 +76,13 @@ export async function injectPrompt(
   noReply = false
 ): Promise<boolean> {
   try {
-    await client.session.prompt({
-      path: { id: sessionId },
-      body: {
-        parts: [{ type: "text", text: prompt }],
-        noReply,
-      },
-    });
+    const body = { parts: [{ type: "text", text: prompt }], noReply };
+    if (client.session.promptAsync) {
+      await client.session.promptAsync({ path: { id: sessionId }, body });
+    } else {
+      // Older SDKs: fire prompt without awaiting the model turn.
+      void client.session.prompt({ path: { id: sessionId }, body }).catch(() => {});
+    }
     return true;
   } catch {
     return false;

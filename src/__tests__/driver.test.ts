@@ -52,6 +52,14 @@ let lastAssistantText: string;
 let lastHasToolUse: boolean;
 
 function makeClient() {
+  const record = (args: any) => {
+    injected.push({
+      sessionId: args.path.id,
+      text: args.body.parts[0].text,
+      noReply: !!args.body.noReply,
+    });
+    return { data: {} };
+  };
   return {
     session: {
       messages: async () => ({
@@ -65,14 +73,10 @@ function makeClient() {
           },
         ],
       }),
-      prompt: async (args: any) => {
-        injected.push({
-          sessionId: args.path.id,
-          text: args.body.parts[0].text,
-          noReply: !!args.body.noReply,
-        });
-        return { data: {} };
-      },
+      // The driver drives via promptAsync (non-blocking); prompt is used by the
+      // check session. Both record so assertions on `injected` work either way.
+      promptAsync: async (args: any) => record(args),
+      prompt: async (args: any) => record(args),
     },
   };
 }
@@ -129,47 +133,39 @@ afterEach(() => {
 });
 
 describe("handleSessionIdle", () => {
-  it("a blocked idle drive never stalls a concurrent tool call (regression: State lock timeout)", async () => {
+  it("the driver drives via promptAsync (non-blocking), not the blocking prompt", async () => {
+    // Regression for the stall bug: a driving injection must NOT block on the
+    // whole model turn. If the driver used the blocking `prompt`, the session's
+    // next idle (carrying e.g. a done tag) would be dropped by the in-flight
+    // guard. Assert the drive completes without any prompt() call blocking it.
     startInstance("build");
-    lastAssistantText = "still working..."; // no done tag → drive injects a keep-alive/report
-
-    // A prompt that blocks until we release it — simulates a long model turn.
-    let release: () => void = () => {};
-    const gate = new Promise<void>((r) => { release = r; });
-    const slowClient = {
+    lastAssistantText = "still working..."; // no done tag → keep-alive drive
+    let blockingPromptCalled = false;
+    const client = {
       session: {
         messages: async () => ({ data: [{ info: { role: "assistant" }, parts: [{ type: "text", text: lastAssistantText }] }] }),
-        prompt: async () => { await gate; return { data: {} }; },
+        promptAsync: async (a: any) => { injected.push({ sessionId: a.path.id, text: a.body.parts[0].text, noReply: !!a.body.noReply }); return { data: {} }; },
+        prompt: async () => { blockingPromptCalled = true; return { data: {} }; },
       },
     };
-
-    // Start the idle drive; it blocks inside injectPrompt (the gated prompt).
-    const drive = handleSessionIdle(slowClient, engine, "sess-1");
-    await new Promise((r) => setTimeout(r, 20)); // let it reach the blocked prompt
-
-    // While the drive is blocked, a status tool call from another session MUST
-    // return immediately. There is no shared lock, so this can't stall — before
-    // the redesign the driver held the state lock across injectPrompt and this
-    // threw "State lock timeout" after 30s.
-    const tools = createTools(engine, makeClient());
-    const t0 = Date.now();
-    await tools.ralphflow_status.execute({}, { sessionID: "sess-2" } as any);
-    expect(Date.now() - t0).toBeLessThan(500);
-
-    release();
-    await drive;
+    await handleSessionIdle(client, engine, "sess-1");
+    expect(injected.length).toBe(1);           // drove the model
+    expect(blockingPromptCalled).toBe(false);  // via promptAsync, not prompt
   });
 
   it("re-entrant idle for the same session is dropped while one is in flight", async () => {
     startInstance("build");
     lastAssistantText = "working...";
+    // Gate the driver's only remaining await (getLastAssistantMessage) so the
+    // first drive stays in flight while a second idle arrives.
     let release: () => void = () => {};
     const gate = new Promise<void>((r) => { release = r; });
-    let prompts = 0;
+    let messagesCalls = 0;
     const slowClient = {
       session: {
-        messages: async () => ({ data: [{ info: { role: "assistant" }, parts: [{ type: "text", text: lastAssistantText }] }] }),
-        prompt: async () => { prompts++; await gate; return { data: {} }; },
+        messages: async () => { messagesCalls++; await gate; return { data: [{ info: { role: "assistant" }, parts: [{ type: "text", text: lastAssistantText }] }] }; },
+        promptAsync: async (a: any) => { injected.push({ sessionId: a.path.id, text: a.body.parts[0].text, noReply: !!a.body.noReply }); return { data: {} }; },
+        prompt: async () => ({ data: {} }),
       },
     };
     const first = handleSessionIdle(slowClient, engine, "sess-1");
@@ -177,7 +173,7 @@ describe("handleSessionIdle", () => {
     await handleSessionIdle(slowClient, engine, "sess-1"); // should no-op (guarded)
     release();
     await first;
-    expect(prompts).toBe(1);
+    expect(messagesCalls).toBe(1); // only the first drive got past the guard
   });
 
   it("done tag on a normal step → instructs calling ralphflow_continue and persists the marker", async () => {
