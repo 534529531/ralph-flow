@@ -1,0 +1,203 @@
+description: |
+  C 项目 → 惯用安全 Rust（binary target）：逐模块渐进移植 + TDD，unsafe<10%。
+
+adversarial_check:
+  timeout_ms: 3600000
+  # model: anthropic/claude-opus-4-8  # 可选：验证模型（"provider/model" 或 {providerID, modelID}）；不填则用 ralph-check agent 默认模型
+
+steps:
+
+  - id: setup-env
+    desc: 环境配置——安装并校验工具链，fail-fast
+    do: |
+      你是搭建 CI 环境的工程师。安装并校验本工作流依赖的全部工具，确保后续步骤不会因缺工具而中途退化。直接执行安装命令，不要只列清单。先探测再决定：已就绪的工具直接复用、只补缺失的（保持幂等）。
+
+      必须就绪（缺则安装）：
+      - Rust 工具链：rustc / cargo（rustup 安装），组件 clippy、rustfmt
+      - cargo-geiger：cargo install cargo-geiger --locked。若编译失败，尝试较早版本
+      - cargo-audit：cargo install cargo-audit --locked
+      - cargo-llvm-cov：cargo install cargo-llvm-cov --locked，并 rustup component add llvm-tools-preview
+      - C 工具链与构建系统：编译/运行 C 测试所需（gcc 或 clang、make，若 C 项目用 cmake/meson 则一并装上）
+      - 文本/算术辅助：jq、bc
+
+      安装后把每个工具的版本写入 env.md。
+      任一必须工具无法安装时，如实说明卡点，不要输出 done。
+    input: 无
+    output: env.md（工具版本快照）；全部必须工具可调用
+    check: |
+      自主验证：
+      1. env.md 存在，列出各工具版本（无占位符）
+      2. cargo geiger --version、cargo clippy --version、cargo audit --version、cargo llvm-cov --version 均正常输出
+      3. jq --version、bc --version 均正常输出
+    on_pass: analyze
+    on_fail: setup-env
+    max_fail_count: 5
+
+  - id: analyze
+    desc: C 项目分析——探测布局/测试框架/构建系统，提取 API，依赖分层，产出 plan.json
+    do: |
+      用 skill 工具调用 c-to-rust-plan skill。
+      你是接手陌生 C 代码库的工程师。先探测项目真实布局（不要假设 src/inc），
+      识别测试框架与构建系统，再提取公开/内部 API、构建依赖分层、产出 plan.json + api-inventory.md + function-contracts.md。
+    input: C 项目源码目录路径
+    output: plan.json + api-inventory.md + function-contracts.md
+    check: |
+      自主验证：
+      1. plan.json 是合法 JSON，modules 覆盖每个非测试/非 vendor 的 .c 源文件
+      2. layers 是无环分层，每个 depends_on 只引用更低层
+      3. 每个模块含 public_functions、internal_functions、difficulty、recommended_crates、c_advanced_features
+      4. plan.json 含 output_name、output_dir、source_c_dir、c_test_dir、project_layout、test_framework、build_system、conditional_compilation、inline_asm_modules、completed_modules 字段
+      5. project_layout 真实反映探测结果（非硬编码 src/inc）
+      6. output_dir 是绝对路径且位于工作区内
+      7. api-inventory.md 列出每个 C 公开函数及拟议 Rust 签名
+      8. function-contracts.md 对复杂函数记录了语义要点
+    on_pass: baseline
+    on_fail: analyze
+    max_fail_count: 5
+
+  - id: baseline
+    desc: TDD 红阶段——Rust binary 骨架、API 桩、移植全部 C 测试、属性测试
+    do: |
+      用 skill 工具调用 c-to-rust-test-gen skill。
+      严格 RED：先确认 C 测试套件全绿，再建 binary target Rust 项目骨架，写好类型与错误，
+      把每个 C 测试移植成 Rust #[test]（断言语义精确保留，不合并降级）。
+      每个模块补属性测试（proptest）。所有桩用 todo!("module::fn") 占位。
+      目标状态：cargo build 通过，cargo test 因 todo!() 而 FAILED。
+    input: plan.json + C 源码 + C 测试
+    output: |
+      <output_name>_rust/ — Cargo binary 项目（src/main.rs + lib.rs + types.rs + error.rs + 各模块桩，
+      tests/oracle_*.rs + prop_*.rs）
+    check: |
+      在 output_dir 自主验证：
+      1. Cargo.toml 是 binary target，含 thiserror，dev-deps 含 proptest + rstest
+      2. src/types.rs 字段已完整定义（非桩）；src/error.rs 含全部错误变体
+      3. lib.rs 声明了 plan.json 中的全部模块
+      4. 每个 C 测试函数都有对应 Rust #[test]，断言语义精确保留
+      5. cargo build 通过；cargo test 出现 FAILED 且为 todo!() panic（不是编译错误）
+      6. 每个 public_functions + internal_functions 都有 todo!("名字") 桩
+      7. tests/ 含 oracle_*.rs 和 prop_*.rs，每个模块都有对应测试文件
+    on_pass: impl-core
+    on_fail: baseline
+    max_fail_count: 5
+
+  - id: impl-core
+    desc: 实现核心层（trivial+owned）——自底向上，每模块 TDD 转绿 + commit
+    do: |
+      用 skill 工具调用 c-to-rust-implement skill，范围 = difficulty 为 trivial|owned 的模块。
+      你是工程师：读 C 原实现理解语义，写惯用安全 Rust，自底向上按 layer 顺序逐模块实现。
+      编译器/测试报错就是自愈信号——用 systematic-debugging 定位根因后修复。
+      对照 plan.json 逐函数确认：每个 public_functions + internal_functions 都有对应的 Rust 实现（非桩、非空函数体）。
+      每模块通过后 git commit（impl-core: <module>）。
+    input: plan.json + baseline Rust 项目 + C 源码
+    output: trivial|owned 模块全部实现，对应测试转绿，每模块一个 commit
+    check: |
+      在 output_dir 自主验证：
+      1. cargo build 通过
+      2. trivial|owned 模块的全部测试通过
+      3. 已实现模块内无 todo!()/unimplemented!()
+      4. 每个已实现模块有 impl-core: commit
+      5. cargo geiger Expressions used/total < 10%
+    on_pass: audit-core
+    on_fail: impl-core
+    max_fail_count: 15
+
+  - id: audit-core
+    desc: 独立审查 core 层——逐函数验证完整性与语义等价
+    do: |
+      用 skill 工具调用 c-to-rust-audit skill，范围 = difficulty 为 trivial|owned 的模块。
+      你是审计师：对照 plan.json 逐模块逐函数自查 core 层的实现完整性和语义正确性。
+      对照 C 原实现和 function-contracts.md，确认每个函数的 Rust 版本行为等价。
+      发现遗漏或偏差立即修复。不要等到 CHECK 来发现问题。
+    input: plan.json + Rust 项目 + C 源码 + function-contracts.md
+    output: 所有 core 层函数确认完整且语义等价
+    check: |
+      你是独立审计师。审查 core 层（trivial|owned 模块）的 C→Rust 翻译质量。
+
+      对照 plan.json，用你自己的方法逐模块逐函数审查。
+      判断标准：给定相同输入，Rust 实现是否产生与 C 相同的输出和副作用。
+      任一函数缺失或语义不等价 → FAIL。
+    on_pass: impl-full
+    on_fail: impl-core
+    max_fail_count: 10
+
+  - id: impl-full
+    desc: 实现全量剩余层（stateful+callback+global）——分批推进，集成全绿
+    do: |
+      用 skill 工具调用 c-to-rust-implement skill，范围 = 剩余模块（stateful|callback|global）。
+      同样的工程师循环：理解 C 语义 → 写安全 Rust → 测试转绿 → systematic-debugging。
+      若模块函数数较多，分批实现，每批独立 commit。
+      逐函数对照 plan.json，确保每个 public_functions + internal_functions 都有对应实现。
+      全部模块完成后做集成全量构建与全套测试。
+    input: plan.json + 已实现 core 的 Rust 项目 + C 源码
+    output: 全部模块实现，cargo build/test/clippy 全过，unsafe < 10%
+    check: |
+      在 output_dir 自主验证：
+      1. cargo build --release 通过
+      2. cargo test --all 全绿，无 FAILED，无 #[ignore]
+      3. cargo clippy -- -D warnings 无 error
+      4. src/ 与 tests/ 无 todo!()/unimplemented!()/dbg!() 残留
+      5. 每个模块都有 impl-core: 或 impl-full: commit
+      6. cargo geiger Expressions used/total < 10%
+      7. cargo run --release -- --help 正常启动
+    on_pass: audit-full
+    on_fail: impl-full
+    max_fail_count: 25
+
+  - id: audit-full
+    desc: 独立审查全量翻译——逐函数验证完整性、语义等价
+    do: |
+      用 skill 工具调用 c-to-rust-audit skill，范围 = 全部模块。
+      你是审计师：对照 plan.json 逐模块逐函数自查全量实现。重点关注：
+      - 状态转换和多阶段操作是否被完整保留
+      - 错误路径和边界条件是否被保留
+      - 资源管理是否正确替换
+      - 回调/函数指针的控制反转是否正确建模
+      - 数据结构布局是否与 C 一致
+      对照 C 原实现和 function-contracts.md，逐函数验证语义等价性。
+      发现遗漏或偏差立即修复。
+    input: plan.json + Rust 项目 + C 源码 + function-contracts.md
+    output: 全部函数确认完整且语义等价
+    check: |
+      你是独立审计师。审查全量翻译质量，重点关注 stateful/callback/global 模块。
+
+      对照 plan.json，用你自己的方法逐函数审查。用你的专业判断评估每个函数翻译的语义等价性。
+      不要只检查函数是否存在——深入检查实现是否正确、是否完整。
+      任一函数缺失或语义不等价 → FAIL。
+    on_pass: verify
+    on_fail: impl-full
+    max_fail_count: 15
+
+  - id: verify
+    desc: 最终验收——对照验收标准逐条取证，产出 report.md
+    do: |
+      用 skill 工具调用 c-to-rust-validate skill。
+      以独立 QA 视角做最终验收：跑全量构建/测试/lint/geiger/覆盖率，逐条收集证据，产出 report.md。
+      发现不达标项立即修复。
+    input: 完成的 Rust 项目 + plan.json + C 项目路径
+    output: report.md（每条验收标准附证据）
+    check: |
+      你是独立验收审计师。逐条验证以下标准是否满足。
+      不要信任 report.md 的结论——自主探索项目，独立做出判断。
+
+      ## 验收标准
+
+      1. **可执行文件**：cargo build --release 产出二进制文件，cargo run --release -- --help 正常启动不 panic。
+
+      2. **测试框架**：所有测试使用 Rust 主流测试框架（#[test]、rstest、proptest 等），不依赖外部 C 测试框架或脚本。
+
+      3. **源码全量翻译**：src/ 下全部 .rs 文件为完整 Rust 实现。无 todo!()、unimplemented!()、空函数体、仅返回默认值的占位实现。
+
+      4. **编译与测试通过**：cargo build --release 零 error。cargo test --all 全部通过，无 FAILED，无 #[ignore]。
+
+      5. **Unsafe 比例 < 10%**：cargo geiger 度量，本项目 crate 的 Expressions used/total < 10%。每处 unsafe 须有 // SAFETY: 注释。
+
+      6. **业务逻辑 100% 不受破坏**：对照 plan.json 中每个函数，判断 C 原实现与 Rust 实现的语义等价性。给定相同输入，产生相同输出和相同副作用。任一函数语义不等价 → FAIL。
+
+      7. **单元测试覆盖主干路径**：核心函数有针对性测试。happy path 和 error path 均有覆盖。边界条件有测试。有 property-based 测试。
+
+      ## 输出
+
+      逐条标准报告 PASS/FAIL，附独立验证证据。全部 PASS → 工作流通过。
+    on_pass: done
+    on_fail: impl-core
+    max_fail_count: 10

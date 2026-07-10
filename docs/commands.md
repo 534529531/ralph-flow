@@ -1,96 +1,58 @@
 # Commands Reference
 
+[English](commands.md) · [中文](commands_CN.md)
+
 ## Slash Commands
 
-| Command | Tool | Description |
-|---------|------|-------------|
-| `/ralphflow-start` | `ralphflow-start` | Start a workflow |
-| `/ralphflow-continue` | `ralphflow-continue` | Resume a paused workflow |
-| `/ralphflow-cancel` | `ralphflow-cancel` | Cancel and generate report |
-| `/ralphflow-status` | `ralphflow-status` | Show current workflow state |
-| `/ralphflow-list` | `ralphflow-list` | List available workflows |
+| Command | Description |
+|---------|-------------|
+| `/ralphflow-start` | Start a workflow. Needs a workflow name AND a task description; asks for whichever is missing. |
+| `/ralphflow-continue` | Four uses: signal DO completion (when prompted), approve a manual review, resume a paused workflow, attach to an interrupted instance (optionally pass an instance id, unique prefix allowed). |
+| `/ralphflow-status` | Show this session's instance, a named instance, or an overview of all active instances. |
+| `/ralphflow-list` | List available workflows (project + built-in) and active instances. |
+| `/ralphflow-cancel` | Cancel an instance: aborts a running verification, archives the final report, removes the instance dir. |
+| `/ralphflow-doctor` | Diagnose all workflow definitions and instance state; offers to fix problems. |
+| `/ralphflow-create` | Interactively design a custom workflow, write the YAML, and validate it with the doctor until clean. |
 
-### Usage Examples
+## Tools (called by the model)
 
-```
-# Start interactively
-/ralphflow-start
+| Tool | Arguments | Description |
+|------|-----------|-------------|
+| `ralphflow_start` | `workflow`, `task`, `extra_dirs?` | Creates and binds a new workflow instance. `extra_dirs`: directories outside the project the verifier must read (validated at start). |
+| `ralphflow_continue` | `instance?` | DO-complete signal → runs the independent CHECK and advances; also resumes paused instances and attaches to interrupted ones. |
+| `ralphflow_cancel` | `instance?` | Cancel an instance (report archived first). |
+| `ralphflow_status` | `instance?` | Detailed status of one instance, or an overview of all. |
+| `ralphflow_list` | — | Available workflows + active instances. |
+| `ralphflow_doctor` | — | Read-only full diagnosis report. |
 
-# Start a specific workflow
-/ralphflow-start loop "Build user authentication"
+## Instance model
 
-# Check current status
-/ralphflow-status
+- Every `ralphflow_start` creates an instance under `.opencode/ralph-flow/instances/<id>/`.
+- One session drives at most one instance; parallel sessions in the same project each drive their own.
+- Ownership is recorded in the instance's `owner-session` file. When the owning session is gone (opencode restarted), any session's `/ralphflow-continue` can take the instance over — automatically when it's the only one, by explicit `instance` id otherwise.
+- Attaching to an instance interrupted mid-DO re-issues the DO prompt; interrupted after the done tag goes straight to verification.
 
-# Resume after pause
-/ralphflow-continue
+## Instance directory contents
 
-# Cancel and get report
-/ralphflow-cancel
+| File | Purpose |
+|------|---------|
+| `state.json` | Workflow state (step, phase, fail count, pause reason) |
+| `state-stack.json` | Sub-workflow nesting stack |
+| `owner-session` | Driving session id |
+| `artifacts-dir` | Name of the instance's artifacts directory |
+| `.manual-step-active` / `.manual-gate` | Manual review gate markers |
+| `.done-tag-detected` | DO finished, awaiting `ralphflow_continue` |
+| `.do-prompt-cache` | Current DO prompt (re-injected by keep-alives) |
+| `.adversarial-session` | Id of the running verifier session |
+| `logs/execution.log` | JSON-lines event log (rotated at 10 MB) |
+| `logs/step-records.json` | Per-step execution records feeding the final report |
 
-# List all workflows
-/ralphflow-list
-```
+Outside the instance dir:
 
----
+- `.opencode/ralph-flow/artifacts/<task>-<suffix>/` — deliverables, survive completion
+- `.opencode/ralph-flow/reports/<id>-final-report.md` — archived final reports
+- `.opencode/ralph-flow/workflows/` — project custom workflows (shadow built-ins by name)
 
-## Log Events
+## Log events
 
-Events are logged to `.opencode/ralph-flow/logs/execution.log` in JSON Lines format.
-
-### Workflow Events
-
-| Event | Description |
-|-------|-------------|
-| `workflow_start` | Workflow started |
-| `workflow_end` | Workflow completed |
-| `workflow_paused` | Paused (max failures reached) |
-| `workflow_resumed` | Resumed by user |
-| `workflow_cancelled` | Cancelled by user |
-
-### Step Events
-
-| Event | Description |
-|-------|-------------|
-| `step_start` | Step phase started |
-| `done_detected` | `<promise>done</promise>` detected |
-| `check_result` | Check result (true / false) |
-| `fail_count_increment` | Failure count increased |
-
-### Log Format
-
-Each line is a JSON object with common fields:
-
-```json
-{
-  "event": "step_start",
-  "step": "loop",
-  "phase": "do",
-  "timestamp": "2024-01-15T10:30:01Z"
-}
-```
-
-### Reading Logs
-
-```bash
-# View all logs
-cat .opencode/ralph-flow/logs/execution.log
-
-# Filter by event type
-grep '"event":"check_result"' .opencode/ralph-flow/logs/execution.log
-
-# View last 10 events
-tail -10 .opencode/ralph-flow/logs/execution.log
-```
-
----
-
-## Final Report
-
-When a workflow completes or is cancelled, a summary report is generated at `.opencode/ralph-flow/logs/final-report.md`.
-
-The report includes:
-- Workflow name and duration
-- Steps completed
-- Total failures and retries
-- Final status
+Notable `execution.log` events: `workflow_start`, `step_start`, `done_detected`, `adversarial_check_start/response/result/timeout`, `fail_count_increment`, `workflow_paused`, `workflow_resumed`, `sub_workflow_end`, `workflow_end`, `workflow_cancelled`, `crash_recovery`, `legacy_instance_migrated`.

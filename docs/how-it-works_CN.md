@@ -1,203 +1,237 @@
 # 工作原理
 
+[English](how-it-works.md) · [中文](how-it-works_CN.md)
+
 本文档解释 ralph-flow 的内部工作机制。
 
 ---
 
 ## 核心循环
 
-每个工作流都遵循相同的基本循环：
+每个工作流都遵循同一个基本循环：
 
 ```mermaid
 flowchart TD
-    Start["执行 /ralphflow-start"] --> State["插件创建工作流状态"]
-    State --> DoPrompt["插件注入 DO 阶段提示词"]
-    DoPrompt --> AI["AI 执行任务"]
-    AI -->|"检测到 done 标记"| DoneTag["session.idle 触发<br/>插件检测到完成标记"]
-    DoneTag --> CheckPrompt["插件创建独立检查会话"]
-    CheckPrompt --> AICheck["独立会话验证执行结果"]
-    AICheck -->|"检查通过"| Pass["插件读取 on_pass"]
-    AICheck -->|"检查不通过"| Fail["插件递增失败计数"]
-    Pass -->|"on_pass: done"| Complete["工作流标记完成<br/>生成报告"]
-    Pass -->|"下一步骤 id"| DoPrompt
-    Fail -->|"未超限"| DoPrompt
-    Fail -->|"已达上限"| Pause["工作流暂停<br/>等待 /ralphflow-continue"]
-    Pause -->|用户恢复| DoPrompt
-    CheckPrompt -->|"检查完成"| Cleanup["检查会话自动删除"]
+    Start(["运行 /ralphflow-start"]) --> State["插件创建一个工作流实例"]
+    State --> DoPrompt["工具返回 DO 阶段提示词"]
+    DoPrompt --> AI["会话执行任务"]
+    AI -->|"检测到 done 标记"| DoneTag["session.idle 触发<br/>驱动器检测 done 标记"]
+    DoneTag --> Manual{"手动步骤？"}
+    Manual -->|"是"| Review["📋 会话停下<br/>用户审查后 /ralphflow-continue"]
+    Manual -->|"否"| CallContinue["驱动器提示：调用 ralphflow_continue"]
+    Review --> CheckPrompt
+    CallContinue --> CheckPrompt["ralphflow_continue 创建独立验证会话"]
+    CheckPrompt --> AICheck["独立会话验证结果"]
+    AICheck -->|"true"| Pass["引擎读取 on_pass"]
+    AICheck -->|"false"| Fail["引擎递增 fail_count"]
+    AICheck -->|"基础设施故障"| Infra["在 check 阶段暂停<br/>continue 只重跑验证"]
+    Pass -->|"on_pass: done"| Complete["实例完成<br/>归档报告，删除目录"]
+    Pass -->|"下一步 id"| DoPrompt
+    Fail -->|"未达上限"| DoPrompt
+    Fail -->|"达到上限"| Pause["工作流暂停<br/>等待 /ralphflow-continue"]
+    Pause -->|用户继续| DoPrompt
 ```
 
-### 阶段详解
+### 阶段细节
 
-**DO 阶段：**
-1. 插件将步骤的 `do` 提示词注入会话
-2. AI 执行任务
-3. 完成后，AI 输出 `<promise>done</promise>`
-4. 插件通过 `session.idle` 事件检测到标记
+**DO 阶段**（工作会话）：
+1. `ralphflow_start` / `ralphflow_continue` 工具返回步骤的 DO 提示词
+2. 会话执行任务（写代码、跑命令、产出指定输出）
+3. 完成后在最后一行输出 `<promise>done</promise>`
+4. 驱动器通过 `session.idle` 事件检测标记
 
-**CHECK 阶段：**
-1. 插件在主会话中展示 `check` 检查标准
-2. 插件创建独立的检查会话
-3. 检查会话根据标准评估工作成果
-4. 检查会话返回 `<promise-check>true</promise-check>` 或 `<promise-check>false</promise-check>`
-5. 插件处理结果，前进或重试
-6. 检查会话自动删除
+**CHECK 阶段**（独立会话）：
+1. `ralphflow_continue` 构建步骤的检查提示词，拉起一个全新的验证会话（只读 `ralph-check` agent）
+2. 验证者自主探索项目，按检查依据评估工作成果 —— 它完全没看过 DO 阶段的对话
+3. 在最后一行返回 `<promise-check>true</promise-check>` 或 `<promise-check>false</promise-check>`
+4. 引擎处理结果，要么推进（`on_pass`），要么带失败原因重试（`on_fail`）
+5. 验证会话被删除
 
 ---
 
 ## 独立会话验证
 
-CHECK 阶段使用**独立会话**来验证任务完成情况，避免自我审查偏差。
+CHECK 阶段用**独立会话**验证任务完成情况，杜绝自我审查偏差。
 
 ```mermaid
 sequenceDiagram
-    participant Main as 主会话
-    participant Plugin as 插件
-    participant Check as 检查会话
+    participant Main as 工作会话
+    participant Tool as ralphflow_continue
+    participant Check as 验证会话
 
-    Main->>Plugin: DO 阶段完成（done 标记）
-    Plugin->>Main: 展示检查标准
-    Plugin->>Check: 创建新会话，发送检查提示词
-    Check->>Check: 独立验证
-    Check->>Plugin: 返回通过/失败结果
-    Plugin->>Main: 展示检查结果
-    Plugin->>Check: 自动删除会话
+    Main->>Tool: DO 完成（done 标记）→ 调用 ralphflow_continue
+    Tool->>Check: 用检查提示词创建全新会话
+    Check->>Check: 独立验证（只读）
+    Check->>Tool: 返回 通过/失败 + 原因
+    Tool->>Main: 返回下一步提示词（或带原因重试）
+    Tool->>Check: 自动删除会话
 ```
 
-### 为什么使用独立会话？
+### 为什么用独立会话？
 
-- **无自我审查偏差** — 检查者没有实现过程的记忆
-- **严格验证** — 仅根据检查标准判断，不受 AI "意图" 影响
-- **干净的上下文** — 没有可能影响判断的累积上下文
+- **无自我审查偏差** —— 检查者对实现过程毫无记忆
+- **严格验证** —— 只对照检查依据，不迁就 AI"本来想做什么"
+- **干净上下文** —— 没有累积上下文软化判断
 
-### 检查会话权限
+### 验证者权限
 
-CHECK 阶段默认使用 `ralph-check` agent：
+CHECK 阶段默认用 `ralph-check` agent：
 
 | 权限 | 配置 | 说明 |
 |------|------|------|
-| `edit` | `deny` | 禁止修改文件 |
-| `bash` | `allow` | 允许执行验证命令（测试、检查文件等） |
+| `edit` | `deny` | 检查者不能改代码 —— 只读、只验证 |
+| `bash` | `allow` | 可运行验证命令（测试、构建、文件检查） |
+| `external_directory` | `allow` | 可读取启动时声明的 `extra_dirs`（项目外的源材料） |
 
-插件启动时会自动注册 `ralph-check` agent，无需手动配置。
+插件启动时注册 `ralph-check` agent 并把定义写入 `.opencode/agents/` —— 无需手动配置。
 
-如需自定义，可在工作流 YAML 中覆盖：
+如需覆盖，在工作流 YAML 中指定：
 
 ```yaml
 adversarial_check:
-  agent: "build"              # 使用其他 agent
-  model:                      # 指定验证使用的模型
-    providerID: "anthropic"
-    modelID: "claude-haiku-4-5"
-  system_prompt: |            # 自定义验证标准
-    你是一个严格的代码审查员。
+  agent: build                 # 使用其他 agent
+  model:                       # 使用特定模型
+    providerID: anthropic
+    modelID: claude-haiku-4-5
+  system_prompt: |             # 给检查者的额外 system prompt
+    你是一个严格的代码审查者。
+  timeout_ms: 3600000          # 上限 1 小时
 ```
 
-完整配置参考请见[自定义工作流 → adversarial_check](custom-workflows_CN.md#adversarial_check)。
+`model` 字段也接受 `"provider/model"` 字符串。裸模型名（如 `sonnet`）无法解析，会回退到 agent 的默认模型 —— `/ralphflow-doctor` 会警告。
+
+### 基础设施故障 vs 工作故障
+
+如果验证会话本身跑不起来（API 错误、超时、会话创建失败），这**不能**说明工作成果的质量。引擎**不**把它计入步骤失败，也**不**让工作会话回去重做已完成的工作。它在 check 阶段暂停；下一次 `/ralphflow-continue` **只**重跑验证。
 
 ---
 
-## 多步骤流转
+## 手动审查门
 
-检查通过时，插件读取 `on_pass` 跳转到下一步的 DO 阶段；检查失败时读取 `on_fail` —— 可以重试当前步骤（携带失败上下文），也可以跳转到专门的修复步骤。
+工作流 `manual_step` 里列出的步骤在 **DO 完成后、验证开始前**暂停。当这类步骤检测到 done 标记时，驱动器**不**驱动模型继续 —— 而是用 📋 消息停下会话等待。用户的 `/ralphflow-continue` 是启动独立验证的批准。用户要改，会话就改，然后再次输出 `<promise>done</promise>` —— 审查门重新武装。
+
+---
+
+## 多步骤流程与子工作流
+
+检查通过时，引擎读取 `on_pass` 进入下一步的 DO 阶段。失败时读取 `on_fail` —— 要么带失败上下文重试当前步，要么跳到恢复步骤。
+
+步骤可以用 `workflow:` 代替 `do`/`check` 委托给另一个工作流。父状态被压入每实例的栈；子工作流完成后引擎弹出并推进父级。嵌套上限 5 层，循环由 `/ralphflow-doctor` 检测。
 
 ### 失败上下文
 
-当步骤失败时，插件会捕获：
-- 检查结果（失败原因）
-- 当前失败次数
-- DO 阶段的任何输出
+步骤失败时，重试的 DO 提示词携带：
+- 验证者给出的具体失败原因
+- 当前重试次数和 `max_fail_count`
 
-这些上下文会注入到下一次 DO 阶段的尝试中，帮助 AI 从错误中学习。
+这帮助工作会话去修真正的问题，而不是重复失败的做法。
+
+---
+
+## 多实例模型
+
+一个插件进程服务项目的所有会话。每次 `ralphflow_start` 创建一个隔离的**实例**：
+
+```mermaid
+flowchart LR
+    S1["会话 A"] -->|拥有| I1["实例 loop-...-a1b2"]
+    S2["会话 B"] -->|拥有| I2["实例 spec-...-c3d4"]
+    I1 --- D1[".../instances/loop-...-a1b2/"]
+    I2 --- D2[".../instances/spec-...-c3d4/"]
+```
+
+- 一个会话最多驱动一个实例；多个并行会话各驱动各的。
+- 驱动器只作用于 `owner-session` 与空闲会话匹配的实例 —— 并行会话和验证会话互不干扰。
+- 属主会话消失（opencode 重启）后，任何会话的 `/ralphflow-continue` 都可接管某个实例。见 [命令 → 实例模型](commands_CN.md#实例模型)。
 
 ---
 
 ## 会话事件
 
-插件通过 opencode 的会话事件驱动工作流：
+插件挂接 opencode 的会话事件来驱动工作流：
 
 | 事件 | 触发时机 | 动作 |
 |------|----------|------|
-| `session.idle` | AI 完成响应 | 检测完成标记，推进工作流 |
-| `session.deleted` | 会话被删除 | 将工作流标记为暂停 |
+| `session.idle` | 会话响应结束 | 检测 done 标记，驱动工作流 / 保活 |
+| `session.compacted` | 上下文被压缩 | 用缓存的 DO 提示词重新驱动 |
+| `session.error`（aborted） | 用户中断了运行 | 暂停实例 |
+| `session.deleted` | 会话被删除 | 暂停实例（变成孤儿） |
+| `chat.message` | 任何用户消息 | 记录会话存活性（用于接管检测） |
 
 ### 标记检测
 
-插件扫描 AI 响应中的完成标记：
+- `<promise>done</promise>` —— DO 阶段完成（在最后一行或最后 100 字符内检测；代码围栏/行内代码里的忽略）
+- `<promise-check>true|false</promise-check>` —— CHECK 结论（必须独占验证者的最后一行）
 
-- `<promise>done</promise>` — DO 阶段完成
-- `<promise-check>true</promise-check>` — CHECK 通过
-- `<promise-check>false</promise-check>` — CHECK 失败
-
-标记不区分大小写，允许空格变化。
+标记大小写不敏感，容忍空白差异。
 
 ---
 
 ## 状态管理
 
-工作流状态存储在 `.opencode/ralph-flow/ralph-flow.local.md` 的 markdown frontmatter 中：
+每个实例的状态存放在 `.opencode/ralph-flow/instances/<id>/state.json`：
 
-```markdown
----
-workflow: loop
-current_step: loop
-phase: do
-fail_count: 0
-status: running
-started_at: 2024-01-15T10:30:00Z
----
+```json
+{
+  "active": true,
+  "workflow_name": "loop",
+  "current_step": "loop",
+  "current_phase": "do",
+  "fail_count": 0,
+  "user_task": "...",
+  "paused": false,
+  "instance_id": "loop-260710120000-ab12"
+}
 ```
 
-此文件由插件自动管理，不应手动编辑。
+写入是原子的（临时文件 + rename），损坏/非法文件会被备份而非信任。这些文件由插件管理 —— 不要手动编辑。
+
+中断的 **1.x** 工作流（`ralph-flow.local.md`）会在首次启动时迁移到这个布局。
 
 ---
 
-## 日志记录
+## 日志
 
-所有事件以 JSON Lines 格式记录到 `.opencode/ralph-flow/logs/execution.log`：
+每实例事件记录到 `.opencode/ralph-flow/instances/<id>/logs/execution.log`，JSON Lines 格式（10 MB 轮转）：
 
 ```jsonl
-{"event":"workflow_start","workflow":"loop","timestamp":"2024-01-15T10:30:00Z"}
-{"event":"step_start","step":"loop","phase":"do","timestamp":"2024-01-15T10:30:01Z"}
-{"event":"done_detected","step":"loop","timestamp":"2024-01-15T10:35:22Z"}
-{"event":"check_result","step":"loop","result":true,"timestamp":"2024-01-15T10:36:45Z"}
-{"event":"workflow_end","workflow":"loop","timestamp":"2024-01-15T10:36:46Z"}
+{"ts":"...","level":"info","event":"workflow_start","workflow":"loop","instance":"loop-...-ab12"}
+{"ts":"...","level":"info","event":"step_start","step":"loop","phase":"do"}
+{"ts":"...","level":"info","event":"done_detected","step":"loop"}
+{"ts":"...","level":"info","event":"adversarial_check_result","stepId":"loop","passed":true}
+{"ts":"...","level":"info","event":"workflow_end","workflow":"loop"}
 ```
 
-完整的日志事件列表请参阅[命令参考](commands_CN.md)。
+完整事件列表见 [命令参考](commands_CN.md#日志事件)。
 
 ---
 
 ## 文件结构
 
-所有生成文件统一放在 `.opencode/ralph-flow/` 目录下：
+所有生成的文件都收敛在 `.opencode/ralph-flow/` 下：
 
 ```
 .opencode/
-└── ralph-flow/                    # 插件根目录
-    ├── ralph-flow.local.md        # 工作流状态（markdown frontmatter）
-    ├── workflows/                 # 自定义工作流 YAML 定义
-    │   ├── loop.yaml              # 内置：自动循环
-    │   └── spec.yaml              # 内置：规范驱动流水线
-    ├── artifacts/                 # spec 工作流生成的构件
-    │   ├── proposal.md
-    │   ├── specs.md
-    │   ├── design.md
-    │   ├── tasks.md
-    │   ├── verification.md
-    │   └── summary.md
-    ├── logs/                      # 执行日志（JSON Lines）
-    │   ├── execution.log
-    │   ├── step-*.log
-    │   └── final-report.md
-    └── package.json               # 自动管理的依赖文件
+├── agents/
+│   └── ralph-check.md              # 只读验证 agent（自动写入）
+├── skills/                         # 插件 skills 同步到这里（自动）
+└── ralph-flow/
+    ├── instances/
+    │   └── <id>/                   # 每个工作流实例一个目录
+    │       ├── state.json          # 工作流状态（勿手改）
+    │       ├── state-stack.json    # 子工作流嵌套栈
+    │       ├── owner-session        # 驱动会话 id
+    │       ├── artifacts-dir        # 本实例产出目录的名字
+    │       ├── .do-prompt-cache     # 当前 DO 提示词（保活重注入）
+    │       ├── .manual-gate         # 手动审查标记
+    │       └── logs/
+    │           ├── execution.log
+    │           └── step-records.json
+    ├── artifacts/
+    │   └── <任务摘要>-<后缀>/       # 交付物 —— 完成后保留
+    ├── reports/
+    │   └── <id>-final-report.md    # 完成/取消时归档
+    └── workflows/                  # 项目自定义工作流（遮蔽内置）
 ```
 
-### 关键文件
-
-| 文件 | 说明 |
-|------|------|
-| `ralph-flow.local.md` | 工作流状态（当前步骤、阶段、失败次数）。**不要手动编辑。** |
-| `workflows/` | 你的自定义工作流 YAML 文件。内置 `loop.yaml` 和 `spec.yaml`。 |
-| `artifacts/` | spec 工作流生成的构件。 |
-| `logs/` | JSON Lines 格式的执行日志。 |
-| `package.json` | 自动管理的依赖。 |
+内置工作流（`loop`、`spec`、`c-to-rust`、`everything2rust`）从插件自己的 `workflows/` 目录解析，因此始终反映已安装版本 —— 绝不拷贝进项目（拷贝会导致过期）。

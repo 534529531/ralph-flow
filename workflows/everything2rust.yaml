@@ -1,0 +1,260 @@
+description: |
+  任意软件 → 惯用安全 Rust：语言无关、领域无关（CLI/库/服务/游戏/GUI 等）。
+  以能力（capability）+ 行为契约 + 预言（oracle）为等价单位，不做函数一比一复刻。
+  grill 式方案设计（ADR）+ TDD 增量实现 + 独立审计。
+  design 步骤为手动步骤：DO 完成后暂停，供人工审查技术选型与架构；运行 /ralphflow-continue
+  确认后才进入独立验证，通过后自动继续。如需全自动运行，删除下方 manual_step 配置即可。
+
+adversarial_check:
+  timeout_ms: 3600000
+  # model: anthropic/claude-opus-4-8  # 可选：验证模型（"provider/model" 或 {providerID, modelID}）；不填则用 ralph-check agent 默认模型
+
+manual_step:
+  - design
+
+steps:
+
+  - id: setup-env
+    desc: 环境配置——安装并校验 Rust 侧工具链，fail-fast
+    do: |
+      你是搭建 CI 环境的工程师。安装并校验本工作流依赖的 Rust 侧工具，确保后续步骤不会因缺工具而中途退化。直接执行安装命令，不要只列清单。先探测再决定：已就绪的工具直接复用、只补缺失的（保持幂等）。
+
+      必须就绪（缺则安装）：
+      - Rust 工具链：rustc / cargo（rustup 安装），组件 clippy、rustfmt
+      - cargo-geiger：cargo install cargo-geiger --locked。若编译失败，尝试较早版本
+      - cargo-audit：cargo install cargo-audit --locked
+      - cargo-llvm-cov：cargo install cargo-llvm-cov --locked，并 rustup component add llvm-tools-preview
+      - 文本/算术辅助：jq、bc
+
+      源语言工具链（Node/Python/JVM/Go/编译器等）这一步不装——survey 步骤探测出源语言后按需安装。
+
+      安装后把每个工具的版本写入 env.md。
+      任一必须工具无法安装时，如实说明卡点，不要输出 done。
+    input: 无
+    output: env.md（工具版本快照）；全部必须工具可调用
+    check: |
+      自主验证：
+      1. env.md 存在，列出各工具版本（无占位符）
+      2. cargo geiger --version、cargo clippy --version、cargo audit --version、cargo llvm-cov --version 均正常输出
+      3. jq --version、bc --version 均正常输出
+    on_pass: survey
+    on_fail: setup-env
+    max_fail_count: 5
+
+  - id: survey
+    desc: 系统勘察——探测语言/领域/构建/运行，让原系统真实跑起来，产出能力清单
+    do: |
+      用 skill 工具调用 everything2rust-survey skill。
+      你是接手陌生代码库的工程师。先探测源项目的真实形态：语言、领域（CLI/库/服务/游戏/GUI/…）、
+      构建系统、测试框架、外部接口、依赖。然后安装源语言运行时，**让原系统真实构建、运行、跑测试**——
+      它是后续行为等价验证的预言（oracle），跑不起来的系统无法做高质量重构。
+      产出 system-map.md（系统全貌）、capabilities.md（能力清单）、oracle-evidence.md（原系统可运行的实证）。
+    input: 源项目路径（来自用户任务描述）
+    output: system-map.md + capabilities.md + oracle-evidence.md
+    check: |
+      自主验证：
+      1. system-map.md 存在，含：源语言、领域判定、构建/测试/运行命令、外部接口清单、依赖清单（均来自真实探测，无占位符）
+      2. oracle-evidence.md 含原系统构建/运行/测试的**真实命令输出片段**；若原系统确实无法运行，如实记录了原因和替代预言来源（已有测试套件/文档/样例数据）
+      3. capabilities.md 列出能力清单，每条能力有：一句话描述、源码位置引用、外部可观察的行为
+      4. 能力清单覆盖 system-map.md 外部接口清单中的每一项（无遗漏的接口）
+      5. 能力粒度合理：不是逐函数罗列，也不是一条"实现整个系统"
+    on_pass: spec
+    on_fail: survey
+    max_fail_count: 5
+
+  - id: spec
+    desc: 行为契约——逐能力定义必须保留的可观察行为，选定预言策略，采集 golden 语料
+    do: |
+      用 skill 工具调用 everything2rust-spec skill。
+      你是规格工程师。对 capabilities.md 中每个能力写行为契约：输入/输出/副作用/不变量/错误路径。
+      为每个能力选定预言策略（ported-tests / golden / differential / property / checklist），
+      并**实际运行原系统采集 golden 语料**到 golden/——这些语料是后续验收测试的判据。
+      契约描述"外部可观察什么"，不描述"内部怎么实现"——这是允许 Rust 重新设计架构的前提。
+    input: capabilities.md + system-map.md + 源项目
+    output: behavior-spec.md + golden/（语料目录）
+    check: |
+      自主验证：
+      1. behavior-spec.md 覆盖 capabilities.md 中每个能力，无 TBD/待补占位
+      2. 每个能力标注预言策略，取值 ∈ {ported-tests, golden, differential, property, checklist}
+      3. 预言为 golden/differential 的能力，golden/ 下有对应语料文件；抽查语料内容与原系统行为一致（语料含采集命令元数据，可复现）
+      4. 预言为 checklist（无法自动判定）的能力占比合理，且每个都写明了为何无法自动判定
+      5. 契约只描述可观察行为（输入/输出/副作用/不变量/错误路径），不锁定内部实现细节
+      6. 抽查 2-3 个契约：对照源码验证描述准确（错误路径、边界行为没有想当然）
+    on_pass: design
+    on_fail: spec
+    max_fail_count: 5
+
+  - id: design
+    desc: 方案设计——grill 式拷问设计树每个分支，技术选型 ADR，产出 design.md + decisions.md + plan.json
+    do: |
+      用 skill 工具调用 everything2rust-design skill。
+      你是架构师。对设计树的每个分支做 grill 式自我拷问：目标形态、总体架构、每个子系统的
+      技术选型、迁移顺序、测试策略、性能目标、unsafe 政策、范围取舍。每个问题：给出选项、
+      查证据（源码/领域 playbook/crate 生态）、下结论、记 ADR。能查证据回答的不留给拍脑袋。
+      这不是函数级翻译计划——是为 Rust 重新设计的架构，以行为契约为约束。
+      产出 design.md（架构方案）、decisions.md（ADR 集）、plan.json（机器可读增量计划）。
+    input: behavior-spec.md + system-map.md + capabilities.md + 源项目
+    output: design.md + decisions.md + plan.json
+    check: |
+      自主验证：
+      1. plan.json 是合法 JSON，含 source、target、stack、capabilities、increments、parity_exceptions 字段
+      2. behavior-spec.md 中每个能力在 plan.json capabilities 中恰好归入一个 increment
+      3. increments 第一项是 walking-skeleton（端到端可运行的最小闭环），每个 increment 有 phase(core|full) 和 exit_criteria
+      4. stack 每项选型在 decisions.md 有对应 ADR（问题/选项/选择/理由/推翻条件）
+      5. decisions.md 覆盖关键分支：目标形态、总体架构、每个子系统选型、迁移顺序、测试策略、unsafe 政策；每个 ADR 的理由引用了证据（源码事实/契约要求/crate 现状），不是空断言
+      6. parity_exceptions 每条有理由和 ADR 引用；design.md 中没有 parity_exceptions 之外的行为改变计划
+      7. design.md 的架构覆盖全部能力，无过度设计（没有契约不要求的层和抽象）
+      8. target.output_dir 是工作区内绝对路径；target.smoke_cmd 已定义且与领域匹配
+    on_pass: baseline
+    on_fail: design
+    max_fail_count: 5
+
+  - id: baseline
+    desc: TDD 红阶段——Rust 项目骨架、验收测试（golden harness + 属性测试）、全桩
+    do: |
+      用 skill 工具调用 everything2rust-test-gen skill。
+      严格 RED：按 plan.json target 建 Rust 项目骨架（类型/错误/模块结构），
+      为每个能力写验收测试——golden 语料驱动的 harness、从原测试套件移植的断言、属性测试。
+      测试断言忠实于 behavior-spec，不弱化。所有实现用 todo!() 占位。
+      产出 test-map.json 记录能力→测试的映射。
+      目标状态：cargo build 通过，cargo test 因 todo!() 而 FAILED。
+    input: plan.json + behavior-spec.md + golden/ 语料 + 源项目测试套件
+    output: |
+      target.output_dir 下的 Cargo 项目（骨架 + 全桩 + tests/）；
+      test-map.json（能力 id → 测试名列表）
+    check: |
+      在 plan.json 的 target.output_dir 自主验证：
+      1. Cargo 项目形态与 plan.json target 一致（bin/lib/workspace），依赖与 stack 选型一致
+      2. test-map.json 把每个能力映射到至少 1 个测试；映射的测试在 tests/ 或 src/ 中真实存在
+      3. golden 语料被 harness 实际读取（测试代码引用 golden/ 或已复制的语料路径），不是硬编码期望值
+      4. 抽查 2-3 个测试：断言忠实于 behavior-spec 的契约（精确断言，没有降级为"不 panic 即可"）
+      5. cargo build 通过；cargo test 出现 FAILED 且失败源自 todo!() panic（不是编译错误）
+      6. 每个 increment 的能力都有对应桩（todo!("...")），模块结构与 design.md 一致
+    on_pass: impl-core
+    on_fail: baseline
+    max_fail_count: 5
+
+  - id: impl-core
+    desc: 实现 core 增量（walking-skeleton + 核心域）——逐增量 TDD 转绿 + commit
+    do: |
+      用 skill 工具调用 everything2rust-implement skill，范围 = plan.json 中 phase 为 core 的增量。
+      你是工程师：读原实现理解行为语义，写惯用安全 Rust，按 increments 顺序逐增量转绿。
+      第一个增量是 walking-skeleton——先让系统端到端跑起来（哪怕功能最少），再填充核心域。
+      编译器/测试报错就是自愈信号——用 systematic-debugging 定位根因后修复。
+      每增量达到 exit_criteria 后 git commit（e2r-core: <increment>），更新 plan.json 能力 status。
+    input: plan.json + baseline Rust 项目 + 源项目 + behavior-spec.md
+    output: core 增量全部实现，对应测试转绿，smoke_cmd 可运行，每增量一个 commit
+    check: |
+      在 plan.json 的 target.output_dir 自主验证：
+      1. cargo build 通过
+      2. 对照 test-map.json：phase=core 增量所辖能力的全部测试通过
+      3. 已完成能力在 plan.json 中 status=done，对应实现非桩（无 todo!()/unimplemented!()、非空函数体）
+      4. 每个 core 增量有 e2r-core: commit
+      5. cargo geiger 本 crate Expressions used/total < plan.json target.unsafe_budget_pct（默认 10%）
+      6. 执行 plan.json target.smoke_cmd 正常启动不 panic
+    on_pass: audit-core
+    on_fail: impl-core
+    max_fail_count: 15
+
+  - id: audit-core
+    desc: 独立审计 core——逐能力对照行为契约验证等价性
+    do: |
+      用 skill 工具调用 everything2rust-audit skill，范围 = phase 为 core 的增量。
+      你是审计师：对照 behavior-spec.md 逐能力自查 core 实现。判据是行为契约，不是代码形状——
+      给定契约中的输入，Rust 实现是否产生契约要求的输出和副作用？错误路径和边界是否保留？
+      golden 语料是否全部通过？发现偏差立即修复。不要等 CHECK 来发现问题。
+    input: plan.json + behavior-spec.md + golden/ + Rust 项目 + 源项目
+    output: core 增量所有能力确认与行为契约等价
+    check: |
+      你是独立审计师。审查 core 增量（plan.json 中 phase=core）的重构质量。
+
+      对照 behavior-spec.md，用你自己的方法逐能力审查。
+      判断标准：给定契约中描述的输入，Rust 实现是否产生契约要求的可观察行为
+      （输出、副作用、错误路径、不变量）。允许的偏差仅限 plan.json parity_exceptions 中列出的。
+      必要时运行原系统与 Rust 版本做差分对比。
+      任一能力缺失或行为不等价 → FAIL。
+    on_pass: impl-full
+    on_fail: impl-core
+    max_fail_count: 10
+
+  - id: impl-full
+    desc: 实现全量剩余增量——分批推进，集成全绿
+    do: |
+      用 skill 工具调用 everything2rust-implement skill，范围 = plan.json 中 phase 为 full 的增量。
+      同样的工程师循环：理解原行为 → 写安全 Rust → 测试转绿 → systematic-debugging。
+      增量大时分批实现，每批独立 commit（e2r-full: <increment> batch n/m）。
+      全部增量完成后做集成全量构建与全套测试，clippy 清零。
+    input: plan.json + 已完成 core 的 Rust 项目 + 源项目 + behavior-spec.md
+    output: 全部增量实现，cargo build/test/clippy 全过，unsafe < 预算
+    check: |
+      在 plan.json 的 target.output_dir 自主验证：
+      1. cargo build --release 通过
+      2. cargo test --all 全绿，无 FAILED，无 #[ignore]
+      3. cargo clippy -- -D warnings 无 error
+      4. src/ 与 tests/ 无 todo!()/unimplemented!()/dbg!() 残留
+      5. plan.json 全部能力 status=done；每个增量都有 e2r-core: 或 e2r-full: commit
+      6. cargo geiger 本 crate Expressions used/total < plan.json target.unsafe_budget_pct
+      7. 执行 plan.json target.smoke_cmd 正常启动不 panic
+    on_pass: audit-full
+    on_fail: impl-full
+    max_fail_count: 25
+
+  - id: audit-full
+    desc: 独立审计全量——逐能力验证行为等价，重点状态/并发/交互类能力
+    do: |
+      用 skill 工具调用 everything2rust-audit skill，范围 = 全部增量。
+      你是审计师：对照 behavior-spec.md 逐能力自查全量实现。重点关注：
+      - 有状态能力的状态转换和多阶段操作是否完整保留
+      - 错误路径和边界条件是否保留
+      - 并发/异步行为的语义是否等价（顺序保证、超时、取消）
+      - 交互类能力（UI/游戏循环）的 checklist 项是否逐条核对
+      - 数据格式（文件/协议/存档）是否与原系统互通
+      发现偏差立即修复。偏差仅允许出现在 parity_exceptions 中。
+    input: plan.json + behavior-spec.md + golden/ + Rust 项目 + 源项目
+    output: 全部能力确认与行为契约等价
+    check: |
+      你是独立审计师。审查全量重构质量，重点关注有状态、并发、交互类能力。
+
+      对照 behavior-spec.md，用你自己的方法逐能力审查。不要只检查测试是否通过——
+      深入检查实现的行为是否与契约一致、是否完整。必要时运行原系统与 Rust 版本做差分对比。
+      checklist 类能力逐条人工核对证据。
+      允许的偏差仅限 plan.json parity_exceptions。任一能力缺失或行为不等价 → FAIL。
+    on_pass: verify
+    on_fail: impl-full
+    max_fail_count: 15
+
+  - id: verify
+    desc: 最终验收——对照验收标准逐条取证，产出 report.md
+    do: |
+      用 skill 工具调用 everything2rust-validate skill。
+      以独立 QA 视角做最终验收：跑全量构建/测试/lint/geiger/覆盖率/smoke，
+      逐能力核对行为契约，逐条收集证据，产出 report.md。
+      发现不达标项立即修复。
+    input: 完成的 Rust 项目 + plan.json + behavior-spec.md + 源项目路径
+    output: report.md（每条验收标准附证据）
+    check: |
+      你是独立验收审计师。逐条验证以下标准是否满足。
+      不要信任 report.md 的结论——自主探索项目，独立做出判断。
+
+      ## 验收标准
+
+      1. **可构建可运行**：cargo build --release 零 error；执行 plan.json target.smoke_cmd 正常启动不 panic。
+
+      2. **测试框架**：所有测试使用 Rust 原生测试设施（#[test]、rstest、proptest、insta 等），不依赖源语言运行时（差分测试 harness 除外，且差分 harness 不阻塞 cargo test）。
+
+      3. **全量实现**：src/ 下全部 .rs 为完整实现。无 todo!()、unimplemented!()、空函数体、仅返回默认值的占位实现。
+
+      4. **测试全绿**：cargo test --all 全部通过，无 FAILED，无 #[ignore]。cargo clippy -- -D warnings 无 error。
+
+      5. **Unsafe 在预算内**：cargo geiger 度量，本 crate Expressions used/total < plan.json target.unsafe_budget_pct（默认 10%）。每处 unsafe 有 // SAFETY: 注释。
+
+      6. **行为等价**：对照 behavior-spec.md 逐能力判断可观察行为等价性——输出、副作用、错误路径、不变量、数据格式互通。golden 语料测试全部通过。偏差仅限 plan.json parity_exceptions 中声明并有 ADR 依据的项。任一未声明的行为偏差 → FAIL。
+
+      7. **主干路径覆盖**：核心能力有针对性测试。happy path 和 error path 均有覆盖。边界条件有测试。确定性核心有 property-based 测试。
+
+      ## 输出
+
+      逐条标准报告 PASS/FAIL，附独立验证证据。全部 PASS → 工作流通过。
+    on_pass: done
+    on_fail: impl-core
+    max_fail_count: 10

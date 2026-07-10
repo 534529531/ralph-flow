@@ -1,42 +1,52 @@
-import { tool, type Plugin, type PluginModule, type Config } from "@opencode-ai/plugin";
-import { existsSync, readFileSync, readdirSync, rmSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
-import yaml from "js-yaml";
+/**
+ * Ralph Flow plugin for opencode — wiring layer.
+ *
+ * Structural mirror of the Claude Code plugin's composition:
+ *   MCP server (tools)   → Hooks.tool (src/tools.ts)
+ *   Stop hook             → session.idle event (src/driver.ts)
+ *   PostToolUse hook      → not needed (tool context carries sessionID)
+ *   skills/ (commands)    → Hooks.config command registration (src/commands.ts)
+ *   spawned `claude -p`   → independent SDK session (src/check.ts)
+ *
+ * Session liveness (Platform.isSessionAlive): the Claude version checks
+ * ~/.claude/sessions pid files; here a session counts as alive when THIS
+ * plugin process has seen activity from it and it has not been deleted. After
+ * an opencode restart the set is empty, so every previous owner reads as
+ * closed — exactly the auto-takeover journey for interrupted workflows.
+ */
+
+import type { Plugin, PluginModule, Config } from "@opencode-ai/plugin";
 import { RALPH_COMMANDS } from "./commands.js";
-import { readState, writeState, clearState, pushState, popState } from "./state.js";
+import { createEngine, type Platform } from "./engine.js";
+import { createTools } from "./tools.js";
+import { handleSessionIdle, handleSessionGone } from "./driver.js";
+import { abortActiveCheck, hasActiveCheck, isCheckSession } from "./check.js";
 import { setup } from "./setup.js";
-import { handleSessionIdle, handleContinue, getStep, buildDoPrompt, buildSubWorkflowUserTask, getStepRecords, resetStepRecords, resetAdversarialCheckActive } from "./executor.js";
-import { loadWorkflow, listWorkflows } from "./workflow-loader.js";
-import { isSubWorkflowStep } from "./types.js";
-import { logWorkflowStart, logWorkflowCancelled, logWorkflowResumed, logStepStart, logError, logWarn } from "./logger.js";
-import { generateCancellationReport } from "./report.js";
-import type { WorkflowDef, RalphFlowState, StepDef, NormalStepDef } from "./types.js";
-import { RALPH_FLOW_DIR } from "./types.js";
 
 const setupDirs = new Set<string>();
 
-function ensureSetup(directory: string): void {
+const RalphFlowPlugin: Plugin = async ({ client, directory }) => {
   if (!setupDirs.has(directory)) {
     setup(directory);
     setupDirs.add(directory);
   }
-}
 
-const autoCleanup = (projectDir: string) => {
-  const logsDir = join(projectDir, ".opencode", RALPH_FLOW_DIR, "logs");
-  if (existsSync(logsDir)) {
-    try {
-      rmSync(logsDir, { recursive: true, force: true });
-    } catch {}
-  }
-  clearState(projectDir);
-  resetAdversarialCheckActive(projectDir);
-};
+  // ── Platform seam ──────────────────────────────────────────────────────────
+  const seenSessions = new Set<string>();
+  const platform: Platform = {
+    isSessionAlive(sessionId) {
+      return !!sessionId && seenSessions.has(sessionId);
+    },
+    abortActiveCheck(instId) {
+      abortActiveCheck(client, instId);
+    },
+  };
 
-const RalphFlowPlugin: Plugin = async ({ project, client, $, directory, worktree }) => {
-  // 插件初始化时立即执行 setup，确保 agent 配置文件在会话创建前就存在
-  ensureSetup(directory);
+  const engine = createEngine(directory, platform);
+  engine.ensureProjectWorkflows();
+  engine.migrateLegacyInstance();
+
+  const tools = createTools(engine, client);
 
   return {
     config: async (input: Config) => {
@@ -47,7 +57,8 @@ const RalphFlowPlugin: Plugin = async ({ project, client, $, directory, worktree
         }
       }
 
-      // 动态注册 ralph-check agent，确保第一次会话就能识别
+      // Register the ralph-check agent dynamically as well, so the very first
+      // session works even before setup() has written the agent file.
       input.agent = input.agent ?? {};
       if (!input.agent["ralph-check"]) {
         input.agent["ralph-check"] = {
@@ -58,367 +69,69 @@ const RalphFlowPlugin: Plugin = async ({ project, client, $, directory, worktree
             bash: "allow",
             external_directory: "allow",
           },
-        };
+        } as any;
       }
     },
 
-    tool: {
-      "ralphflow-start": tool({
-        description: "Start a workflow",
-        args: {
-          workflow: tool.schema.string().optional().describe("Workflow name"),
-          task: tool.schema.string().optional().describe("Task description"),
-        },
-        async execute({ workflow, task }, context) {
-          ensureSetup(directory);
-          const state = readState(directory);
-          if (state && state.active) {
-            return `There is an active workflow "${state.workflow_name}" (step: ${state.current_step}, phase: ${state.current_phase}).
+    tool: tools,
 
-Use /ralphflow continue to resume, or /ralphflow cancel to cancel it first.`;
-          }
-
-          const workflowDef = workflow ? loadWorkflow(directory, workflow) : null;
-          if (!workflowDef) {
-            if (workflow) {
-              const available = listWorkflows(directory);
-              if (available.length > 0) {
-                return `Workflow "${workflow}" not found. Available workflows:\n${available.map(w => `- ${w.name}: ${w.desc}`).join("\n")}`;
-              }
-            }
-            const available = listWorkflows(directory);
-            if (available.length === 0) {
-              return "没有找到工作流。请在 .opencode/ralph-flow/workflows/ 目录创建工作流定义文件，然后再次调用 ralphflow-start 工具。";
-            }
-            return `请选择工作流，当前可用的有：\n${available.map(w => `- ${w.name}: ${w.desc}`).join("\n")}`;
-          }
-
-          if (!task) {
-            return `请描述你要执行的任务，工作流 "${workflow}" 将根据你的需求来执行。`;
-          }
-
-          const firstStep = workflowDef.steps[0];
-          if (!firstStep) {
-            return "工作流没有定义任何步骤。";
-          }
-
-          // 自动清理旧产物
-          autoCleanup(directory);
-
-          // 重置步骤记录
-          resetStepRecords(context.sessionID);
-
-          const newState: RalphFlowState = {
-            active: true,
-            workflow_name: workflow!,
-            current_step: firstStep.id,
-            current_phase: "do",
-            fail_count: 0,
-            user_task: task!,
-            paused: false,
-            session_id: context.sessionID,
-          };
-          writeState(directory, newState);
-          logWorkflowStart(directory, workflow!);
-          logStepStart(directory, firstStep.id, "do");
-
-          if (isSubWorkflowStep(firstStep)) {
-            const subUserTask = buildSubWorkflowUserTask(firstStep, task!);
-            pushState(directory, newState);
-
-            const subWorkflow = loadWorkflow(directory, firstStep.workflow);
-            if (!subWorkflow) {
-              popState(directory);
-              return `子工作流 "${firstStep.workflow}" 未找到。`;
-            }
-
-            const subFirstStep = subWorkflow.steps[0];
-            if (!subFirstStep) {
-              popState(directory);
-              return `子工作流 "${firstStep.workflow}" 没有步骤。`;
-            }
-
-            const subState: RalphFlowState = {
-              active: true,
-              workflow_name: firstStep.workflow,
-              current_step: subFirstStep.id,
-              current_phase: "do",
-              fail_count: 0,
-              user_task: subUserTask,
-              paused: false,
-              session_id: context.sessionID,
-            };
-            writeState(directory, subState);
-            logStepStart(directory, subFirstStep.id, "do");
-
-            const stepsOverview = workflowDef.steps.map((s, i) =>
-              `  ${i + 1}. **${s.id}**: ${s.desc}${isSubWorkflowStep(s) ? ` (子工作流: ${s.workflow})` : ""}`
-            ).join("\n");
-
-            if (isSubWorkflowStep(subFirstStep)) {
-              return `Workflow "${workflow!}" started.
-
-Task: ${task!}
-
-## Steps Overview
-${stepsOverview}
-
-Starting with sub-workflow: **${firstStep.id}** - ${firstStep.desc} → ${firstStep.workflow}
-
-Sub-workflow "${firstStep.workflow}" first step is also a sub-workflow. Please run the task manually.`;
-            }
-
-            const doPrompt = buildDoPrompt(subFirstStep as NormalStepDef, subUserTask);
-            return `Workflow "${workflow!}" started.
-
-Task: ${task!}
-
-## Steps Overview
-${stepsOverview}
-
-Starting with sub-workflow: **${firstStep.id}** - ${firstStep.desc} → ${firstStep.workflow}
-
----
-
-${doPrompt}`;
-          }
-
-          const doPrompt = buildDoPrompt(firstStep, task!);
-
-          const stepsOverview = workflowDef.steps.map((s, i) =>
-            `  ${i + 1}. **${s.id}**: ${s.desc}${isSubWorkflowStep(s) ? ` (子工作流: ${s.workflow})` : ""}`
-          ).join("\n");
-
-          return `Workflow "${workflow!}" started.
-
-Task: ${task!}
-
-## Steps Overview
-${stepsOverview}
-
-Starting with step: **${firstStep.id}** - ${firstStep.desc}
-
----
-
-${doPrompt}`;
-        },
-      }),
-
-      "ralphflow-continue": tool({
-        description: "Continue a paused workflow",
-        args: {},
-        async execute(_, context) {
-          ensureSetup(directory);
-          const state = readState(directory);
-          if (!state || !state.active) {
-            return "没有活跃的工作流可以继续。";
-          }
-
-          const workflow = loadWorkflow(directory, state.workflow_name);
-          if (!workflow) {
-            return `工作流 "${state.workflow_name}" 未找到。`;
-          }
-
-          // 重置步骤记录和并发标记，避免与历史记录重复
-          resetStepRecords(context.sessionID);
-          resetAdversarialCheckActive(directory);
-
-          const previousFailCount = state.fail_count;
-          const previousFailureReason = state.last_failure_reason;
-
-          const newState: RalphFlowState = {
-            ...state,
-            current_phase: "do",
-            fail_count: 0,
-            paused: false,
-            last_failure_reason: undefined,
-            session_id: context.sessionID,
-          };
-          writeState(directory, newState);
-          logWorkflowResumed(directory, state.workflow_name, state.current_step);
-
-          let resumeMsg = "";
-          if (previousFailCount > 0) {
-            resumeMsg = `## 工作流已恢复\n\n之前尝试次数: ${previousFailCount}`;
-            if (previousFailureReason) {
-              resumeMsg += `\n\n### 上次失败原因\n${previousFailureReason}`;
-            }
-            resumeMsg += "\n\n---\n\n";
-          }
-
-          return resumeMsg + handleContinue(directory, workflow, context.sessionID);
-        },
-      }),
-
-      "ralphflow-cancel": tool({
-        description: "Cancel the current workflow",
-        args: {},
-        async execute(_, context) {
-          ensureSetup(directory);
-          const state = readState(directory);
-          if (!state || !state.active) {
-            return "没有活跃的工作流可以取消。";
-          }
-
-          clearState(directory);
-          resetAdversarialCheckActive(directory);
-          logWorkflowCancelled(directory, state.workflow_name);
-          // 生成取消报告
-          const stepRecords = getStepRecords(context.sessionID);
-          generateCancellationReport(directory, state.workflow_name, stepRecords);
-          resetStepRecords(context.sessionID);
-
-          return `Workflow "${state.workflow_name}" cancelled.`;
-        },
-      }),
-
-      "ralphflow-status": tool({
-        description: "Show workflow status",
-        args: {},
-        async execute() {
-          ensureSetup(directory);
-          const state = readState(directory);
-          if (!state) {
-            return "没有找到工作流状态。";
-          }
-
-          if (!state.active) {
-            return `工作流 "${state.workflow_name}" 未激活（状态: 已完成/已取消）。`;
-          }
-
-          const workflow = loadWorkflow(directory, state.workflow_name);
-          const currentStep = workflow ? getStep(workflow, state.current_step) : null;
-
-          let status = `## 工作流状态
-
-- **工作流**: ${state.workflow_name}
-- **状态**: ${state.paused ? "已暂停" : "运行中"}
-- **当前步骤**: ${state.current_step}
-- **当前阶段**: ${state.current_phase}
-- **失败次数**: ${state.fail_count}`;
-
-          if (state.last_failure_reason) {
-            status += `
-- **上次失败原因**: ${state.last_failure_reason}`;
-          }
-
-          if (currentStep) {
-            if (isSubWorkflowStep(currentStep)) {
-              status += `
-
-## 当前步骤详情
-
-- **描述**: ${currentStep.desc}
-- **类型**: 子工作流
-- **子工作流**: ${currentStep.workflow}
-- **输入**: ${currentStep.inputs ? JSON.stringify(currentStep.inputs) : "无"}
-- **最大失败次数**: ${currentStep.max_fail_count}`;
-            } else {
-              status += `
-
-## 当前步骤详情
-
-- **描述**: ${currentStep.desc}
-- **任务**: ${currentStep.do}
-- **输入**: ${currentStep.input}
-- **输出**: ${currentStep.output}
-- **检查**: ${currentStep.check}
-- **最大失败次数**: ${currentStep.max_fail_count}`;
-            }
-          }
-
-          return status;
-        },
-      }),
-
-      "ralphflow-list": tool({
-        description: "List available workflows",
-        args: {},
-        async execute() {
-          ensureSetup(directory);
-          const workflows = listWorkflows(directory);
-          if (workflows.length === 0) {
-            return "没有找到工作流。请在 .opencode/ralph-flow/workflows/ 目录创建工作流定义文件。";
-          }
-          return `## 可用工作流
-
-${workflows.map(w => `- **${w.name}**: ${w.desc}`).join("\n")}`;
-        },
-      }),
+    "chat.message": async (input) => {
+      if (input.sessionID) seenSessions.add(input.sessionID);
     },
 
     event: async ({ event }) => {
+      const props: any = (event as any).properties || {};
+
       if (event.type === "session.idle") {
-        const sessionId = event.properties.sessionID;
+        const sessionId: string | undefined = props.sessionID;
         if (!sessionId) return;
-
-        const state = readState(directory);
-        if (!state || !state.active) return;
-
-        // 只处理工作流所属会话的 idle 事件，忽略子agent会话
-        if (state.session_id && state.session_id !== sessionId) return;
-
-        const workflow = loadWorkflow(directory, state.workflow_name);
-        if (!workflow) return;
-
-        await handleSessionIdle(client, sessionId, directory, workflow);
+        seenSessions.add(sessionId);
+        // The verifier's own session also idles in this project — it must
+        // never be driven or receive orphan hints.
+        if (isCheckSession(sessionId)) return;
+        await handleSessionIdle(client, engine, sessionId).catch((e) => {
+          engine.logEvent("error", "session_idle_handler_failed", { error: String(e) });
+        });
+        return;
       }
 
       if (event.type === "session.compacted") {
-        const sessionId = event.properties.sessionID;
-        if (!sessionId) return;
-
-        const state = readState(directory);
-        if (!state || !state.active || state.paused) return;
-
-        // 只处理工作流所属会话的 compacted 事件
-        if (state.session_id && state.session_id !== sessionId) return;
-
-        const workflow = loadWorkflow(directory, state.workflow_name);
-        if (!workflow) return;
-
-        // 压缩完成后，自动继续工作流
-        await handleSessionIdle(client, sessionId, directory, workflow);
+        // After compaction the session forgot its task — re-drive it exactly
+        // like an idle (the keep-alive re-injects the cached DO prompt).
+        const sessionId: string | undefined = props.sessionID;
+        if (!sessionId || isCheckSession(sessionId)) return;
+        seenSessions.add(sessionId);
+        await handleSessionIdle(client, engine, sessionId).catch((e) => {
+          engine.logEvent("error", "session_compacted_handler_failed", { error: String(e) });
+        });
+        return;
       }
 
       if (event.type === "session.error") {
-        const error = event.properties.error;
-        if (error?.name === "MessageAbortedError") {
-          const state = readState(directory);
-          if (state && state.active && !state.paused) {
-            // 只处理工作流所属会话的 error 事件
-            const errorSessionId = event.properties.sessionID;
-            if (state.session_id && errorSessionId && state.session_id !== errorSessionId) return;
-
-            logWarn(directory, "session_aborted", { step: state.current_step, phase: state.current_phase });
-            const pausedState: RalphFlowState = { ...state, paused: true };
-            writeState(directory, pausedState);
-          }
+        const error = props.error;
+        const sessionId: string | undefined = props.sessionID;
+        if (error?.name === "MessageAbortedError" && sessionId) {
+          await handleSessionGone(engine, sessionId, "aborted").catch(() => {});
         }
+        return;
       }
 
       if (event.type === "session.deleted") {
-        const state = readState(directory);
-        if (state && state.active && !state.paused) {
-          // session.deleted 事件的 properties 是 Session 对象，取其 id
-          const deletedSessionId = (event.properties as { info?: { id?: string } })?.info?.id;
-          if (state.session_id && deletedSessionId && state.session_id !== deletedSessionId) return;
-
-          const pausedState: RalphFlowState = { ...state, paused: true };
-          writeState(directory, pausedState);
-        }
+        const deletedSessionId: string | undefined = props?.info?.id;
+        if (!deletedSessionId) return;
+        seenSessions.delete(deletedSessionId);
+        await handleSessionGone(engine, deletedSessionId, "deleted").catch(() => {});
+        return;
       }
     },
   };
-}
+};
 
 // V1 PluginModule format (opencode >= 1.3.x)
-// Loader detects isRecord(mod.default) with server property
 export default {
   id: "ralph-flow",
   server: RalphFlowPlugin,
 } satisfies PluginModule;
 
 // Legacy format for older opencode versions
-// Loader iterates Object.entries(mod) and calls function exports
 export { RalphFlowPlugin as RalphFlow };

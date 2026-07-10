@@ -6,9 +6,9 @@
 
 第一次使用 ralph-flow？从这里开始：
 
-1. [安装方式](../README_CN.md#-安装方式) — 安装插件
-2. [快速开始](../README_CN.md#-快速开始) — 运行你的第一个工作流
-3. [内置工作流](../README_CN.md#内置工作流) — 了解 `loop` 和 `spec`
+1. [安装方式](../README_CN.md#安装) — 安装插件
+2. [快速开始](../README_CN.md#快速开始) — 运行你的第一个工作流
+3. [内置工作流](../README_CN.md#内置工作流) — `loop`、`spec`、`c-to-rust`、`everything2rust`
 
 ## 指南
 

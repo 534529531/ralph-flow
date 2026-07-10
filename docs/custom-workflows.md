@@ -1,6 +1,10 @@
 # Custom Workflows
 
-Create your own workflow by placing a `.yaml` file in `.opencode/ralph-flow/workflows/`.
+[English](custom-workflows.md) · [中文](custom-workflows_CN.md)
+
+Create your own workflow by placing a `.yaml` file in `.opencode/ralph-flow/workflows/`, or run `/ralphflow-create` to design and validate one interactively. A project workflow **shadows** a same-named built-in.
+
+After writing a workflow, run `/ralphflow-doctor` — it catches silently-skipped steps (a step missing any required field is dropped while the rest still runs), unreachable steps, missing `done`, unresolvable template tokens, broken sub-workflow references and cycles.
 
 ---
 
@@ -47,16 +51,20 @@ steps:
 | `on_fail` | ✅ | Next step id on failure |
 | `max_fail_count` | ✅ | Max failures before pausing (per step) |
 
+> Every required field is required **per step**. A step missing one is **silently skipped** while the rest of the workflow still runs — run `/ralphflow-doctor` to catch this. Never omit `input`/`output`.
+
 ### Sub-Workflow Steps
 
-Instead of `do`/`check`/`input`/`output`, you can call another workflow:
+Instead of `do`/`check`, you can call another workflow:
 
 | Field | Required | Description |
 |-------|----------|-------------|
 | `id` | ✅ | Unique step identifier |
 | `desc` | ✅ | Human-readable description |
 | `workflow` | ✅ | Name of the workflow to invoke |
-| `inputs` | ❌ | Key-value pairs passed to the sub-workflow |
+| `input` | ✅ | Expected inputs |
+| `output` | ✅ | Expected outputs |
+| `inputs` | ❌ | Key-value pairs passed to the sub-workflow's `user_task` |
 | `on_pass` | ✅ | Next step id on success |
 | `on_fail` | ✅ | Next step id on failure |
 | `max_fail_count` | ✅ | Max failures before pausing |
@@ -65,23 +73,37 @@ See [Nested Workflows](#nested-workflows) for details.
 
 ---
 
+## Artifacts Directory & Template Variables
+
+Every instance gets an isolated deliverables directory, `.opencode/ralph-flow/artifacts/<task>-<suffix>/`, that **survives** workflow completion. Every DO/CHECK prompt automatically carries a 产出目录 section pointing at it, so you write **bare filenames** in `output` (e.g. `"plan.md"`) and both the working session and the verifier know where to put/find them.
+
+The engine resolves **exactly one** template token, `{{artifacts_dir}}` (byte-exact — no spaces inside the braces), and you rarely need even that. Any other `{{...}}` token reaches the prompt unresolved; `/ralphflow-doctor` flags it.
+
+---
+
 ## Workflow-Level Options
+
+### `description`
+
+A one-line description shown in `/ralphflow-list`. Optional (falls back to the first step's `desc`).
+
+```yaml
+description: Build, test, and document a feature
+```
 
 ### `manual_step`
 
-Add step IDs to require user action before proceeding:
+Step IDs that require **human review**. Both list and comma-string forms are accepted:
 
 ```yaml
-manual_step: analyze, execute
-
-steps:
-  - id: analyze
-    # ...
-  - id: execute
-    # ...
+manual_step: [design]
+# or
+manual_step: design, review
 ```
 
-Steps in this list will **not** auto-continue when the session is idle — the AI waits for your input.
+A manual step pauses **after its DO phase completes but before verification**: the session stops with a 📋 message so you can review the work first. The workflow does *not* advance until you run `/ralphflow-continue` — that command **is** the approval that starts the independent verification. If you ask for changes, the session makes them and re-emits `<promise>done</promise>`, re-arming the gate.
+
+> A `manual_step` entry that doesn't match a real step id is a **hard error** (the workflow won't load) — a typo must never silently skip a review gate you're counting on.
 
 ### `adversarial_check`
 
@@ -89,25 +111,28 @@ Configure the independent verification session. By default, the CHECK phase uses
 
 ```yaml
 adversarial_check:
-  agent: "build"                    # Use a different agent
+  agent: build                      # Use a different agent
   model:                            # Use a specific model for verification
-    providerID: "anthropic"
-    modelID: "claude-haiku-4-5"
+    providerID: anthropic
+    modelID: claude-haiku-4-5
+  # model: anthropic/claude-haiku-4-5   # string form also works
   system_prompt: |                  # Custom system prompt for the checker
     You are a strict code reviewer.
     Check that:
     - All functions have error handling
     - No hardcoded secrets
     - Tests cover edge cases
-  timeout_ms: 1800000               # Custom timeout (ms), default is 20 minutes
+  timeout_ms: 1800000               # Custom timeout (ms), default 15 minutes, capped at 1 hour
 ```
 
 | Field | Description | Default |
 |-------|-------------|---------|
-| `agent` | Which agent to use for verification | `ralph-check` |
-| `model` | Specific model for verification (providerID + modelID) | Same as main session |
+| `agent` | Which agent to use for verification | `ralph-check` (read-only) |
+| `model` | Verifier model: `{providerID, modelID}` object or `"provider/model"` string | Agent's default |
 | `system_prompt` | Custom system prompt for the checker | Built-in verification prompt |
-| `timeout_ms` | Check timeout in milliseconds | `900000` (15 minutes) |
+| `timeout_ms` | Check timeout in milliseconds (capped at `3600000`) | `900000` (15 minutes) |
+
+> A **bare** model name (e.g. `sonnet`, `Opus`) can't be resolved to a provider and silently falls back to the agent's default model. Use the object form or a `"provider/model"` string. `/ralphflow-doctor` warns when it sees a bare name.
 
 **Use cases:**
 - Use a **cheaper model** for verification (e.g., Haiku for checking Sonnet's work)

@@ -1,6 +1,10 @@
 # 自定义工作流
 
-在 `.opencode/ralph-flow/workflows/` 目录下创建 `.yaml` 文件即可定义自己的工作流。
+[English](custom-workflows.md) · [中文](custom-workflows_CN.md)
+
+在 `.opencode/ralph-flow/workflows/` 目录下创建 `.yaml` 文件即可定义自己的工作流，或运行 `/ralphflow-create` 交互式设计并验证。项目工作流会**遮蔽**同名内置工作流。
+
+写完后运行 `/ralphflow-doctor` —— 它会抓出被静默丢弃的步骤（缺任何必填字段的步骤会被丢弃，其余照常运行）、不可达步骤、缺失的 `done`、无法解析的模板记号、坏的子工作流引用和循环。
 
 ---
 
@@ -47,16 +51,20 @@ steps:
 | `on_fail` | ✅ | 失败后的下一步（步骤 id） |
 | `max_fail_count` | ✅ | 最大失败次数（每个步骤独立） |
 
+> 每个必填字段都是**逐步骤**必填的。缺任何一个的步骤会被**静默跳过**，其余工作流照常运行 —— 用 `/ralphflow-doctor` 抓出来。绝不要省略 `input`/`output`。
+
 ### 子工作流步骤
 
-不使用 `do`/`check`/`input`/`output`，而是调用另一个工作流：
+不使用 `do`/`check`，而是调用另一个工作流：
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
 | `id` | ✅ | 步骤唯一标识 |
 | `desc` | ✅ | 步骤描述 |
 | `workflow` | ✅ | 要调用的工作流名称 |
-| `inputs` | ❌ | 传递给子工作流的键值对参数 |
+| `input` | ✅ | 预期输入说明 |
+| `output` | ✅ | 预期输出说明 |
+| `inputs` | ❌ | 传递给子工作流 `user_task` 的键值对参数 |
 | `on_pass` | ✅ | 通过后的下一步 |
 | `on_fail` | ✅ | 失败后的下一步 |
 | `max_fail_count` | ✅ | 最大失败次数 |
@@ -65,49 +73,66 @@ steps:
 
 ---
 
+## 产出目录与模板变量
+
+每个实例有一个隔离的交付物目录 `.opencode/ralph-flow/artifacts/<任务摘要>-<后缀>/`，工作流结束后**保留**。每个 DO/CHECK 提示词都自动携带指向它的 产出目录 一节，所以你在 `output` 里写**裸文件名**（如 `"plan.md"`），工作会话和验证者都知道往哪放/去哪找。
+
+引擎**只**解析一个模板记号 `{{artifacts_dir}}`（字节精确 —— 花括号内不能有空格），而且你几乎用不到它。其他任何 `{{...}}` 记号会原样进入提示词；`/ralphflow-doctor` 会标记出来。
+
+---
+
 ## 工作流级选项
+
+### `description`
+
+`/ralphflow-list` 里显示的一句话描述。可选（不填则回退到第一个步骤的 `desc`）。
+
+```yaml
+description: 实现、测试并文档化一个功能
+```
 
 ### `manual_step`
 
-指定需要人工确认的步骤：
+需要**人工审查**的步骤 id。列表和逗号字符串两种写法都接受：
 
 ```yaml
-manual_step: analyze, execute
-
-steps:
-  - id: analyze
-    # ...
-  - id: execute
-    # ...
+manual_step: [design]
+# 或
+manual_step: design, review
 ```
 
-列入该列表的步骤，AI 完成工作后**不会自动继续** —— 需要你手动执行 `/ralphflow-continue`。
+手动步骤在 **DO 完成后、验证开始前**暂停：会话用 📋 消息停下，好让你先审查工作成果。你运行 `/ralphflow-continue` 之前工作流**不会**推进 —— 这条命令**就是**启动独立验证的批准。你要改，会话就改并再次输出 `<promise>done</promise>`，审查门重新武装。
+
+> `manual_step` 里对不上真实步骤 id 的条目是**硬错误**（工作流无法加载）—— 打错字绝不能静默跳过你指望的审查门。
 
 ### `adversarial_check`
 
-配置独立验证会话。默认情况下，CHECK 阶段使用 `ralph-check` agent。你可以自定义：
+配置独立验证会话。默认情况下，CHECK 阶段使用只读的 `ralph-check` agent。你可以自定义：
 
 ```yaml
 adversarial_check:
-  agent: "build"                    # 使用其他 agent
+  agent: build                      # 使用其他 agent
   model:                            # 指定验证使用的模型
-    providerID: "anthropic"
-    modelID: "claude-haiku-4-5"
+    providerID: anthropic
+    modelID: claude-haiku-4-5
+  # model: anthropic/claude-haiku-4-5   # 字符串形式也可以
   system_prompt: |                  # 自定义检查的系统提示词
     你是一个严格的代码审查员。
     检查以下内容：
     - 所有函数都有错误处理
     - 没有硬编码的密钥
     - 测试覆盖边界情况
-  timeout_ms: 1800000               # 自定义超时时间（毫秒），默认 20 分钟
+  timeout_ms: 1800000               # 自定义超时时间（毫秒），默认 15 分钟，上限 1 小时
 ```
 
 | 字段 | 说明 | 默认值 |
 |------|------|--------|
-| `agent` | 使用哪个 agent 进行验证 | `ralph-check` |
-| `model` | 验证使用的模型（providerID + modelID） | 与主会话相同 |
+| `agent` | 使用哪个 agent 进行验证 | `ralph-check`（只读） |
+| `model` | 验证模型：`{providerID, modelID}` 对象或 `"provider/model"` 字符串 | agent 默认模型 |
 | `system_prompt` | 自定义检查的系统提示词 | 内置验证提示词 |
-| `timeout_ms` | 检查超时时间（毫秒） | `900000`（15 分钟） |
+| `timeout_ms` | 检查超时时间（毫秒，上限 `3600000`） | `900000`（15 分钟） |
+
+> **裸**模型名（如 `sonnet`、`Opus`）无法解析到 provider，会静默回退到 agent 的默认模型。请用对象形式或 `"provider/model"` 字符串。`/ralphflow-doctor` 看到裸名会警告。
 
 **使用场景：**
 - 使用**更便宜的模型**进行验证（如用 Haiku 检查 Sonnet 的工作）
