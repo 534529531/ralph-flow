@@ -81,9 +81,8 @@ function resolveModel(model: AdversarialCheckConfig["model"]): { providerID: str
 
 /**
  * Run the independent verification for a step. `checkPrompt` is built by the
- * caller INSIDE the phase-1 lock (the Claude version builds it here, but its
- * server is single-session; in this multi-session process the implicit
- * instance binding must not be trusted outside a lock).
+ * caller in phase 1 (with the explicit instId) and passed in, so this function
+ * needs no instance binding of its own.
  */
 export async function adversarialCheck(
   client: Client,
@@ -114,7 +113,7 @@ export async function adversarialCheck(
     return { passed: false, infra: true, reason: `启动时通过 extra_dirs 声明的目录已不存在：${missingDirs.map((d) => `\`${d}\``).join("、")}。恢复该目录（或重新启动工作流）后调用 ralphflow_continue 重新验证。` };
   }
 
-  engine.logEvent("info", "adversarial_check_start", { stepId: step.id, agent, model: model ? `${model.providerID}/${model.modelID}` : "agent-default", timeout_ms: timeout, extra_dirs: extraDirs });
+  engine.logEvent(instId, "info", "adversarial_check_start", { stepId: step.id, agent, model: model ? `${model.providerID}/${model.modelID}` : "agent-default", timeout_ms: timeout, extra_dirs: extraDirs });
 
   // Create the independent verifier session.
   let checkSessionId: string;
@@ -129,7 +128,7 @@ export async function adversarialCheck(
     checkSessionId = (checkSession as { data: { id: string } }).data.id;
     if (!checkSessionId) throw new Error("session.create returned no id");
   } catch (err: any) {
-    engine.logEvent("error", "adversarial_check_session_create_failed", { stepId: step.id, error: err.message });
+    engine.logEvent(instId, "error", "adversarial_check_session_create_failed", { stepId: step.id, error: err.message });
     return { passed: false, infra: true, reason: `验证会话创建失败：${err.message}` };
   }
 
@@ -139,14 +138,14 @@ export async function adversarialCheck(
   activeChecks.set(instId, handle);
   engine.writeAdversarialSession(checkSessionId, instId);
 
-  // Close the cancel race: a cross-session cancel between the locked pre-check
+  // Close the cancel race: a cross-session cancel between the phase-1 pre-check
   // and the marker write above finds nothing to abort and deletes the instance
   // dir. If the instance is gone now, nobody else can ever reach this session —
   // clean it up ourselves.
   if (!engine.instanceExists(instId)) {
     activeChecks.delete(instId);
     try { await client.session.delete({ path: { id: checkSessionId } }); } catch {}
-    engine.logEvent("warn", "adversarial_check_cancelled_before_start", { stepId: step.id });
+    engine.logEvent(instId, "warn", "adversarial_check_cancelled_before_start", { stepId: step.id });
     return { passed: false, reason: "工作流实例已被取消。" };
   }
 
@@ -154,7 +153,7 @@ export async function adversarialCheck(
   // Liveness watchdog: logs progress every minute (the Claude version also
   // watches the child pid; an SDK request has no pid to watch).
   const keepalive = setInterval(() => {
-    engine.logEvent("info", "adversarial_check_keepalive", { stepId: step.id, elapsed_ms: Date.now() - startTime });
+    engine.logEvent(instId, "info", "adversarial_check_keepalive", { stepId: step.id, elapsed_ms: Date.now() - startTime });
   }, 60_000);
 
   try {
@@ -185,7 +184,7 @@ export async function adversarialCheck(
       if (String(err.message).includes("timeout")) {
         // Abort the runaway generation before reporting.
         try { await client.session.abort({ path: { id: checkSessionId } }); } catch {}
-        engine.logEvent("warn", "adversarial_check_timeout", { stepId: step.id });
+        engine.logEvent(instId, "warn", "adversarial_check_timeout", { stepId: step.id });
         return {
           passed: false,
           infra: true,
@@ -203,7 +202,7 @@ export async function adversarialCheck(
 4. 如果任务确实需要更长时间，可以在工作流配置中增加 timeout_ms`,
         };
       }
-      engine.logEvent("error", "adversarial_check_error", { stepId: step.id, error: err.message });
+      engine.logEvent(instId, "error", "adversarial_check_error", { stepId: step.id, error: err.message });
       return { passed: false, infra: true, reason: `验证会话执行失败：${err.message}` };
     } finally {
       if (timeoutTimer) clearTimeout(timeoutTimer);
@@ -214,7 +213,7 @@ export async function adversarialCheck(
     }
 
     const responseText = extractResponseText(response).trim();
-    engine.logEvent("info", "adversarial_check_response", { stepId: step.id, len: responseText.length, preview: responseText.substring(0, 500) });
+    engine.logEvent(instId, "info", "adversarial_check_response", { stepId: step.id, len: responseText.length, preview: responseText.substring(0, 500) });
 
     if (!responseText) {
       return { passed: false, infra: true, reason: "验证返回空响应。" };
@@ -222,7 +221,7 @@ export async function adversarialCheck(
 
     const passed = engine.parseCheckResult(responseText);
     const reason = engine.getAdversarialCheckReason(responseText);
-    engine.logEvent("info", "adversarial_check_result", { stepId: step.id, passed, reason: reason.substring(0, 200) });
+    engine.logEvent(instId, "info", "adversarial_check_result", { stepId: step.id, passed, reason: reason.substring(0, 200) });
     return { passed, reason };
   } finally {
     clearInterval(keepalive);

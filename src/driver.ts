@@ -21,15 +21,18 @@ import { isSubWorkflowStep, MANUAL_GATE_MARKER, DONE_TAG_MARKER } from "./engine
 type Client = any;
 
 const MAX_DO_REINJECT = 5;
-const ORPHAN_NOTIFY_TTL_MS = 30 * 60 * 1000;
 
-// Per-session in-flight guard. The driver mirrors the Claude Stop hook: it holds
-// NO engine lock (its state is read via listInstances and its writes are
-// instId-scoped marker files), so a long injectPrompt/getLastAssistantMessage
-// can never starve a ralphflow_continue tool call of the engine's state lock.
-// This set just prevents two overlapping idle drives of the SAME session from
-// racing on that session's markers.
+// Per-session in-flight guard. The driver holds NO engine lock (its state is
+// read via listInstances and its writes are instId-scoped marker files), so a
+// long injectPrompt/getLastAssistantMessage can never stall a tool call. This
+// set just prevents two overlapping idle drives of the SAME session from racing
+// on that session's markers.
 const drivingSessions = new Set<string>();
+
+/** Test-only: clear the in-flight guard between cases. */
+export function __resetDrivingSessions(): void {
+  drivingSessions.clear();
+}
 
 // ─── Helpers (mirror of the hook's file utils) ───────────────────────────────
 
@@ -145,34 +148,14 @@ export async function handleSessionIdle(
     const instances = engine.listInstances();
     if (instances.length === 0) return;
 
+    // Drive only the instance THIS session owns. Never auto-claim another
+    // session's instance from an idle — that session (or the verifier session,
+    // which also idles in this project) would be silenced. A new session takes
+    // over an interrupted instance explicitly via /ralphflow-continue.
     const owned = instances.filter((i) => i.owner === sessionId);
-    // More than one owned instance can only arise from degraded-identity modes;
-    // drive the most recently active one deterministically.
     owned.sort((a, b) => (b.lastActivity?.getTime() || 0) - (a.lastActivity?.getTime() || 0));
     const mine = owned[0] || null;
-
-    if (!mine) {
-      // This session drives no instance. Deliberately NO auto-claim here — an
-      // unrelated session (or the check session, which also idles in this
-      // project) could steal ownership and silence the real driver forever.
-      // Instead, surface a rate-limited hint when instances have no live
-      // driver, so the user knows how to reattach.
-      const orphans = instances.filter((i) => !i.owner || !engine.isSessionAlive(i.owner));
-      const toNotify = orphans.filter((i) => {
-        const last = parseInt(readTextFile(path.join(engine.getInstanceDir(i.id), ".orphan-notified")), 10) || 0;
-        return Date.now() - last > ORPHAN_NOTIFY_TTL_MS;
-      });
-      if (toNotify.length > 0) {
-        for (const i of toNotify) {
-          writeFileSafe(path.join(engine.getInstanceDir(i.id), ".orphan-notified"), String(Date.now()));
-        }
-        const list = orphans.map((i) => `- \`${i.id}\`（${i.state.workflow_name} / ${i.state.current_step}）`).join("\n");
-        await injectPrompt(client, sessionId,
-          `ℹ️ 检测到 ${orphans.length} 个无人驱动的 Ralph Flow 工作流实例：\n${list}\n\n如需在本会话继续，运行 /ralphflow-continue（多个实例时指定实例 ID）；放弃可运行 /ralphflow-cancel。`,
-          true);
-      }
-      return;
-    }
+    if (!mine) return;
 
     // ── Instance-scoped paths ────────────────────────────────────────────────
     const instDir = engine.getInstanceDir(mine.id);
@@ -353,14 +336,10 @@ export async function handleSessionGone(
   sessionId: string,
   reason: "aborted" | "deleted"
 ): Promise<void> {
-  await engine.withLock(() => {
-    engine.beginOp(null);
-    const instances = engine.listInstances();
-    const mine = instances.find((i) => i.owner === sessionId);
-    if (!mine || mine.state.paused) return;
-    // Aborted mid-run: pausing keeps the driver quiet until the user resumes.
-    // A deleted session's instance additionally becomes an orphan (owner gone).
-    engine.writeState({ ...mine.state, paused: true, pause_reason: `session_${reason}` }, mine.id);
-    engine.logEvent("warn", `session_${reason}`, { instance: mine.id, step: mine.state.current_step, phase: mine.state.current_phase });
-  });
+  const instances = engine.listInstances();
+  const mine = instances.find((i) => i.owner === sessionId);
+  if (!mine || mine.state.paused) return;
+  // Aborted mid-run: pausing keeps the driver quiet until the user resumes.
+  engine.writeState({ ...mine.state, paused: true, pause_reason: `session_${reason}` }, mine.id);
+  engine.logEvent(mine.id, "warn", `session_${reason}`, { instance: mine.id, step: mine.state.current_step, phase: mine.state.current_phase });
 }

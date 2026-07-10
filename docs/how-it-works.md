@@ -141,8 +141,8 @@ flowchart LR
 ```
 
 - One session drives at most one instance; parallel sessions each drive their own.
-- The driver only ever acts on the instance whose `owner-session` matches the idling session — parallel sessions and the verifier session never interfere.
-- When the owning session is gone (opencode restarted), any session's `/ralphflow-continue` can take an instance over. See [Commands → Instance model](commands.md#instance-model).
+- The driver only ever acts on the instance whose `session_id` matches the idling session — parallel sessions and the verifier session never interfere.
+- Any session's `/ralphflow-continue` can take an instance over (there is no session-liveness probe, so ownership is advisory). See [Commands → Instance model](commands.md#instance-model).
 
 ---
 
@@ -155,8 +155,7 @@ The plugin hooks opencode's session events to drive workflows:
 | `session.idle` | Session finishes responding | Detect the done tag, drive the workflow / keep-alive |
 | `session.compacted` | Context was compacted | Re-drive with the cached DO prompt |
 | `session.error` (aborted) | User interrupted the run | Pause the instance |
-| `session.deleted` | Session removed | Pause the instance (becomes an orphan) |
-| `chat.message` | Any user message | Record session liveness (for takeover detection) |
+| `session.deleted` | Session removed | Pause the instance |
 
 ### Tag detection
 
@@ -180,6 +179,7 @@ Each instance's state lives in `.opencode/ralph-flow/instances/<id>/state.json`:
   "fail_count": 0,
   "user_task": "...",
   "paused": false,
+  "session_id": "<owning session id>",
   "instance_id": "loop-260710120000-ab12"
 }
 ```
@@ -217,7 +217,6 @@ Per-project state lives under `.opencode/ralph-flow/`; user-global config lives 
     │   └── <id>/                   # One directory per workflow instance
     │       ├── state.json          # Workflow state (do NOT edit)
     │       ├── state-stack.json    # Sub-workflow nesting stack
-    │       ├── owner-session        # Driving session id
     │       ├── artifacts-dir        # Name of this instance's artifacts dir
     │       ├── .do-prompt-cache     # Current DO prompt (keep-alive re-injects)
     │       ├── .manual-gate         # Manual review markers

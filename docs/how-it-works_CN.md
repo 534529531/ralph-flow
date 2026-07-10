@@ -141,8 +141,8 @@ flowchart LR
 ```
 
 - 一个会话最多驱动一个实例；多个并行会话各驱动各的。
-- 驱动器只作用于 `owner-session` 与空闲会话匹配的实例 —— 并行会话和验证会话互不干扰。
-- 属主会话消失（opencode 重启）后，任何会话的 `/ralphflow-continue` 都可接管某个实例。见 [命令 → 实例模型](commands_CN.md#实例模型)。
+- 驱动器只作用于 `session_id` 与空闲会话匹配的实例 —— 并行会话和验证会话互不干扰。
+- 任何会话的 `/ralphflow-continue` 都可接管某个实例（没有会话存活探测，所有权是建议性的）。见 [命令 → 实例模型](commands_CN.md#实例模型)。
 
 ---
 
@@ -156,7 +156,6 @@ flowchart LR
 | `session.compacted` | 上下文被压缩 | 用缓存的 DO 提示词重新驱动 |
 | `session.error`（aborted） | 用户中断了运行 | 暂停实例 |
 | `session.deleted` | 会话被删除 | 暂停实例（变成孤儿） |
-| `chat.message` | 任何用户消息 | 记录会话存活性（用于接管检测） |
 
 ### 标记检测
 
@@ -180,6 +179,7 @@ flowchart LR
   "fail_count": 0,
   "user_task": "...",
   "paused": false,
+  "session_id": "<属主会话 id>",
   "instance_id": "loop-260710120000-ab12"
 }
 ```
@@ -217,7 +217,6 @@ flowchart LR
     │   └── <id>/                   # 每个工作流实例一个目录
     │       ├── state.json          # 工作流状态（勿手改）
     │       ├── state-stack.json    # 子工作流嵌套栈
-    │       ├── owner-session        # 驱动会话 id
     │       ├── artifacts-dir        # 本实例产出目录的名字
     │       ├── .do-prompt-cache     # 当前 DO 提示词（保活重注入）
     │       ├── .manual-gate         # 手动审查标记

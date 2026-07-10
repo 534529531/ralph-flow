@@ -94,8 +94,8 @@ User input: $ARGUMENTS
 3. Call \`ralphflow_continue\` — it resets the fail counter and retries the step
 
 **Attach to an interrupted instance (new session)**: If the user provided an instance id with this command, pass it as the \`instance\` argument (unique prefix allowed). Without an id:
-- a single instance whose owning session is closed → auto-attached
-- the owner is still alive or multiple instances exist → the tool returns an instance list; show it to the user and ask which one to attach, then call again with \`instance\`
+- a single instance in the project → auto-attached
+- multiple instances exist → the tool returns an instance list; show it to the user and ask which one to attach, then call again with \`instance\`
 - attaching to an instance that was interrupted mid-DO returns the DO prompt — continue executing that task; if it was interrupted after done, verification starts directly
 
 ## Phase Reporting
@@ -115,14 +115,14 @@ After calling \`ralphflow_continue\`, the system will notify you of the next pha
 User input: $ARGUMENTS
 
 Call the \`ralphflow_status\` tool:
-- Without arguments it shows this session's instance, or an overview of ALL active instances in the project when this session has none (id, workflow, step, state, whether the owning session is alive, last activity).
+- Without arguments it shows this session's instance, or an overview of ALL active instances in the project when this session has none (id, workflow, step, state, owner session, last activity).
 - If the user names an instance, pass it as the \`instance\` argument (unique prefix allowed) to inspect that instance.
 
 Displayed per instance:
 - Workflow name, current step and phase (do/check)
 - State: running / verifying / waiting for manual review / paused (with reason)
 - Failure count and last failure reason (if any)
-- Owner session liveness — a closed owner means the instance can be taken over via \`ralphflow_continue\``,
+- Owner session — an instance owned by another (or a since-closed) session can be taken over via \`ralphflow_continue\``,
   },
 
   "ralphflow-list": {
@@ -131,7 +131,7 @@ Displayed per instance:
 
 Call the \`ralphflow_list\` tool to show:
 - All workflow names with a brief description of each
-- All active workflow instances in this project (id, workflow, step, state, owner-session liveness)
+- All active workflow instances in this project (id, workflow, step, state, owner session)
 
 Workflows are resolved in order (a same-named workflow at an earlier tier shadows the later ones):
 1. Project custom (.opencode/ralph-flow/workflows/) — this project only
@@ -147,7 +147,7 @@ User input: $ARGUMENTS
 
 Call the \`ralphflow_cancel\` tool to properly cancel the workflow: it aborts any running verification session, archives the final report to \`.opencode/ralph-flow/reports/\`, and removes the instance directory (including the sub-workflow state stack).
 
-- Without arguments it cancels this session's instance (or the single instance whose owning session is closed).
+- Without arguments it cancels this session's instance (or the single instance in the project).
 - To cancel a specific instance (e.g. one owned by another/closed session), pass the \`instance\` argument (unique prefix allowed). If the tool returns an instance list instead, show it to the user and confirm which one to cancel.
 
 Do NOT manually delete files — use the tool to ensure proper cleanup.`,

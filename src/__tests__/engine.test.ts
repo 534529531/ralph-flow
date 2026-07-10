@@ -5,13 +5,11 @@ import os from "os";
 import { createEngine, type Platform, type Engine } from "../engine.js";
 
 let tmpDir: string;
-let aliveSessions: Set<string>;
 let engine: Engine;
+let INST: string; // instId of the instance created by startInstance()
 
 function makeEngine(dir = tmpDir): Engine {
-  const platform: Platform = {
-    isSessionAlive: (id) => !!id && aliveSessions.has(id),
-  };
+  const platform: Platform = {};
   return createEngine(dir, platform) as Engine;
 }
 
@@ -45,21 +43,18 @@ steps:
 `;
 
 /** Mirror of what ralphflow_start does for a normal first step. */
-function startInstance(wfName = "test-wf", task = "test task"): string {
-  engine.beginOp("sess-1");
+function startInstance(wfName = "test-wf", task = "test task", sessionId = "sess-1"): string {
   const wf = engine.loadWorkflow(wfName)!;
   const instId = engine.generateInstanceId(wfName);
   fs.mkdirSync(engine.getInstanceDir(instId), { recursive: true });
   engine.writeArtifactsDirName(instId, task);
-  engine.setBoundInstance(instId);
-  engine.writeState({ active: true, workflow_name: wfName, current_step: wf.steps[0].id, current_phase: "do", fail_count: 0, user_task: task, paused: false }, instId);
-  engine.bindInstance(instId);
+  engine.writeState({ active: true, workflow_name: wfName, current_step: wf.steps[0].id, current_phase: "do", fail_count: 0, user_task: task, paused: false, session_id: sessionId }, instId);
+  INST = instId;
   return instId;
 }
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ralph-flow-test-"));
-  aliveSessions = new Set(["sess-1"]);
   engine = makeEngine();
 });
 
@@ -440,7 +435,6 @@ describe("instances", () => {
     expect(list.length).toBe(1);
     expect(list[0].id).toBe(instId);
     expect(list[0].owner).toBe("sess-1");
-    expect(list[0].ownerAlive).toBe(true);
 
     const reportPath = engine.destroyInstance(instId, "cancelled");
     expect(reportPath).not.toBeNull();
@@ -471,45 +465,40 @@ describe("instances", () => {
     expect(name.includes("�")).toBe(false);
   });
 
-  it("resolveInstance: explicit prefix, ambiguity, dead-owner auto-attach", () => {
-    const id1 = startInstance();
-    // same session may not start a second instance in real flow; simulate a
-    // second instance owned by another session
-    engine.beginOp("sess-2");
-    aliveSessions.add("sess-2");
-    const id2 = startInstance();
+  it("resolveInstance: session-owned, explicit prefix, ambiguity, single-instance attach", () => {
+    const id1 = startInstance("test-wf", "t", "sess-1");
+    const id2 = startInstance("test-wf", "t", "sess-2");
     expect(id1).not.toBe(id2);
 
-    // Explicit unique prefix resolves
-    engine.beginOp("sess-3");
-    const r1 = engine.resolveInstance(id1.slice(0, id1.length - 2));
-    expect(r1.ok && r1.id === id1).toBe(true);
+    // A session sees the instance it owns without an explicit id (not attached).
+    const own1 = engine.resolveInstance(undefined, "sess-1");
+    expect(own1.ok && own1.id === id1 && own1.attached === false).toBe(true);
 
-    // Ambiguous prefix rejected
-    const common = "te"; // both start with test-wf-
-    const r2 = engine.resolveInstance(common);
+    // Explicit unique prefix resolves; from a third session it's an attach.
+    const r1 = engine.resolveInstance(id1.slice(0, id1.length - 2), "sess-3");
+    expect(r1.ok && r1.id === id1 && (r1 as any).attached === true).toBe(true);
+
+    // Ambiguous prefix rejected.
+    const r2 = engine.resolveInstance("te", "sess-3");
     expect(r2.ok).toBe(false);
 
-    // No explicit id, two instances with alive owners → list returned
-    const r3 = engine.resolveInstance();
+    // A session that owns none, with two instances → list returned.
+    const r3 = engine.resolveInstance(undefined, "sess-3");
     expect(r3.ok).toBe(false);
     expect((r3 as any).text).toContain("工作流实例");
 
-    // Kill one owner; still two instances → explicit required, but single
-    // dead-owner instance auto-attaches when the other is gone
+    // Down to one instance → auto-attach for any session.
     engine.destroyInstance(id2, "cancelled");
-    aliveSessions.delete("sess-1");
-    engine.beginOp("sess-3");
-    const r4 = engine.resolveInstance();
-    expect(r4.ok && r4.id === id1 && (r4 as any).attached).toBe(true);
+    const r4 = engine.resolveInstance(undefined, "sess-3");
+    expect(r4.ok && r4.id === id1 && (r4 as any).attached === true).toBe(true);
   });
 
   it("markers arm and clear", () => {
     startInstance();
-    engine.writeManualStepMarker();
-    expect(engine.markerExists(".manual-step-active")).toBe(true);
-    engine.clearManualStepMarker();
-    expect(engine.markerExists(".manual-step-active")).toBe(false);
+    engine.writeManualStepMarker(INST);
+    expect(engine.markerExists(".manual-step-active", INST)).toBe(true);
+    engine.clearManualStepMarker(INST);
+    expect(engine.markerExists(".manual-step-active", INST)).toBe(false);
   });
 
   it("never resurrects a destroyed instance via marker writes", () => {
@@ -536,7 +525,7 @@ describe("prompts", () => {
   it("DO prompt carries task sections, artifacts dir, and caches itself", () => {
     const instId = startInstance();
     const wf = engine.loadWorkflow("test-wf")!;
-    const prompt = engine.buildDoPrompt(wf.steps[0] as any, "my task");
+    const prompt = engine.buildDoPrompt(INST, wf.steps[0] as any, "my task");
     expect(prompt).toContain("## 用户需求");
     expect(prompt).toContain("my task");
     expect(prompt).toContain("产出目录");
@@ -549,7 +538,7 @@ describe("prompts", () => {
   it("retry prompt includes failure reason and retry count", () => {
     startInstance();
     const wf = engine.loadWorkflow("test-wf")!;
-    const prompt = engine.buildDoPrompt(wf.steps[0] as any, "t", "it broke", 2);
+    const prompt = engine.buildDoPrompt(INST, wf.steps[0] as any, "t", "it broke", 2);
     expect(prompt).toContain("上次失败原因");
     expect(prompt).toContain("it broke");
     expect(prompt).toContain("第 **2** 次重试");
@@ -559,7 +548,7 @@ describe("prompts", () => {
   it("CHECK prompt is self-contained with verdict tag instructions", () => {
     startInstance();
     const wf = engine.loadWorkflow("test-wf")!;
-    const prompt = engine.buildCheckPrompt(wf.steps[0] as any, "t");
+    const prompt = engine.buildCheckPrompt(INST, wf.steps[0] as any, "t");
     expect(prompt).toContain("检查依据");
     expect(prompt).toContain("<promise-check>true</promise-check>");
     expect(prompt).toContain("产出目录");
@@ -567,7 +556,7 @@ describe("prompts", () => {
 
   it("renders {{artifacts_dir}} tokens in step text", () => {
     startInstance();
-    expect(engine.renderStepText("see {{artifacts_dir}}/x.md")).toContain(".opencode/ralph-flow/artifacts/");
+    expect(engine.renderStepText(INST, "see {{artifacts_dir}}/x.md")).toContain(".opencode/ralph-flow/artifacts/");
   });
 });
 
@@ -596,11 +585,11 @@ describe("transitions", () => {
   it("check passed advances to next step with its DO prompt", () => {
     startInstance();
     const wf = engine.loadWorkflow("test-wf")!;
-    const state = engine.readState()!;
-    const result = engine.handleCheckPassed(state, wf, wf.steps[0], { reason: "looks good" });
+    const state = engine.readState(INST)!;
+    const result = engine.handleCheckPassed(INST, state, wf, wf.steps[0], { reason: "looks good" });
     expect(result.text).toContain("检查结果：通过");
     expect(result.text).toContain("**two**");
-    const newState = engine.readState()!;
+    const newState = engine.readState(INST)!;
     expect(newState.current_step).toBe("two");
     expect(newState.current_phase).toBe("do");
     expect(newState.fail_count).toBe(0);
@@ -609,8 +598,8 @@ describe("transitions", () => {
   it("check passed on the last step completes and destroys the instance", () => {
     const instId = startInstance();
     const wf = engine.loadWorkflow("test-wf")!;
-    engine.writeState({ ...engine.readState()!, current_step: "two", current_phase: "check" });
-    const result = engine.handleCheckPassed(engine.readState()!, wf, wf.steps[1], { reason: "done" });
+    engine.writeState({ ...engine.readState(INST)!, current_step: "two", current_phase: "check" }, INST);
+    const result = engine.handleCheckPassed(INST, engine.readState(INST)!, wf, wf.steps[1], { reason: "done" });
     expect(result.completed).toBe(true);
     expect(result.text).toContain("工作流完成");
     expect(fs.existsSync(engine.getInstanceDir(instId))).toBe(false);
@@ -621,16 +610,16 @@ describe("transitions", () => {
   it("check failed retries with reason; max failures pause", () => {
     startInstance();
     const wf = engine.loadWorkflow("test-wf")!;
-    let state = engine.readState()!;
-    let result = engine.handleCheckFailed(state, wf, wf.steps[0], { reason: "missing file" });
+    let state = engine.readState(INST)!;
+    let result = engine.handleCheckFailed(INST, state, wf, wf.steps[0], { reason: "missing file" });
     expect(result.text).toContain("失败 ✗ (1/3)");
     expect(result.text).toContain("missing file");
-    expect(engine.readState()!.fail_count).toBe(1);
+    expect(engine.readState(INST)!.fail_count).toBe(1);
 
-    engine.writeState({ ...engine.readState()!, fail_count: 2 });
-    result = engine.handleCheckFailed(engine.readState()!, wf, wf.steps[0], { reason: "still broken" });
+    engine.writeState({ ...engine.readState(INST)!, fail_count: 2 }, INST);
+    result = engine.handleCheckFailed(INST, engine.readState(INST)!, wf, wf.steps[0], { reason: "still broken" });
     expect(result.paused).toBe(true);
-    const paused = engine.readState()!;
+    const paused = engine.readState(INST)!;
     expect(paused.paused).toBe(true);
     expect(paused.pause_reason).toBe("max_failures");
   });
@@ -639,11 +628,11 @@ describe("transitions", () => {
     writeProjectWorkflow("test-wf2", SIMPLE_WF.replace("on_pass: two", "on_pass: two"));
     startInstance();
     const wf = engine.loadWorkflow("test-wf")!;
-    const state = engine.readState()!;
+    const state = engine.readState(INST)!;
     const fakeStep = { ...(wf.steps[0] as any), on_pass: "ghost" };
-    const result = engine.handleCheckPassed(state, wf, fakeStep, { reason: "ok" });
+    const result = engine.handleCheckPassed(INST, state, wf, fakeStep, { reason: "ok" });
     expect(result.paused).toBe(true);
-    expect(engine.readState()!.pause_reason).toBe("config_error");
+    expect(engine.readState(INST)!.pause_reason).toBe("config_error");
   });
 });
 
@@ -690,23 +679,23 @@ steps:
   it("entering a sub-workflow pushes parent and rewrites state", () => {
     startInstance("parent");
     const wf = engine.loadWorkflow("parent")!;
-    const result = engine.handleCheckPassed(engine.readState()!, wf, wf.steps[0], { reason: "ok" });
+    const result = engine.handleCheckPassed(INST, engine.readState(INST)!, wf, wf.steps[0], { reason: "ok" });
     expect(result.text).toContain("进入子工作流");
     expect(result.text).toContain("child work");
-    const state = engine.readState()!;
+    const state = engine.readState(INST)!;
     expect(state.workflow_name).toBe("child");
     expect(state.current_step).toBe("c1");
     expect(state.user_task).toContain("hint: from parent");
-    expect(engine.getStackDepth()).toBe(1);
+    expect(engine.getStackDepth(INST)).toBe(1);
   });
 
   it("sub-workflow completion pops back and completes the parent chain", () => {
     const instId = startInstance("parent");
     const parentWf = engine.loadWorkflow("parent")!;
-    engine.handleCheckPassed(engine.readState()!, parentWf, parentWf.steps[0], { reason: "ok" });
+    engine.handleCheckPassed(INST, engine.readState(INST)!, parentWf, parentWf.steps[0], { reason: "ok" });
     // Now inside child; child c1 passes → child done → parent p2 on_pass done → workflow completes
     const childWf = engine.loadWorkflow("child")!;
-    const result = engine.handleCheckPassed(engine.readState()!, childWf, childWf.steps[0], { reason: "child ok" });
+    const result = engine.handleCheckPassed(INST, engine.readState(INST)!, childWf, childWf.steps[0], { reason: "child ok" });
     expect(result.completed).toBe(true);
     expect(result.text).toContain('子工作流 "child" 已完成');
     expect(fs.existsSync(engine.getInstanceDir(instId))).toBe(false);
@@ -715,12 +704,12 @@ steps:
   it("sub-workflow max failure escalates to parent's on_fail", () => {
     startInstance("parent");
     const parentWf = engine.loadWorkflow("parent")!;
-    engine.handleCheckPassed(engine.readState()!, parentWf, parentWf.steps[0], { reason: "ok" });
+    engine.handleCheckPassed(INST, engine.readState(INST)!, parentWf, parentWf.steps[0], { reason: "ok" });
     const childWf = engine.loadWorkflow("child")!;
     // child fails twice (max_fail_count 2) → escalate to parent p2's on_fail = p2 → re-enter child
-    engine.writeState({ ...engine.readState()!, fail_count: 1 });
-    const result = engine.handleCheckFailed(engine.readState()!, childWf, childWf.steps[0], { reason: "child broken" });
-    const state = engine.readState()!;
+    engine.writeState({ ...engine.readState(INST)!, fail_count: 1 }, INST);
+    const result = engine.handleCheckFailed(INST, engine.readState(INST)!, childWf, childWf.steps[0], { reason: "child broken" });
+    const state = engine.readState(INST)!;
     // Parent p2 on_fail is p2 (a sub-workflow step) → re-enters child fresh
     expect(state.workflow_name).toBe("child");
     expect(state.current_step).toBe("c1");
@@ -730,10 +719,10 @@ steps:
   it("nesting depth is capped", () => {
     startInstance("parent");
     for (let i = 0; i < 5; i++) {
-      engine.pushState(engine.readState()!);
+      engine.pushState(engine.readState(INST)!, INST);
     }
     const wf = engine.loadWorkflow("parent")!;
-    const result = engine.resolveSubWorkflowEntry("child", "t", wf.steps[1] as any);
+    const result = engine.resolveSubWorkflowEntry(INST, "child", "t", wf.steps[1] as any);
     expect(result.error).toBe(true);
     expect(result.text).toContain("嵌套深度");
   });
@@ -764,8 +753,7 @@ last_failure_reason: it failed
     expect(instances[0].state.workflow_name).toBe("loop");
     expect(instances[0].state.fail_count).toBe(1);
     expect(instances[0].state.user_task).toBe("migrate\nme");
-    expect(instances[0].owner).toBe("old-session");
-    expect(instances[0].ownerAlive).toBe(false); // takeover journey
+    expect(instances[0].owner).toBe("old-session"); // preserved; a new session takes over via continue
   });
 
   it("parks an inactive legacy state file without creating an instance", () => {
@@ -794,20 +782,20 @@ describe("state stack", () => {
 
   it("push/pop round-trips and empty pop returns null", () => {
     startInstance();
-    const s = engine.readState()!;
-    engine.pushState(s);
-    engine.pushState({ ...s, current_step: "two" });
-    expect(engine.getStackDepth()).toBe(2);
-    expect(engine.popState()!.current_step).toBe("two");
-    expect(engine.popState()!.current_step).toBe("one");
-    expect(engine.popState()).toBeNull();
+    const s = engine.readState(INST)!;
+    engine.pushState(s, INST);
+    engine.pushState({ ...s, current_step: "two" }, INST);
+    expect(engine.getStackDepth(INST)).toBe(2);
+    expect(engine.popState(INST)!.current_step).toBe("two");
+    expect(engine.popState(INST)!.current_step).toBe("one");
+    expect(engine.popState(INST)).toBeNull();
   });
 
   it("recovers from a corrupted stack file", () => {
     const instId = startInstance();
     fs.writeFileSync(path.join(engine.getInstanceDir(instId), "state-stack.json"), "[ nope");
-    expect(engine.popState()).toBeNull();
-    engine.pushState(engine.readState()!);
-    expect(engine.getStackDepth()).toBe(1);
+    expect(engine.popState(INST)).toBeNull();
+    engine.pushState(engine.readState(INST)!, INST);
+    expect(engine.getStackDepth(INST)).toBe(1);
   });
 });

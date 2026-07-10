@@ -3,7 +3,8 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { createEngine, type Platform, type Engine } from "../engine.js";
-import { detectDoneTag, stripCodeBlocks, handleSessionIdle } from "../driver.js";
+import { detectDoneTag, stripCodeBlocks, handleSessionIdle, __resetDrivingSessions } from "../driver.js";
+import { createTools } from "../tools.js";
 
 // ─── Done-tag detection (mirror of hook-tests) ───────────────────────────────
 
@@ -46,7 +47,6 @@ describe("stripCodeBlocks", () => {
 
 let tmpDir: string;
 let engine: Engine;
-let aliveSessions: Set<string>;
 let injected: Array<{ sessionId: string; text: string; noReply: boolean }>;
 let lastAssistantText: string;
 let lastHasToolUse: boolean;
@@ -100,24 +100,21 @@ steps:
     max_fail_count: 3
 `;
 
-function startInstance(step = "build"): string {
-  engine.beginOp("sess-1");
+function startInstance(step = "build", sessionId = "sess-1"): string {
   const instId = engine.generateInstanceId("wf");
   fs.mkdirSync(engine.getInstanceDir(instId), { recursive: true });
   engine.writeArtifactsDirName(instId, "task");
-  engine.setBoundInstance(instId);
-  engine.writeState({ active: true, workflow_name: "wf", current_step: step, current_phase: "do", fail_count: 0, user_task: "task", paused: false }, instId);
-  engine.bindInstance(instId);
+  engine.writeState({ active: true, workflow_name: "wf", current_step: step, current_phase: "do", fail_count: 0, user_task: "task", paused: false, session_id: sessionId }, instId);
   if (step === "review") engine.writeManualStepMarker(instId);
   const wf = engine.loadWorkflow("wf")!;
-  engine.buildDoPrompt(wf.steps.find((s) => s.id === step) as any, "task"); // seed the prompt cache
+  engine.buildDoPrompt(instId, wf.steps.find((s) => s.id === step) as any, "task"); // seed the prompt cache
   return instId;
 }
 
 beforeEach(() => {
+  __resetDrivingSessions();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ralph-flow-driver-"));
-  aliveSessions = new Set(["sess-1"]);
-  const platform: Platform = { isSessionAlive: (id) => !!id && aliveSessions.has(id) };
+  const platform: Platform = {};
   engine = createEngine(tmpDir, platform) as Engine;
   const wfDir = path.join(tmpDir, ".opencode", "ralph-flow", "workflows");
   fs.mkdirSync(wfDir, { recursive: true });
@@ -132,7 +129,7 @@ afterEach(() => {
 });
 
 describe("handleSessionIdle", () => {
-  it("does NOT hold the engine state lock across injectPrompt (regression: State lock timeout)", async () => {
+  it("a blocked idle drive never stalls a concurrent tool call (regression: State lock timeout)", async () => {
     startInstance("build");
     lastAssistantText = "still working..."; // no done tag → drive injects a keep-alive/report
 
@@ -146,15 +143,17 @@ describe("handleSessionIdle", () => {
       },
     };
 
-    // Start the idle drive; it will block inside injectPrompt (the gated prompt).
+    // Start the idle drive; it blocks inside injectPrompt (the gated prompt).
     const drive = handleSessionIdle(slowClient, engine, "sess-1");
     await new Promise((r) => setTimeout(r, 20)); // let it reach the blocked prompt
 
-    // While the drive is blocked, a tool-style withLock MUST still acquire fast.
-    // Before the fix the driver held the lock across injectPrompt, so this would
-    // wait the full 30s deadline and throw "State lock timeout".
+    // While the drive is blocked, a status tool call from another session MUST
+    // return immediately. There is no shared lock, so this can't stall — before
+    // the redesign the driver held the state lock across injectPrompt and this
+    // threw "State lock timeout" after 30s.
+    const tools = createTools(engine, makeClient());
     const t0 = Date.now();
-    await engine.withLock(async () => { /* trivial critical section */ });
+    await tools.ralphflow_status.execute({}, { sessionID: "sess-2" } as any);
     expect(Date.now() - t0).toBeLessThan(500);
 
     release();
@@ -281,19 +280,14 @@ describe("handleSessionIdle", () => {
     expect(injected.length).toBe(0);
   });
 
-  it("foreign session with orphaned instances → rate-limited hint, no takeover", async () => {
-    const instId = startInstance("build");
-    aliveSessions.delete("sess-1"); // owner died
-    await handleSessionIdle(makeClient(), engine, "sess-9");
-    expect(injected.length).toBe(1);
-    expect(injected[0].text).toContain("无人驱动");
-    expect(injected[0].noReply).toBe(true);
-    // Ownership unchanged
-    expect(engine.readOwnerSession(instId)).toBe("sess-1");
-    // Second idle within TTL → silent
-    injected = [];
+  it("a foreign session's idle never drives another session's instance", async () => {
+    const instId = startInstance("build"); // owned by sess-1
+    lastAssistantText = "still working...";
+    // sess-9 owns nothing here — its idle must not touch sess-1's instance.
     await handleSessionIdle(makeClient(), engine, "sess-9");
     expect(injected.length).toBe(0);
+    // Ownership unchanged.
+    expect(engine.readOwnerSession(instId)).toBe("sess-1");
   });
 
   it("post-tool marker suppresses the immediate duplicate keep-alive", async () => {

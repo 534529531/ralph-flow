@@ -62,7 +62,7 @@ The slash commands drive these underscore-named tools; the model may also call t
 
 - Every `ralphflow_start` creates an instance under `.opencode/ralph-flow/instances/<id>/`.
 - One session drives at most one instance; parallel sessions in the same project each drive their own.
-- Ownership is recorded in the instance's `owner-session` file. When the owning session is gone (opencode restarted), any session's `/ralphflow-continue` can take the instance over — automatically when it's the only one, by explicit `instance` id (unique prefix allowed) otherwise.
+- Ownership is the `session_id` stored in the instance's `state.json`. Any session's `/ralphflow-continue` can take an instance over — automatically when it's the only one in the project, by explicit `instance` id (unique prefix allowed) otherwise. (There is no session-liveness probe; ownership is advisory.)
 - Attaching to an instance interrupted mid-DO re-issues the DO prompt; interrupted after the done tag goes straight to verification.
 
 ---
@@ -140,7 +140,7 @@ The report includes:
 |------|---------|
 | `state.json` | Workflow state (step, phase, fail count, pause reason) |
 | `state-stack.json` | Sub-workflow nesting stack |
-| `owner-session` | Driving session id |
+
 | `artifacts-dir` | Name of this instance's artifacts directory |
 | `.manual-step-active` / `.manual-gate` | Manual review gate markers |
 | `.done-tag-detected` | DO finished, awaiting `ralphflow_continue` |

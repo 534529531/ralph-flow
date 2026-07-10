@@ -1,18 +1,17 @@
 /**
  * Ralph Flow plugin for opencode — wiring layer.
  *
- * Structural mirror of the Claude Code plugin's composition:
+ * Composition (workflow logic mirrors the Claude plugin; runtime is native):
  *   MCP server (tools)   → Hooks.tool (src/tools.ts)
  *   Stop hook             → session.idle event (src/driver.ts)
  *   PostToolUse hook      → not needed (tool context carries sessionID)
  *   skills/ (commands)    → Hooks.config command registration (src/commands.ts)
  *   spawned `claude -p`   → independent SDK session (src/check.ts)
  *
- * Session liveness (Platform.isSessionAlive): the Claude version checks
- * ~/.claude/sessions pid files; here a session counts as alive when THIS
- * plugin process has seen activity from it and it has not been deleted. After
- * an opencode restart the set is empty, so every previous owner reads as
- * closed — exactly the auto-takeover journey for interrupted workflows.
+ * Ownership is just the session_id in each instance's state.json — no session
+ * liveness probe (opencode can't cheaply tell whether a session is still open),
+ * so instance takeover is explicit (`/ralphflow-continue`, optionally with an
+ * instance id) or automatic when a single instance exists.
  */
 
 import type { Plugin, PluginModule, Config } from "@opencode-ai/plugin";
@@ -20,7 +19,7 @@ import { RALPH_COMMANDS } from "./commands.js";
 import { createEngine, type Platform } from "./engine.js";
 import { createTools } from "./tools.js";
 import { handleSessionIdle, handleSessionGone } from "./driver.js";
-import { abortActiveCheck, hasActiveCheck, isCheckSession } from "./check.js";
+import { abortActiveCheck, isCheckSession } from "./check.js";
 import { setup } from "./setup.js";
 
 const setupDirs = new Set<string>();
@@ -31,12 +30,7 @@ const RalphFlowPlugin: Plugin = async ({ client, directory }) => {
     setupDirs.add(directory);
   }
 
-  // ── Platform seam ──────────────────────────────────────────────────────────
-  const seenSessions = new Set<string>();
   const platform: Platform = {
-    isSessionAlive(sessionId) {
-      return !!sessionId && seenSessions.has(sessionId);
-    },
     abortActiveCheck(instId) {
       abortActiveCheck(client, instId);
     },
@@ -75,23 +69,15 @@ const RalphFlowPlugin: Plugin = async ({ client, directory }) => {
 
     tool: tools,
 
-    "chat.message": async (input) => {
-      if (input.sessionID) seenSessions.add(input.sessionID);
-    },
-
     event: async ({ event }) => {
       const props: any = (event as any).properties || {};
 
       if (event.type === "session.idle") {
         const sessionId: string | undefined = props.sessionID;
         if (!sessionId) return;
-        seenSessions.add(sessionId);
-        // The verifier's own session also idles in this project — it must
-        // never be driven or receive orphan hints.
+        // The verifier's own session also idles in this project — never drive it.
         if (isCheckSession(sessionId)) return;
-        await handleSessionIdle(client, engine, sessionId).catch((e) => {
-          engine.logEvent("error", "session_idle_handler_failed", { error: String(e) });
-        });
+        await handleSessionIdle(client, engine, sessionId).catch(() => {});
         return;
       }
 
@@ -100,10 +86,7 @@ const RalphFlowPlugin: Plugin = async ({ client, directory }) => {
         // like an idle (the keep-alive re-injects the cached DO prompt).
         const sessionId: string | undefined = props.sessionID;
         if (!sessionId || isCheckSession(sessionId)) return;
-        seenSessions.add(sessionId);
-        await handleSessionIdle(client, engine, sessionId).catch((e) => {
-          engine.logEvent("error", "session_compacted_handler_failed", { error: String(e) });
-        });
+        await handleSessionIdle(client, engine, sessionId).catch(() => {});
         return;
       }
 
@@ -119,7 +102,6 @@ const RalphFlowPlugin: Plugin = async ({ client, directory }) => {
       if (event.type === "session.deleted") {
         const deletedSessionId: string | undefined = props?.info?.id;
         if (!deletedSessionId) return;
-        seenSessions.delete(deletedSessionId);
         await handleSessionGone(engine, deletedSessionId, "deleted").catch(() => {});
         return;
       }
