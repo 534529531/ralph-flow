@@ -17,7 +17,7 @@
  * package; built-ins were never copied), so this file is adapter-only.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, cpSync, renameSync, rmSync, statSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, cpSync, renameSync, rmSync, statSync, appendFileSync } from "fs";
 import { join, dirname, isAbsolute } from "path";
 import { fileURLToPath } from "url";
 import { RALPH_FLOW_DIR } from "./engine.js";
@@ -25,6 +25,23 @@ import { RALPH_FLOW_DIR } from "./engine.js";
 function getPluginRoot(): string {
   const __filename = fileURLToPath(import.meta.url);
   return dirname(dirname(__filename));
+}
+
+// File-only diagnostics: the plugin shares the opencode TUI process, so console
+// output would corrupt the display. Mirror of engine.ts's diag (see there).
+// Setup deals with global agent/skills, so its log lives under the global home.
+function diag(...args: unknown[]): void {
+  try {
+    const cfg = getGlobalConfigHome();
+    const base = cfg ? join(cfg, RALPH_FLOW_DIR) : undefined;
+    if (!base) return;
+    const dir = join(base, "logs");
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    appendFileSync(
+      join(dir, "plugin-diag.log"),
+      `[${new Date().toISOString()}] ${args.map((a) => (a instanceof Error ? a.message : String(a))).join(" ")}\n`
+    );
+  } catch {}
 }
 
 /** opencode's global config home (honors XDG_CONFIG_HOME), or null. */
@@ -90,7 +107,7 @@ function setupCheckAgent(): void {
     writeFileSync(agentFile, AGENT_CONTENT, "utf-8");
     writeFileSync(agentFile + MANAGED_MARKER, "managed by ralph-flow; delete to take ownership\n");
   } catch (e) {
-    console.error("[ralph-flow] check agent setup failed:", e);
+    diag("[ralph-flow] check agent setup failed:", e);
   }
 }
 
@@ -141,7 +158,7 @@ function setupSkills(): void {
       cpSync(src, dest, { recursive: true });
       writeFileSync(join(dest, MANAGED_MARKER), "This skill is managed by the ralph-flow plugin and refreshed on startup. Remove this marker file to take ownership.\n");
     } catch (e) {
-      console.error(`[ralph-flow] skill sync failed (${name}):`, e);
+      diag(`[ralph-flow] skill sync failed (${name}):`, e);
     }
   }
 }
@@ -181,7 +198,7 @@ function cleanupLegacyWorkflowCopies(projectDir: string): void {
     if (existsSync(p) && !existsSync(p + ".pre-2.0-backup")) {
       try {
         renameSync(p, p + ".pre-2.0-backup");
-        console.error(`[ralph-flow] Parked pre-2.0 workflow copy ${name} as ${name}.pre-2.0-backup (built-ins now resolve from the plugin)`);
+        diag(`[ralph-flow] Parked pre-2.0 workflow copy ${name} as ${name}.pre-2.0-backup (built-ins now resolve from the plugin)`);
       } catch {}
     }
   }

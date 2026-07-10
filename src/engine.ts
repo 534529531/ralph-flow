@@ -215,6 +215,23 @@ export function createEngine(projectDir: string, platform: Platform) {
     return path.join(projectDir, ".opencode", RALPH_FLOW_DIR);
   }
 
+  // Diagnostic sink. The Claude version writes these to console.error, which is
+  // harmless there (a separate MCP-server process — Claude Code captures its
+  // stderr). In opencode the plugin runs IN the TUI process, so ANY console
+  // output corrupts the display. Route everything to a file instead. (Every
+  // user-facing problem is already surfaced through the `problems` array /
+  // tool responses, so nothing important is hidden by this.)
+  function diag(...args: unknown[]): void {
+    try {
+      const dir = path.join(getRalphFlowDir(), "logs");
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.appendFileSync(
+        path.join(dir, "plugin-diag.log"),
+        `[${new Date().toISOString()}] ${args.map((a) => (a instanceof Error ? a.message : String(a))).join(" ")}\n`
+      );
+    } catch {}
+  }
+
   function getInstancesRoot(): string {
     return path.join(getRalphFlowDir(), INSTANCES_DIRNAME);
   }
@@ -374,7 +391,7 @@ export function createEngine(projectDir: string, platform: Platform) {
       if (!fs.existsSync(instPath(STATE_FILENAME, instId))) return;
       atomicWriteText(instPath(OWNER_FILENAME, instId), sessionId);
     } catch (e: any) {
-      console.error("[ralph-flow] Error writing owner-session:", e.message);
+      diag("[ralph-flow] Error writing owner-session:", e.message);
     }
   }
 
@@ -500,19 +517,19 @@ export function createEngine(projectDir: string, platform: Platform) {
         try {
           const parsed = JSON.parse(stripBom(fs.readFileSync(stateFile, "utf-8")));
           if (!isValidState(parsed)) {
-            console.error("[ralph-flow] State file has invalid schema, backing up");
+            diag("[ralph-flow] State file has invalid schema, backing up");
             try { fs.renameSync(stateFile, stateFile + ".invalid." + Date.now()); } catch {}
             return null;
           }
           return parsed;
         } catch (parseErr: any) {
-          console.error("[ralph-flow] State file corrupted, backing up:", parseErr.message);
+          diag("[ralph-flow] State file corrupted, backing up:", parseErr.message);
           try { fs.renameSync(stateFile, stateFile + ".corrupted." + Date.now()); } catch {}
           return null;
         }
       }
     } catch (e: any) {
-      console.error("[ralph-flow] Error reading state:", e.message);
+      diag("[ralph-flow] Error reading state:", e.message);
     }
     return null;
   }
@@ -522,7 +539,7 @@ export function createEngine(projectDir: string, platform: Platform) {
       const id = reqInst(instId);
       atomicWriteJson(getStateFile(id), { ...state, instance_id: id });
     } catch (e: any) {
-      console.error("[ralph-flow] Error writing state:", e.message);
+      diag("[ralph-flow] Error writing state:", e.message);
     }
   }
 
@@ -777,7 +794,7 @@ export function createEngine(projectDir: string, platform: Platform) {
       atomicWriteText(reportPath, buildReportText(workflowName, status, records || []) + artifactsNote);
       return reportPath;
     } catch (e: any) {
-      console.error("[ralph-flow] Report generation failed:", e.message);
+      diag("[ralph-flow] Report generation failed:", e.message);
       return null;
     }
   }
@@ -811,7 +828,7 @@ export function createEngine(projectDir: string, platform: Platform) {
     try {
       fs.rmSync(getInstanceDir(instId), { recursive: true, force: true });
     } catch (e: any) {
-      console.error("[ralph-flow] Error removing instance dir:", e.message);
+      diag("[ralph-flow] Error removing instance dir:", e.message);
     }
     // A workflow that produced nothing leaves no folder behind — rmdir refuses
     // non-empty dirs, so real deliverables always outlive the instance.
@@ -859,11 +876,11 @@ export function createEngine(projectDir: string, platform: Platform) {
     // Validation failures are collected into `problems` (when provided) so tool
     // responses can tell the user WHY a workflow is unusable.
     const problem = (msg: string) => { if (Array.isArray(problems)) problems.push(msg); };
-    const skipStep = (msg: string) => { console.warn(`[ralph-flow] ${msg}`); problem(msg); };
+    const skipStep = (msg: string) => { diag(`[ralph-flow] ${msg}`); problem(msg); };
     try {
       const stats = fs.statSync(filePath);
       if (stats.size > MAX_WORKFLOW_FILE_SIZE) {
-        console.error(`[ralph-flow] Workflow file ${filePath} exceeds ${MAX_WORKFLOW_FILE_SIZE} bytes, skipped`);
+        diag(`[ralph-flow] Workflow file ${filePath} exceeds ${MAX_WORKFLOW_FILE_SIZE} bytes, skipped`);
         problem(`工作流文件超过 ${MAX_WORKFLOW_FILE_SIZE} 字节上限`);
         return null;
       }
@@ -910,12 +927,12 @@ export function createEngine(projectDir: string, platform: Platform) {
       const stepIds = new Set(validSteps.map((s) => s.id));
       for (const step of validSteps) {
         if (step.on_pass !== "done" && !stepIds.has(step.on_pass)) {
-          console.error(`[ralph-flow] Step "${step.id}" on_pass references unknown step "${step.on_pass}"`);
+          diag(`[ralph-flow] Step "${step.id}" on_pass references unknown step "${step.on_pass}"`);
           problem(`步骤 "${step.id}" 的 on_pass 引用了不存在的步骤 "${step.on_pass}"`);
           return null;
         }
         if (!stepIds.has(step.on_fail)) {
-          console.error(`[ralph-flow] Step "${step.id}" on_fail references unknown step "${step.on_fail}"`);
+          diag(`[ralph-flow] Step "${step.id}" on_fail references unknown step "${step.on_fail}"`);
           problem(`步骤 "${step.id}" 的 on_fail 引用了不存在的步骤 "${step.on_fail}"`);
           return null;
         }
@@ -931,7 +948,7 @@ export function createEngine(projectDir: string, platform: Platform) {
       // point that was supposed to stop for review. Hard error, not a warning.
       const unknownManual = manual_step.filter((id) => !stepIds.has(id));
       if (unknownManual.length > 0) {
-        console.error(`[ralph-flow] manual_step in ${workflowName} references unknown step(s): ${unknownManual.join(", ")}`);
+        diag(`[ralph-flow] manual_step in ${workflowName} references unknown step(s): ${unknownManual.join(", ")}`);
         problem(`manual_step 引用了不存在的步骤：${unknownManual.map((s) => `"${s}"`).join("、")}`);
         return null;
       }
@@ -969,7 +986,7 @@ export function createEngine(projectDir: string, platform: Platform) {
         adversarial_check,
       };
     } catch (e: any) {
-      console.error(`[ralph-flow] Error parsing workflow ${filePath}:`, e.message);
+      diag(`[ralph-flow] Error parsing workflow ${filePath}:`, e.message);
       problem(`解析失败：${e.message}`);
       return null;
     }
@@ -1016,7 +1033,7 @@ export function createEngine(projectDir: string, platform: Platform) {
               const filePath = path.join(dir, file);
               const stats = fs.statSync(filePath);
               if (stats.size > MAX_WORKFLOW_FILE_SIZE) {
-                console.error(`[ralph-flow] Workflow file ${filePath} exceeds ${MAX_WORKFLOW_FILE_SIZE} bytes, skipped`);
+                diag(`[ralph-flow] Workflow file ${filePath} exceeds ${MAX_WORKFLOW_FILE_SIZE} bytes, skipped`);
                 continue;
               }
               const content = stripBom(fs.readFileSync(filePath, "utf-8"));
@@ -1045,12 +1062,12 @@ export function createEngine(projectDir: string, platform: Platform) {
                 });
               }
             } catch (e: any) {
-              console.error(`[ralph-flow] Error reading workflow ${file}:`, e.message);
+              diag(`[ralph-flow] Error reading workflow ${file}:`, e.message);
             }
           }
         }
       } catch (e: any) {
-        console.error(`[ralph-flow] Error scanning dir ${dir}:`, e.message);
+        diag(`[ralph-flow] Error scanning dir ${dir}:`, e.message);
       }
     };
     // Scan project → global → plugin — the first VALID writer wins, so a valid
@@ -1549,16 +1566,16 @@ ${renderStepText(step.check)}
         try {
           const parsed = JSON.parse(stripBom(fs.readFileSync(stackFile, "utf-8")));
           if (Array.isArray(parsed)) stack = parsed;
-          else console.error("[ralph-flow] Stack file is not an array, starting fresh");
+          else diag("[ralph-flow] Stack file is not an array, starting fresh");
         } catch (parseErr: any) {
-          console.error("[ralph-flow] Stack file corrupted, backing up and starting fresh:", parseErr.message);
+          diag("[ralph-flow] Stack file corrupted, backing up and starting fresh:", parseErr.message);
           try { fs.renameSync(stackFile, stackFile + ".corrupted." + Date.now()); } catch {}
         }
       }
       stack.push(state);
       atomicWriteJson(stackFile, stack);
     } catch (e: any) {
-      console.error("[ralph-flow] Error pushing state:", e.message);
+      diag("[ralph-flow] Error pushing state:", e.message);
     }
   }
 
@@ -1570,7 +1587,7 @@ ${renderStepText(step.check)}
       try {
         stack = JSON.parse(stripBom(fs.readFileSync(stackFile, "utf-8")));
       } catch (parseErr: any) {
-        console.error("[ralph-flow] Stack file corrupted, backing up and clearing:", parseErr.message);
+        diag("[ralph-flow] Stack file corrupted, backing up and clearing:", parseErr.message);
         try { fs.renameSync(stackFile, stackFile + ".corrupted." + Date.now()); } catch {}
         return null;
       }
@@ -1579,7 +1596,7 @@ ${renderStepText(step.check)}
       atomicWriteJson(stackFile, stack);
       return parentState;
     } catch (e: any) {
-      console.error("[ralph-flow] Error popping state:", e.message);
+      diag("[ralph-flow] Error popping state:", e.message);
       return null;
     }
   }
@@ -1626,7 +1643,7 @@ ${renderStepText(step.check)}
       }
       fs.renameSync(logFile, `${logFile}.1`);
     } catch (e: any) {
-      console.error("[ralph-flow] Log rotation failed:", e.message);
+      diag("[ralph-flow] Log rotation failed:", e.message);
     }
   }
 
@@ -1637,7 +1654,7 @@ ${renderStepText(step.check)}
       const entry = { ts: new Date().toISOString(), level, event, ...extra };
       fs.appendFileSync(path.join(getLogDir(), "execution.log"), JSON.stringify(entry) + "\n");
     } catch (e: any) {
-      console.error(`[ralph-flow] Log failed (${event}):`, e.message);
+      diag(`[ralph-flow] Log failed (${event}):`, e.message);
     }
   }
 
@@ -1656,14 +1673,14 @@ ${renderStepText(step.check)}
         try {
           const parsed = JSON.parse(stripBom(fs.readFileSync(file, "utf-8")));
           if (Array.isArray(parsed)) return parsed;
-          console.error("[ralph-flow] Step records file is not an array, resetting");
+          diag("[ralph-flow] Step records file is not an array, resetting");
         } catch (parseErr: any) {
-          console.error("[ralph-flow] Step records file corrupted, backing up:", parseErr.message);
+          diag("[ralph-flow] Step records file corrupted, backing up:", parseErr.message);
           try { fs.renameSync(file, file + ".corrupted." + Date.now()); } catch {}
         }
       }
     } catch (e: any) {
-      console.error("[ralph-flow] Error loading step records:", e.message);
+      diag("[ralph-flow] Error loading step records:", e.message);
     }
     return [];
   }
@@ -1673,7 +1690,7 @@ ${renderStepText(step.check)}
       ensureLogDir();
       atomicWriteJson(getStepRecordsFile(), stepRecords);
     } catch (e: any) {
-      console.error("[ralph-flow] Error saving step records:", e.message);
+      diag("[ralph-flow] Error saving step records:", e.message);
     }
   }
 
@@ -2062,9 +2079,9 @@ ${renderStepText(step.check)}
       try { fs.renameSync(path.join(dir, STACK_FILENAME), path.join(instDir, STACK_FILENAME)); } catch {}
 
       logEvent("info", "legacy_instance_migrated", { instance: instId, workflow: state.workflow_name, step: state.current_step, phase: state.current_phase });
-      console.error(`[ralph-flow] Migrated legacy workflow state to instance ${instId}`);
+      diag(`[ralph-flow] Migrated legacy workflow state to instance ${instId}`);
     } catch (e: any) {
-      console.error("[ralph-flow] Legacy migration failed:", e.message);
+      diag("[ralph-flow] Legacy migration failed:", e.message);
     }
   }
 
@@ -2081,7 +2098,7 @@ ${renderStepText(step.check)}
       try {
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       } catch (e: any) {
-        console.error("[ralph-flow] Error initializing workflows dir:", dir, e.message);
+        diag("[ralph-flow] Error initializing workflows dir:", dir, e.message);
       }
     }
   }
