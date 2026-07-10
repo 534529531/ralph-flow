@@ -202,6 +202,33 @@ steps:
     expect(problems.some((p) => p.includes("nonexistent"))).toBe(true);
   });
 
+  it("hard-errors on duplicate step ids", () => {
+    writeProjectWorkflow("dup", `
+steps:
+  - id: a
+    desc: first
+    do: x
+    check: y
+    input: i
+    output: o
+    on_pass: done
+    on_fail: a
+    max_fail_count: 1
+  - id: a
+    desc: duplicate id
+    do: x
+    check: y
+    input: i
+    output: o
+    on_pass: done
+    on_fail: a
+    max_fail_count: 1
+`);
+    const problems: string[] = [];
+    expect(engine.loadWorkflow("dup", problems)).toBeNull();
+    expect(problems.some((p) => p.includes("重复") && p.includes("a"))).toBe(true);
+  });
+
   it("hard-errors on manual_step referencing an unknown step", () => {
     writeProjectWorkflow("manual-typo", `
 manual_step: [typo-step]

@@ -923,6 +923,15 @@ export function createEngine(projectDir: string, platform: Platform) {
 
       if (validSteps.length === 0) { problem("没有任何有效步骤"); return null; }
 
+      // Duplicate step ids make on_pass/on_fail ambiguous (getStep returns the
+      // first match, and the id Set silently collapses the rest) — a hard
+      // error, not a silent merge.
+      const dupIds = [...new Set(validSteps.map((s) => s.id).filter((id, i, arr) => arr.indexOf(id) !== i))];
+      if (dupIds.length > 0) {
+        problem(`步骤 id 重复：${dupIds.map((id) => `"${id}"`).join("、")}（每个步骤的 id 必须唯一）`);
+        return null;
+      }
+
       // Validate on_pass/on_fail references
       const stepIds = new Set(validSteps.map((s) => s.id));
       for (const step of validSteps) {
