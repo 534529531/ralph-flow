@@ -8,19 +8,19 @@
  * Runtime is opencode-native (see SYNC.md): no engine lock, no shared "bound
  * instance". Every op takes an explicit instId; ownership is the session_id in
  * the instance's state.json. `context.sessionID` identifies the caller.
- * ralphflow_continue is still three phases — validate/transition, run the check
- * (no lock held, so it can't block other tool calls), apply the result — with
- * state existence + workflow/step/phase re-checks guarding races instead of a
- * lock.
+ *
+ * Check is NOT run from any tool — the driver runs it automatically on idle
+ * for normal steps and for manual steps whose gate was just approved.
+ * ralphflow_continue is pure state management (approve gate / resume / attach).
  */
 
 import fs from "fs";
 import path from "path";
 import os from "os";
 import { tool } from "@opencode-ai/plugin";
-import type { Engine, NormalStepDef, RalphFlowState, WorkflowDef } from "./engine.js";
+import type { Engine } from "./engine.js";
 import { isSubWorkflowStep, MAX_NESTING_DEPTH, MANUAL_GATE_MARKER, DONE_TAG_MARKER } from "./engine.js";
-import { adversarialCheck, hasActiveCheck } from "./check.js";
+import { hasActiveCheck } from "./check.js";
 
 type Client = any;
 
@@ -118,256 +118,169 @@ export function createTools(engine: Engine, client: Client) {
   });
 
   // ─── Tool: ralphflow_continue ───────────────────────────────────────────────
-
-  type Phase1 =
-    | { type: "early"; text: string }
-    | { type: "continue"; step: NormalStepDef; state: RalphFlowState; workflow: WorkflowDef; instId: string; checkPrompt: string };
+  //
+  // NEVER runs a check. Check is always idle-driven (driver.ts). This tool is
+  // pure state management: clear a manual review gate, resume a paused
+  // workflow, or attach to an interrupted instance. After it returns, the
+  // session goes idle and the driver picks up whatever is next (for a manual
+  // step whose gate just cleared, that means the idle auto-runs the check with
+  // the same visible messages as normal steps).
 
   const ralphflow_continue = tool({
-    description: "Signal DO phase complete. Runs independent verification via a separate session and advances the workflow. Also resumes paused workflows and attaches to interrupted instances (optional instance id, unique prefix allowed).",
+    description: "Approve a manual review / resume a paused workflow / attach to an interrupted instance. Does NOT run verification — that happens automatically when you go idle. (Optional instance id, unique prefix allowed.)",
     args: {
       instance: tool.schema.string().optional().describe("Instance id (unique prefix allowed). Only needed to attach to a specific instance from a new session."),
     },
     async execute({ instance }, context) {
       const sessionId = context.sessionID;
 
-      // Phase 1: resolve instance, validate, handle pause resume, transition to check.
-      const phase1: Phase1 = (() => {
-        const resolution = engine.resolveInstance(instance, sessionId);
-        if (!resolution.ok) return { type: "early", text: resolution.text };
-        const instId = resolution.id;
-        const attached = resolution.attached;
-        // One session drives at most one instance: refuse a takeover while this
-        // session still owns a different active instance.
-        if (attached) {
-          const other = engine.listInstances().find((i) => i.id !== instId && i.owner === sessionId);
-          if (other) {
-            return { type: "early", text: `当前会话已有活跃工作流实例 \`${other.id}\`（工作流: ${other.state.workflow_name}，步骤: ${other.state.current_step}）。一个会话同时只能驱动一个实例——请先完成或取消它，或在另一个会话中接管 \`${instId}\`。` };
-          }
+      const resolution = engine.resolveInstance(instance, sessionId);
+      if (!resolution.ok) return resolution.text;
+      const instId = resolution.id;
+      const attached = resolution.attached;
+
+      // One session drives at most one instance.
+      if (attached) {
+        const other = engine.listInstances().find((i) => i.id !== instId && i.owner === sessionId);
+        if (other) {
+          return `当前会话已有活跃工作流实例 \`${other.id}\`（工作流: ${other.state.workflow_name}，步骤: ${other.state.current_step}）。一个会话同时只能驱动一个实例——请先完成或取消它，或在另一个会话中接管 \`${instId}\`。`;
         }
-        // Claim ownership for this session (updates state.session_id).
-        engine.bindInstance(instId, sessionId);
+      }
+      engine.bindInstance(instId, sessionId);
 
-        let state = engine.readState(instId);
-        if (!state || !state.active) {
-          return { type: "early", text: "没有活跃的工作流。使用 ralphflow_start 启动一个。" };
-        }
+      let state = engine.readState(instId);
+      if (!state || !state.active) {
+        return "没有活跃的工作流。使用 ralphflow_start 启动一个。";
+      }
 
-        const workflow = engine.loadWorkflow(state.workflow_name);
-        if (!workflow) {
-          return { type: "early", text: `工作流 "${state.workflow_name}" 未找到。` };
-        }
+      const workflow = engine.loadWorkflow(state.workflow_name);
+      if (!workflow) {
+        return `工作流 "${state.workflow_name}" 未找到。`;
+      }
 
-        // Paused because the VERIFIER couldn't run — resume by re-running only
-        // the check (the work is finished and untouched).
-        if (state.paused && state.pause_reason === "check_error" && state.current_phase === "check") {
-          const step = engine.getStep(workflow, state.current_step);
-          if (step && !isSubWorkflowStep(step)) {
-            const resumedState = { ...state, paused: false, pause_reason: undefined };
-            engine.writeState(resumedState, instId);
-            engine.logEvent(instId, "info", "check_retry_after_infra_error", { workflow: state.workflow_name, step: step.id });
-            engine.recordStepStart(instId, state.current_step, "check");
-            return { type: "continue", step, state: resumedState, workflow, instId, checkPrompt: engine.buildCheckPrompt(instId, step, resumedState.user_task) };
-          }
-        }
-
-        // Handle paused state (max_failures / config_error / session_*): reset
-        // fail_count and retry, keeping the failure reason as DO-prompt context.
-        if (state.paused) {
-          const previousFailCount = state.fail_count;
-          const previousReason = state.last_failure_reason;
-          engine.clearReinjectCounter(instId);
-          engine.clearDoneTagDetected(instId);
-          engine.clearManualGate(instId);
-          engine.writeState({ ...state, current_phase: "do", paused: false, pause_reason: undefined, fail_count: 0 }, instId);
-          engine.logEvent(instId, "info", "workflow_resumed", { workflow: state.workflow_name, step: state.current_step });
-
-          const step = engine.getStep(workflow, state.current_step);
-          if (!step) {
-            return { type: "early", text: `已恢复。当前步骤：${state.current_step}` };
-          }
-
-          if (isSubWorkflowStep(step)) {
-            engine.recordStepStart(instId, step.id, "do");
-            engine.logEvent(instId, "info", "step_start", { step: step.id, phase: "do" });
-            const staleTop = engine.popState(instId);
-            if (staleTop && !(staleTop.workflow_name === state.workflow_name && staleTop.current_step === state.current_step)) {
-              engine.pushState(staleTop, instId);
-            }
-            engine.pushState({ ...state, current_step: step.id, current_phase: "do", fail_count: 0, paused: false, pause_reason: undefined }, instId);
-            const subResult = engine.resolveSubWorkflowEntry(instId, step.workflow, state.user_task, step, MAX_NESTING_DEPTH, previousReason, previousFailCount);
-            if (subResult.error) {
-              engine.popState(instId);
-              engine.writeState({ ...state, paused: true, pause_reason: "config_error", last_failure_reason: subResult.text }, instId);
-              return { type: "early", text: subResult.text };
-            }
-            engine.markPromptDelivered(engine.readState(instId)?.current_step || step.id, instId);
-            let resumeMsg = `## 工作流已恢复\n\n之前尝试次数：${previousFailCount}`;
-            if (previousReason) resumeMsg += `\n\n### 上次失败原因\n${previousReason}`;
-            resumeMsg += "\n\n---\n\n";
-            return { type: "early", text: resumeMsg + `重新进入子工作流：**${step.id}**\n\n---\n\n${subResult.text}` };
-          }
-
-          if (workflow.manual_step && workflow.manual_step.includes(step.id)) {
-            engine.writeManualStepMarker(instId);
-          }
-          const doPrompt = engine.buildDoPrompt(instId, step, state.user_task, previousReason, previousFailCount);
-          engine.markPromptDelivered(step.id, instId);
-          return { type: "early", text: `## 工作流已恢复\n\n---\n\n${doPrompt}` };
-        }
-
-        // Must be in "do" phase.
-        if (state.current_phase !== "do") {
-          if (state.current_phase === "check") {
-            if (hasActiveCheck(instId)) {
-              engine.logEvent(instId, "info", "crash_recovery_skipped", { step: state.current_step, message: "Adversarial check still running, skipping crash recovery" });
-              return { type: "early", text: `## ⏳ 验证进行中\n\n步骤 **${state.current_step}** 的对抗性检查仍在运行。\n\n请等待完成，或使用 \`/ralphflow-cancel\` 取消工作流。` };
-            }
-            engine.clearAdversarialSession(instId);
-            engine.logEvent(instId, "warn", "crash_recovery", { step: state.current_step, message: "State stuck in check phase, resetting to do and returning DO prompt" });
-            state = { ...state, current_phase: "do" };
-            engine.writeState(state, instId);
-            engine.clearReinjectCounter(instId);
-            engine.clearManualStepMarker(instId);
-            engine.clearManualGate(instId);
-            engine.clearDoneTagDetected(instId);
-            const step = engine.getStep(workflow, state.current_step);
-            if (!step) {
-              return { type: "early", text: `崩溃恢复：步骤 "${state.current_step}" 在工作流中未找到。` };
-            }
-            if (isSubWorkflowStep(step)) {
-              return { type: "early", text: `崩溃恢复：步骤 "${step.id}" 是子工作流步骤。调用 \`ralphflow_continue\` 重新进入。` };
-            }
-            if (workflow.manual_step && workflow.manual_step.includes(step.id)) {
-              engine.writeManualStepMarker(instId);
-            }
-            const prompt = engine.buildDoPrompt(instId, step, state.user_task, "之前的验证被中断（进程崩溃）。请重新执行任务。", state.fail_count || 0);
-            engine.markPromptDelivered(step.id, instId);
-            return { type: "early", text: `## ⚠️ 崩溃恢复\n\n进程在验证期间崩溃。DO 阶段已重置。\n\n---\n\n${prompt}` };
-          }
-          return { type: "early", text: `当前阶段是 "${state.current_phase}"，不是 "do"。工作流已在处理中。` };
-        }
-
+      // 1. check_error pause: the verifier couldn't run. Reset to check phase
+      //    (the work is untouched). On the next idle the driver automatically
+      //    re-runs the check — nothing more to do here.
+      if (state.paused && state.pause_reason === "check_error" && state.current_phase === "check") {
         const step = engine.getStep(workflow, state.current_step);
-        if (!step) return { type: "early", text: `步骤 "${state.current_step}" 未找到。` };
-        if (isSubWorkflowStep(step)) {
-          return { type: "early", text: `步骤 "${step.id}" 是子工作流步骤。已自动处理。` };
+        if (step && !isSubWorkflowStep(step)) {
+          engine.writeState({ ...state, paused: false, pause_reason: undefined }, instId);
+          engine.logEvent(instId, "info", "check_retry_after_infra_error", { workflow: state.workflow_name, step: step.id });
+          return "验证基础设施故障已清除，工作流恢复。空闲时自动重新验证。";
         }
+      }
 
-        // Attach semantics: taking over an instance that died MID-DO (no done
-        // tag, no manual gate) means the work may be unfinished — re-issue the
-        // DO prompt instead of running a doomed check.
-        if (attached && !engine.markerExists(DONE_TAG_MARKER, instId) && !engine.markerExists(MANUAL_GATE_MARKER, instId)) {
-          if (workflow.manual_step && workflow.manual_step.includes(step.id)) {
-            engine.writeManualStepMarker(instId);
-          }
-          const prompt = engine.buildDoPrompt(instId, step, state.user_task, state.last_failure_reason, state.fail_count || 0);
-          engine.markPromptDelivered(step.id, instId);
-          engine.logEvent(instId, "info", "instance_attached_resume_do", { instance: instId, step: step.id });
-          return { type: "early", text: `## 已接管工作流实例 \`${instId}\`\n\n该实例中断于 DO 阶段，继续执行当前步骤。\n\n---\n\n${prompt}` };
-        }
-
-        // Record DO completion, transition to check. For manual steps this
-        // point is only reached via the user's explicit ralphflow_continue.
-        engine.logEvent(instId, "info", "done_detected", { step: state.current_step });
-        engine.addStepRecord(instId, state.current_step, "do", "passed", 0);
+      // 2. manual gate: the user approves the work. Clear the gate so the
+      //    next idle auto-runs the check (same path as normal steps). Do NOT
+      //    touch the done-tag marker — the original detected-done idle wrote
+      //    it, and Case 2 needs it to trigger check on the next idle.
+      if (engine.markerExists(MANUAL_GATE_MARKER, instId)) {
         engine.clearManualStepMarker(instId);
         engine.clearManualGate(instId);
+        engine.logEvent(instId, "info", "manual_gate_approved", { step: state.current_step });
+        return `## ✅ 审查通过\n\n步骤 \`${state.current_step}\` 已批准。空闲时将自动运行独立验证。`;
+      }
+
+      // 3. Paused (max_failures / config_error / session_*): reset fail_count
+      //    and return the DO prompt for a fresh attempt.
+      if (state.paused) {
+        const previousFailCount = state.fail_count;
+        const previousReason = state.last_failure_reason;
         engine.clearReinjectCounter(instId);
-        engine.clearDoPromptCache(instId);
         engine.clearDoneTagDetected(instId);
-        engine.writeState({ ...state, current_phase: "check" }, instId);
-        engine.recordStepStart(instId, state.current_step, "check");
-        engine.logEvent(instId, "info", "step_start", { step: state.current_step, phase: "check" });
+        engine.clearManualGate(instId);
+        engine.writeState({ ...state, current_phase: "do", paused: false, pause_reason: undefined, fail_count: 0 }, instId);
+        engine.logEvent(instId, "info", "workflow_resumed", { workflow: state.workflow_name, step: state.current_step });
 
-        return { type: "continue", step, state, workflow, instId, checkPrompt: engine.buildCheckPrompt(instId, step, state.user_task) };
-      })();
-
-      if (phase1.type === "early") return phase1.text;
-
-      // Phase 2: run the independent check. NO lock is held here — the check
-      // drives a whole verifier session and must never block other tool calls.
-      // Surface live progress on the tool call itself (opencode's native
-      // mechanism) so the user isn't staring at a silent spinner for ~1 min.
-      const setTitle = (t: string) => { try { context.metadata?.({ title: t }); } catch {} };
-      let checkResult;
-      try {
-        // Re-verify the instance is still in the same check state (a concurrent
-        // continue crash-recovery or a cancel may have moved on).
-        const preCheckState = engine.readState(phase1.instId);
-        if (!preCheckState || !preCheckState.active || preCheckState.current_phase !== "check"
-            || preCheckState.workflow_name !== phase1.state.workflow_name
-            || preCheckState.current_step !== phase1.state.current_step) {
-          return "工作流在验证开始前已被取消或更改。";
+        const step = engine.getStep(workflow, state.current_step);
+        if (!step) {
+          return `已恢复。当前步骤：${state.current_step}`;
         }
-        setTitle(`🔍 独立验证中：${phase1.step.id}（只读会话）`);
-        checkResult = await adversarialCheck(client, engine, phase1.instId, sessionId, phase1.step, phase1.checkPrompt, phase1.state.user_task, phase1.workflow.adversarial_check);
-        setTitle(checkResult.infra ? `⚠️ 验证未能运行：${phase1.step.id}` : (checkResult.passed ? `✓ 验证通过：${phase1.step.id}` : `✗ 验证未过：${phase1.step.id}`));
-      } catch (err: any) {
-        setTitle(`⚠️ 验证异常：${phase1.step.id}`);
-        engine.logEvent(phase1.instId, "error", "adversarial_check_uncaught", { stepId: phase1.step.id, error: err.message });
-        const failureReason = `对抗性检查崩溃：${err.message}`;
-        const st = engine.readState(phase1.instId);
-        if (st && st.active && st.current_phase === "check"
-            && st.workflow_name === phase1.state.workflow_name && st.current_step === phase1.state.current_step) {
-          engine.writeState({ ...st, paused: true, pause_reason: "check_error", last_failure_reason: failureReason }, phase1.instId);
-          engine.logEvent(phase1.instId, "warn", "workflow_paused", { workflow: st.workflow_name, step: st.current_step, reason: "adversarial_check_crash" });
-          return `## ⚠️ 验证未能运行\n\n${failureReason}\n\n工作流已暂停。这不计入失败次数，已完成的工作保持原样。请把此情况告知用户；问题解决后调用 \`ralphflow_continue\` 直接重新运行验证。`;
+
+        if (isSubWorkflowStep(step)) {
+          engine.recordStepStart(instId, step.id, "do");
+          engine.logEvent(instId, "info", "step_start", { step: step.id, phase: "do" });
+          const staleTop = engine.popState(instId);
+          if (staleTop && !(staleTop.workflow_name === state.workflow_name && staleTop.current_step === state.current_step)) {
+            engine.pushState(staleTop, instId);
+          }
+          engine.pushState({ ...state, current_step: step.id, current_phase: "do", fail_count: 0, paused: false, pause_reason: undefined }, instId);
+          const subResult = engine.resolveSubWorkflowEntry(instId, step.workflow, state.user_task, step, MAX_NESTING_DEPTH, previousReason, previousFailCount);
+          if (subResult.error) {
+            engine.popState(instId);
+            engine.writeState({ ...state, paused: true, pause_reason: "config_error", last_failure_reason: subResult.text }, instId);
+            return subResult.text;
+          }
+          engine.markPromptDelivered(engine.readState(instId)?.current_step || step.id, instId);
+          let resumeMsg = `## 工作流已恢复\n\n之前尝试次数：${previousFailCount}`;
+          if (previousReason) resumeMsg += `\n\n### 上次失败原因\n${previousReason}`;
+          resumeMsg += "\n\n---\n\n";
+          return resumeMsg + `重新进入子工作流：**${step.id}**\n\n---\n\n${subResult.text}`;
         }
-        return `验证因意外错误失败：${err.message}。该实例的状态已在验证期间被更改或清除。`;
-      }
 
-      // Phase 3: apply the check result. Re-check state to guard against a
-      // concurrent cancel/continue during the unlocked Phase 2.
-      const currentState = engine.readState(phase1.instId);
-      if (!currentState || !currentState.active) {
-        return "工作流在验证期间已被取消。";
-      }
-      if (currentState.workflow_name !== phase1.state.workflow_name || currentState.current_step !== phase1.state.current_step) {
-        engine.logEvent(phase1.instId, "warn", "workflow_changed_during_check", { old_workflow: phase1.state.workflow_name, old_step: phase1.state.current_step, new_workflow: currentState.workflow_name, new_step: currentState.current_step });
-        return "工作流在验证期间已更改。检查结果已丢弃。";
-      }
-      if (currentState.current_phase !== "check") {
-        engine.logEvent(phase1.instId, "warn", "phase_changed_during_check", { expected: "check", actual: currentState.current_phase });
-        return "阶段在验证期间已更改（已被另一个调用处理）。检查结果已丢弃。";
-      }
-
-      // Infrastructure failure: the verifier never produced a verdict. Do NOT
-      // count it as a step failure and do NOT redo finished work — pause in the
-      // check phase so a later ralphflow_continue re-runs ONLY the check.
-      if (checkResult.infra) {
-        engine.writeState({ ...currentState, paused: true, pause_reason: "check_error", last_failure_reason: checkResult.reason }, phase1.instId);
-        engine.logEvent(phase1.instId, "warn", "workflow_paused", { workflow: currentState.workflow_name, step: currentState.current_step, reason: "check_infra_error", detail: checkResult.reason.substring(0, 300) });
-        return `## ⚠️ 验证未能运行\n\n${checkResult.reason}\n\n---\n\n## 工作流已暂停\n\n这是验证进程自身的问题（额度限制 / API 错误 / 超时），**不是**工作成果的问题：\n- 本次不计入失败次数（当前 ${currentState.fail_count || 0}/${phase1.step.max_fail_count || "∞"}）\n- 已完成的工作保持原样，恢复后**不需要重做**\n\n请把此情况告知用户。待问题解决后（如额度恢复），调用 \`ralphflow_continue\` 将直接重新运行验证。`;
-      }
-
-      const recordFailCount = currentState.fail_count || 0;
-      engine.addStepRecord(phase1.instId, currentState.current_step, "check", checkResult.passed ? "passed" : "failed", recordFailCount, checkResult.reason);
-
-      const result = checkResult.passed
-        ? engine.handleCheckPassed(phase1.instId, currentState, phase1.workflow, phase1.step, checkResult)
-        : engine.handleCheckFailed(phase1.instId, currentState, phase1.workflow, phase1.step, checkResult);
-
-      // The workflow completed — instance dir is gone, nothing more to update.
-      if (result.completed) return result.text;
-
-      // After a transition that leaves the workflow in DO phase, the response
-      // already contains the next DO prompt — set the driver dedup markers and
-      // arm the manual marker when the new current step is manual.
-      const updatedState = engine.readState(phase1.instId);
-      if (updatedState && updatedState.active && !updatedState.paused && updatedState.current_phase === "do") {
-        engine.clearDoneTagDetected(phase1.instId);
-        engine.clearManualGate(phase1.instId);
-        engine.markPromptDelivered(updatedState.current_step, phase1.instId);
-        const currentWorkflow = updatedState.workflow_name === phase1.workflow.name
-          ? phase1.workflow
-          : engine.loadWorkflow(updatedState.workflow_name);
-        if (currentWorkflow && currentWorkflow.manual_step && currentWorkflow.manual_step.includes(updatedState.current_step)) {
-          engine.writeManualStepMarker(phase1.instId);
+        if (workflow.manual_step && workflow.manual_step.includes(step.id)) {
+          engine.writeManualStepMarker(instId);
         }
+        const doPrompt = engine.buildDoPrompt(instId, step, state.user_task, previousReason, previousFailCount);
+        engine.markPromptDelivered(step.id, instId);
+        return `## 工作流已恢复\n\n---\n\n${doPrompt}`;
       }
 
-      return result.text;
+      // 4. Crash recovery: stuck in check phase with no active verifier →
+      //    reset to do, return the DO prompt.
+      if (state.current_phase !== "do") {
+        if (state.current_phase === "check") {
+          if (hasActiveCheck(instId)) {
+            engine.logEvent(instId, "info", "crash_recovery_skipped", { step: state.current_step });
+            return `## ⏳ 验证进行中\n\n步骤 **${state.current_step}** 的对抗性检查仍在运行。\n\n请等待完成，或使用 \`/ralphflow-cancel\` 取消工作流。`;
+          }
+          engine.clearAdversarialSession(instId);
+          engine.logEvent(instId, "warn", "crash_recovery", { step: state.current_step });
+          state = { ...state, current_phase: "do" };
+          engine.writeState(state, instId);
+          engine.clearReinjectCounter(instId);
+          engine.clearManualStepMarker(instId);
+          engine.clearManualGate(instId);
+          engine.clearDoneTagDetected(instId);
+          const step = engine.getStep(workflow, state.current_step);
+          if (!step) {
+            return `崩溃恢复：步骤 "${state.current_step}" 在工作流中未找到。`;
+          }
+          if (isSubWorkflowStep(step)) {
+            return `崩溃恢复：步骤 "${step.id}" 是子工作流步骤。调用 \`ralphflow_continue\` 重新进入。`;
+          }
+          if (workflow.manual_step && workflow.manual_step.includes(step.id)) {
+            engine.writeManualStepMarker(instId);
+          }
+          const prompt = engine.buildDoPrompt(instId, step, state.user_task, "之前的验证被中断（进程崩溃）。请重新执行任务。", state.fail_count || 0);
+          engine.markPromptDelivered(step.id, instId);
+          return `## ⚠️ 崩溃恢复\n\n进程在验证期间崩溃。DO 阶段已重置。\n\n---\n\n${prompt}`;
+        }
+        return `当前阶段是 "${state.current_phase}"，不是 "do"。工作流已在处理中。`;
+      }
+
+      const step = engine.getStep(workflow, state.current_step);
+      if (!step) return `步骤 "${state.current_step}" 未找到。`;
+      if (isSubWorkflowStep(step)) {
+        return `步骤 "${step.id}" 是子工作流步骤。已自动处理。`;
+      }
+
+      // 5. Attach: taking over an instance that died MID-DO (no done tag, no
+      //    manual gate). Re-issue the DO prompt — the check runs on the
+      //    next idle after the model re-does this step.
+      if (attached && !engine.markerExists(DONE_TAG_MARKER, instId) && !engine.markerExists(MANUAL_GATE_MARKER, instId)) {
+        if (workflow.manual_step && workflow.manual_step.includes(step.id)) {
+          engine.writeManualStepMarker(instId);
+        }
+        const prompt = engine.buildDoPrompt(instId, step, state.user_task, state.last_failure_reason, state.fail_count || 0);
+        engine.markPromptDelivered(step.id, instId);
+        engine.logEvent(instId, "info", "instance_attached_resume_do", { instance: instId, step: step.id });
+        return `## 已接管工作流实例 \`${instId}\`\n\n该实例中断于 DO 阶段，继续执行当前步骤。\n\n---\n\n${prompt}`;
+      }
+
+      // 6. In do, no gate, no pause, no attach. Nothing for this tool to do —
+      //    the check runs automatically when the session goes idle.
+      return "没有需要手动继续的操作。普通步骤的验证会在你空闲时自动运行。";
     },
   });
 
