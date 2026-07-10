@@ -112,6 +112,42 @@ A manual step pauses **after its DO phase completes, but before verification**: 
 
 > A `manual_step` entry that doesn't match a real step id is a **hard error** — the workflow won't load. A typo must never silently skip a review gate you're relying on.
 
+**Complete example** — the id in `manual_step` must match a step in `steps`:
+
+```yaml
+description: Design-gated feature development
+
+manual_step: [design]        # pause for review after the design step's DO
+
+steps:
+  - id: design
+    desc: Technical design
+    do: Write design.md covering the data model, API surface, and error handling.
+    input: User requirements
+    output: "design.md"
+    check: Open design.md; verify it covers the data model, API surface, and error handling.
+    on_pass: implement
+    on_fail: design
+    max_fail_count: 3
+
+  - id: implement
+    desc: Implementation
+    do: Implement the approved design. Run the tests until green.
+    input: design.md
+    output: Working code with passing tests
+    check: Run the test suite yourself; verify the code matches design.md.
+    on_pass: done
+    on_fail: implement
+    max_fail_count: 5
+```
+
+What happens at runtime:
+
+1. The **design** step runs its DO phase and ends with `<promise>done</promise>`.
+2. Because `design` is in `manual_step`, the session **stops** with a 📋 message instead of verifying — you read `design.md`.
+3. You run `/ralphflow-continue`. *Now* the independent verifier checks `design.md`; on pass the workflow advances to **implement**.
+4. **implement** is a normal step, so it verifies automatically without stopping for you.
+
 ### `adversarial_check`
 
 Configure the independent verification session. By default the CHECK phase uses the read-only `ralph-check` agent with its default model. Customize any of:

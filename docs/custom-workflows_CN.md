@@ -112,6 +112,42 @@ manual_step: design, review
 
 > `manual_step` 里对不上真实步骤 id 的条目是**硬错误** —— 工作流无法加载。打错字绝不能静默跳过你指望的审查门。
 
+**完整示例** —— `manual_step` 里的 id 必须对应 `steps` 里的某个步骤：
+
+```yaml
+description: 带设计审查门的功能开发
+
+manual_step: [design]        # design 步骤 DO 完成后停下审查
+
+steps:
+  - id: design
+    desc: 技术设计
+    do: 写 design.md，覆盖数据模型、API 形态、错误处理。
+    input: 用户需求
+    output: "design.md"
+    check: 打开 design.md，核对是否覆盖数据模型、API 形态、错误处理。
+    on_pass: implement
+    on_fail: design
+    max_fail_count: 3
+
+  - id: implement
+    desc: 实现
+    do: 按批准的设计实现，跑测试直到全绿。
+    input: design.md
+    output: 测试通过的可工作代码
+    check: 自己跑测试套件，核对代码与 design.md 一致。
+    on_pass: done
+    on_fail: implement
+    max_fail_count: 5
+```
+
+运行时会发生什么：
+
+1. **design** 步骤跑 DO 阶段，最后输出 `<promise>done</promise>`。
+2. 因为 `design` 在 `manual_step` 里，会话**停下**并显示 📋 消息，而不是去验证 —— 你去读 `design.md`。
+3. 你运行 `/ralphflow-continue`。*这时*独立验证者才检查 `design.md`；通过后工作流推进到 **implement**。
+4. **implement** 是普通步骤，会自动验证，不会为你停下。
+
 ### `adversarial_check`
 
 配置独立验证会话。默认 CHECK 阶段用只读的 `ralph-check` agent 和它的默认模型。可自定义其中任意项：
