@@ -83,7 +83,7 @@ CHECK 阶段默认用 `ralph-check` agent：
 | `bash` | `allow` | 可运行验证命令（测试、构建、文件检查） |
 | `external_directory` | `allow` | 可读取启动时声明的 `extra_dirs`（项目外的源材料） |
 
-插件启动时注册 `ralph-check` agent 并把定义写入 `.opencode/agents/` —— 无需手动配置。
+插件用两种方式注册 `ralph-check` agent —— 通过 `config` hook 在内存里注册，以及在全局 `~/.config/opencode/agent/` 写一份文件（不碰你的项目）—— 无需手动配置。
 
 如需覆盖，在工作流 YAML 中指定：
 
@@ -212,8 +212,6 @@ flowchart LR
 
 ```
 <项目>/.opencode/
-├── agents/
-│   └── ralph-check.md              # 只读验证 agent（自动写入）
 └── ralph-flow/
     ├── instances/
     │   └── <id>/                   # 每个工作流实例一个目录
@@ -233,6 +231,8 @@ flowchart LR
     └── workflows/                  # 仅本项目的自定义工作流（最高优先级）
 
 ~/.config/opencode/                 # 用户全局 —— 不在你的项目目录里
+├── agent/
+│   └── ralph-check.md              # 只读验证 agent（自动写入，带 managed 标记）
 ├── skills/                         # 自带 skill 同步到这里（自动，带 managed 标记）
 └── ralph-flow/
     └── workflows/                  # 全局自定义工作流（所有项目）

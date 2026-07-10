@@ -33,11 +33,29 @@ describe("setup — skills go to the global dir, not the project", () => {
     expect(fs.existsSync(path.join(projectDir, ".opencode", "skills"))).toBe(false);
   });
 
-  it("writes the read-only ralph-check agent into the project", () => {
+  it("writes the read-only ralph-check agent into the GLOBAL dir, not the project", () => {
     setup(projectDir);
-    const agent = path.join(projectDir, ".opencode", "agents", "ralph-check.md");
-    expect(fs.existsSync(agent)).toBe(true);
-    expect(fs.readFileSync(agent, "utf-8")).toContain("edit: deny");
+    const globalAgent = path.join(globalHome, "opencode", "agent", "ralph-check.md");
+    expect(fs.existsSync(globalAgent)).toBe(true);
+    expect(fs.readFileSync(globalAgent, "utf-8")).toContain("edit: deny");
+    // project stays clean
+    expect(fs.existsSync(path.join(projectDir, ".opencode", "agents"))).toBe(false);
+  });
+
+  it("does not clobber a user's own global ralph-check agent", () => {
+    const globalAgent = path.join(globalHome, "opencode", "agent", "ralph-check.md");
+    fs.mkdirSync(path.dirname(globalAgent), { recursive: true });
+    fs.writeFileSync(globalAgent, "MY OWN AGENT"); // no managed marker
+    setup(projectDir);
+    expect(fs.readFileSync(globalAgent, "utf-8")).toBe("MY OWN AGENT");
+  });
+
+  it("cleans up a project agent copy left by an older version", () => {
+    const projAgent = path.join(projectDir, ".opencode", "agents", "ralph-check.md");
+    fs.mkdirSync(path.dirname(projAgent), { recursive: true });
+    fs.writeFileSync(projAgent, "old copy");
+    setup(projectDir);
+    expect(fs.existsSync(projAgent)).toBe(false);
   });
 
   it("does not clobber a user-authored global skill of the same name", () => {

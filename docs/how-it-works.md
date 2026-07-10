@@ -83,7 +83,7 @@ The CHECK phase uses the `ralph-check` agent by default:
 | `bash` | `allow` | Can run verification commands (tests, builds, file checks) |
 | `external_directory` | `allow` | Can read `extra_dirs` declared at start (source material outside the project) |
 
-The plugin registers the `ralph-check` agent on startup and writes its definition into `.opencode/agents/` — no manual configuration needed.
+The plugin registers the `ralph-check` agent two ways — in-memory via its `config` hook, and as a file in the global `~/.config/opencode/agent/` (never your project) — so no manual configuration is needed.
 
 To override, specify in your workflow YAML:
 
@@ -212,8 +212,6 @@ Per-project state lives under `.opencode/ralph-flow/`; user-global config lives 
 
 ```
 <project>/.opencode/
-├── agents/
-│   └── ralph-check.md              # Read-only verifier agent (auto-written)
 └── ralph-flow/
     ├── instances/
     │   └── <id>/                   # One directory per workflow instance
@@ -233,6 +231,8 @@ Per-project state lives under `.opencode/ralph-flow/`; user-global config lives 
     └── workflows/                  # Project-only custom workflows (highest priority)
 
 ~/.config/opencode/                 # user-global — NOT in your project tree
+├── agent/
+│   └── ralph-check.md              # Read-only verifier agent (auto-written, managed)
 ├── skills/                         # Bundled skills synced here (auto, managed marker)
 └── ralph-flow/
     └── workflows/                  # Global custom workflows (all projects)

@@ -1,8 +1,10 @@
 /**
  * Project setup — opencode adapter.
  *
- * - Writes the read-only ralph-check agent definition (the opencode
- *   counterpart of the Claude version's --allowedTools whitelist).
+ * - Writes the read-only ralph-check agent into the GLOBAL
+ *   ~/.config/opencode/agent/ (the plugin also registers it in-memory via the
+ *   config hook, so the file is only a belt-and-suspenders discovery path) —
+ *   never the project.
  * - Syncs the plugin's skills into the GLOBAL ~/.config/opencode/skills/
  *   (opencode discovers skills from fixed filesystem locations only; the
  *   global one keeps the user's project tree clean). A managed marker keeps
@@ -36,14 +38,7 @@ function getGlobalConfigHome(): string | null {
 
 const MANAGED_MARKER = ".ralph-flow-managed";
 
-function setupCheckAgent(projectDir: string): void {
-  const agentsDir = join(projectDir, ".opencode", "agents");
-  const agentFile = join(agentsDir, "ralph-check.md");
-
-  if (existsSync(agentFile)) return;
-  if (!existsSync(agentsDir)) mkdirSync(agentsDir, { recursive: true });
-
-  const agentContent = `---
+const AGENT_CONTENT = `---
 description: Ralph Flow check phase agent - read-only verification
 mode: all
 permission:
@@ -76,11 +71,42 @@ permission:
 标签必须独占最后一行。
 `;
 
+/**
+ * Write the read-only ralph-check agent into opencode's GLOBAL agent dir
+ * (~/.config/opencode/agent/, which opencode discovers), NOT the project — the
+ * plugin also registers this agent in-memory via the `config` hook (see
+ * index.ts), so this file is a belt-and-suspenders discovery path that keeps
+ * the user's project tree clean. opencode reads both `agent/` and `agents/`;
+ * we use the singular to match its `command/` convention.
+ */
+function setupCheckAgent(): void {
+  const cfgHome = getGlobalConfigHome();
+  if (!cfgHome) return;
+  const agentFile = join(cfgHome, "agent", "ralph-check.md");
+  // Refresh only our own managed file; never clobber a user's ralph-check.md.
+  if (existsSync(agentFile) && !existsSync(agentFile + MANAGED_MARKER)) return;
   try {
-    writeFileSync(agentFile, agentContent, "utf-8");
+    mkdirSync(dirname(agentFile), { recursive: true });
+    writeFileSync(agentFile, AGENT_CONTENT, "utf-8");
+    writeFileSync(agentFile + MANAGED_MARKER, "managed by ralph-flow; delete to take ownership\n");
   } catch (e) {
     console.error("[ralph-flow] check agent setup failed:", e);
   }
+}
+
+/**
+ * Remove the per-project agent copy a 2.0.x–2.1.x setup wrote into
+ * .opencode/agents/, which polluted the user's tree. Only removes our exact
+ * file (and the dir if it's then empty); leaves any other agents alone.
+ */
+function cleanupProjectAgentCopy(projectDir: string): void {
+  const agentsDir = join(projectDir, ".opencode", "agents");
+  const agentFile = join(agentsDir, "ralph-check.md");
+  if (!existsSync(agentFile)) return;
+  try {
+    rmSync(agentFile, { force: true });
+    if (readdirSync(agentsDir).length === 0) rmSync(agentsDir, { recursive: false });
+  } catch {}
 }
 
 /**
@@ -166,6 +192,7 @@ function cleanupLegacyWorkflowCopies(projectDir: string): void {
 export function setup(projectDir: string): void {
   cleanupLegacyWorkflowCopies(projectDir);
   cleanupProjectSkillCopies(projectDir);
-  setupCheckAgent(projectDir);
+  cleanupProjectAgentCopy(projectDir);
+  setupCheckAgent();
   setupSkills();
 }
