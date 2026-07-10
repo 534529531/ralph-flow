@@ -28,7 +28,7 @@ What actually happens:
 **Even when you ask AI to verify itself, it fails:**
 - The AI is both player and referee — it lowers the bar for its own work
 - It's overconfident — "looks good to me" without actually checking
-- It blames external factors — "the test environment is broken", "existing code has issues"
+- It blames external factors — "the test environment is broken", "existing code has issues", "dependencies are outdated"
 
 **AI doesn't follow multi-step workflows.** It loses context, skips steps, and never truly verifies its own work.
 
@@ -36,160 +36,249 @@ What actually happens:
 
 ralph-flow forces AI to follow structured workflows with **independent verification at every step**. It's not just prompt engineering — it's a state machine that won't let the AI skip steps or claim "done" without proof.
 
-Every step runs in two phases:
+Each step runs two phases:
 
-1. **DO** — the working session executes the step's task and ends with a `<promise>done</promise>` tag
-2. **CHECK** — an **independent verifier session** (read-only `ralph-check` agent, fresh context, saw none of the DO conversation) re-verifies the work against the step's check criteria
+- **DO** — the working session executes the task and ends with a `<promise>done</promise>` tag
+- **CHECK** — an **independent session** (a read-only verifier that saw none of the DO conversation) re-verifies the work against the step's criteria
 
-Pass → next step. Fail → retry with the concrete failure reason. Too many failures → pause for the human.
-
----
-
-## Features
-
-- **Multi-instance**: every opencode session can run its own workflow instance in the same project, in parallel, fully isolated (`.opencode/ralph-flow/instances/<id>/`)
-- **Independent verification**: CHECK runs in a separate session with a read-only agent — the AI never grades its own homework
-- **Manual review gates**: steps listed in `manual_step` stop the session *after DO, before verification* so a human reviews first; only the user's `/ralphflow-continue` approves
-- **Failure-aware retries**: the retry DO prompt carries the verifier's exact failure reason; `max_fail_count` bounds the loop, then pauses for the user
-- **Sub-workflows**: steps can delegate to another workflow (nesting capped at 5, cycles detected by the doctor)
-- **Artifacts directory**: every instance gets an isolated deliverables dir (`.opencode/ralph-flow/artifacts/<task>-<id>/`) that survives workflow completion
-- **Session takeover**: closed opencode mid-workflow? A new session's `/ralphflow-continue` attaches to the interrupted instance and resumes exactly where it stopped
-- **Doctor**: `/ralphflow-doctor` diagnoses every workflow definition — silently skipped steps, unreachable steps, broken sub-workflow refs, cycles, shadowing, corrupt instances
-- **Create wizard**: `/ralphflow-create` designs a custom workflow with you, writes the YAML and validates it until clean
-- **Final reports**: completed/cancelled instances archive an execution report to `.opencode/ralph-flow/reports/`
+Pass → next step. Fail → retry, carrying the failure reason. Too many failures → pause for you.
 
 ---
 
-## Installation
+## ralph-flow vs ralph-loop
 
-```bash
-cd ~/.config/opencode/plugins
-git clone https://github.com/yibener/ralph-flow.git
-cd ralph-flow
-npm install && npm run build
-```
+| | ralph-loop | ralph-flow |
+|---|---|---|
+| **Type** | Prompt technique | opencode plugin |
+| **How it works** | Instructions in system prompt | Event-driven state machine |
+| **Verification** | Self-review (biased) | Independent session (unbiased) |
+| **Multi-step** | Single loop | Multi-step pipelines with branching |
+| **State management** | None | Full state tracking, pause/resume, takeover |
+| **Parallelism** | One at a time | One instance per session, in parallel |
+| **Failure handling** | Retry blindly | Retry with failure context |
+| **Human gates** | None | `manual_step` review before verification |
+| **Logging** | None | JSON Lines execution logs + reports |
+| **Setup** | Copy prompt to AGENTS.md | Install plugin, auto-registers commands |
 
-Restart opencode. The plugin registers its tools, slash commands, the `ralph-check` agent, and syncs its bundled skills into the project on first use.
-
-### Upgrading from 1.x
-
-Just pull and rebuild. On first startup 2.0 automatically:
-- migrates an interrupted 1.x workflow (`ralph-flow.local.md`) into the new multi-instance layout — attach to it with `/ralphflow-continue`
-- parks the workflow copies the 1.x setup used to write into `.opencode/ralph-flow/workflows/` as `*.pre-2.0-backup` (built-ins now always resolve from the plugin, so they never go stale)
-
-Note: tool names changed from `ralphflow-start` style to `ralphflow_start` (matching the slash commands stays `/ralphflow-start`).
+**ralph-flow is the evolution of ralph-loop** — same core idea (execute → verify → retry), built as a proper plugin with state management, independent verification, and multi-step support.
 
 ---
-
-## Quick Start
-
-```
-/ralphflow-start loop 帮我把这个模块的测试覆盖率提到 90%
-```
-
-Then let it run. The workflow will:
-1. Decompose your request into a verifiable checkpoint list (`checkpoints.md`)
-2. Execute until every checkpoint passes
-3. Independently verify each step before advancing
-
-Watch progress with `/ralphflow-status`, cancel with `/ralphflow-cancel`.
-
-## Slash Commands
-
-| Command | What it does |
-|---|---|
-| `/ralphflow-start` | Start a workflow (asks for workflow + task if not given) |
-| `/ralphflow-continue` | Approve a manual review / resume a paused workflow / attach to an interrupted instance |
-| `/ralphflow-status` | Show this session's instance, or all instances in the project |
-| `/ralphflow-list` | List available workflows and active instances |
-| `/ralphflow-cancel` | Cancel an instance (archives its report first) |
-| `/ralphflow-doctor` | Diagnose all workflow definitions and instance state |
-| `/ralphflow-create` | Interactively design a custom workflow, validated until clean |
 
 ## Built-in Workflows
 
-| Workflow | Purpose |
-|---|---|
-| `loop` | Checkpoint-driven loop: decompose the request into a verifiable checkpoint list, then grind until every checkpoint passes |
-| `spec` | Spec-driven development: requirements → design (manual review gate) → implementation → verification |
-| `c-to-rust` | Migrate a C project to idiomatic safe Rust: analyze → TDD baseline → implement core → audit → implement full → audit → verify |
-| `everything2rust` | Rewrite a system in ANY language to Rust: survey → behavior spec + golden corpus → design (ADRs) → TDD baseline → implement → audit → verify |
+### loop — Auto-loop execution
 
-The `c-to-rust` and `everything2rust` workflows drive 12 bundled skills (auto-synced into `.opencode/skills/`) covering planning, test generation, implementation patterns, auditing and final validation.
+> Based on [opencode-ralph-loop](https://github.com/charfeng1/opencode-ralph-loop)
+
+> **Best for**: open-ended tasks, bug fixes, feature development where the scope is clear.
+
+Decomposes your request into a verifiable checkpoint list, then keeps executing until every checkpoint passes. Each cycle runs DO → CHECK, passing only when the review criteria are met.
+
+```
+/ralphflow-start loop "Build a user authentication module with JWT and refresh tokens"
+```
+
+```mermaid
+flowchart LR
+    C["1. checkpoints<br/>(decompose into a<br/>verifiable list)"] --> L["2. loop<br/>(execute until every<br/>checkpoint passes)"]
+    L --> Done["done"]
+```
+
+### spec — Spec-driven development pipeline
+
+> Based on [OpenSpec](https://github.com/Fission-AI/OpenSpec)
+
+> **Best for**: structured feature work that benefits from requirements → design → implementation.
+
+A seven-step pipeline from proposal to archive. Each step produces an artifact that feeds the next, with independent verification at every gate.
+
+```
+/ralphflow-start spec "Add user authentication with OAuth2 support"
+```
+
+```mermaid
+flowchart LR
+    P["1. propose"] --> S["2. specs"]
+    S --> D["3. design"]
+    D --> T["4. tasks"]
+    T --> I["5. implement"]
+    I --> V["6. verify"]
+    V --> A["7. archive"]
+```
+
+### c-to-rust — C → idiomatic safe Rust
+
+> **Best for**: migrating a C project to a Rust binary, module by module, with a TDD safety net and `unsafe` kept under 10%.
+
+Nine steps: probe the project, port the tests as a red baseline, translate core then full modules, audit each pass independently, and gate on a final QA verification.
+
+```
+/ralphflow-start c-to-rust "Port this C parser to Rust"
+```
+
+```mermaid
+flowchart LR
+    E["setup-env"] --> A["analyze"] --> B["baseline"]
+    B --> IC["impl-core"] --> AC["audit-core"]
+    AC --> IF["impl-full"] --> AF["audit-full"] --> V["verify"]
+```
+
+### everything2rust — any language → Rust
+
+> **Best for**: rewriting a system written in *any* language to Rust with behavioral equivalence, driven by golden corpora and ADRs.
+
+Eleven steps: survey the source system and run it for real, capture a behavior spec + golden corpus, design with recorded decisions (a **manual review gate** on `design`), then TDD-implement, audit, and verify.
+
+```
+/ralphflow-start everything2rust "Rewrite this Python CLI in Rust"
+```
+
+The `c-to-rust` and `everything2rust` workflows drive 12 bundled skills (auto-synced into `.opencode/skills/`) covering planning, test generation, implementation patterns, auditing, and final validation.
 
 ---
 
 ## How It Works
 
+```mermaid
+flowchart TD
+    Start(["/ralphflow-start"]) --> Inst["Create a workflow instance"]
+    Inst --> DO["DO phase: session executes the step"]
+    DO --> DoneTag{"done tag?"}
+    DoneTag -->|"keep working"| DO
+    DoneTag -->|"detected"| Manual{"manual step?"}
+    Manual -->|"yes"| Review["📋 Stop — user reviews,<br/>then /ralphflow-continue"]
+    Manual -->|"no"| Continue["call ralphflow_continue"]
+    Review --> CHECK
+    Continue --> CHECK["CHECK phase:<br/>independent read-only session verifies"]
+    CHECK --> Pass{"Pass?"}
+    Pass -->|"yes"| Next{"on_pass"}
+    Pass -->|"no"| Fail["fail_count + 1"]
+    Pass -->|"infra error"| Infra["Pause in check phase —<br/>continue re-runs only the check"]
+    Next -->|"next step"| DO
+    Next -->|"done"| Complete["Workflow complete<br/>Report archived"]
+    Fail -->|"below limit"| DO
+    Fail -->|"limit reached"| Pause["Paused — /ralphflow-continue to resume"]
+    Pause -->|"user resumes"| DO
 ```
-/ralphflow-start
-      │
-      ▼
-┌───────────┐   <promise>done</promise>   ┌──────────────────────┐
-│  DO phase │ ──────────────────────────▶ │ manual step?          │
-│ (your     │                             │  yes → 📋 STOP, wait  │
-│  session) │ ◀── retry w/ fail reason ── │  for user review      │
-└───────────┘                             └──────────┬───────────┘
-      ▲                                              │ user /ralphflow-continue
-      │ fail                                         ▼ (or auto for normal steps)
-      │                                   ┌──────────────────────┐
-      └────────────────────────────────── │ CHECK phase           │
-                             pass ──────▶ │ independent read-only │──▶ next step / done
-                                          │ verifier session      │
-                                          └──────────────────────┘
+
+The CHECK phase uses a **separate session** with no memory of the implementation — it judges strictly against the criteria, not against what the AI "intended" to do. If verification itself can't run (API error, timeout), that's an infrastructure failure: it does **not** burn a retry — the workflow pauses in check phase and the next `/ralphflow-continue` re-runs only the verification.
+
+---
+
+## ✨ Features
+
+- 🔄 **Auto-loop with failure context** — retries carry the verifier's exact failure reason so the AI fixes the real problem instead of repeating it
+- 🔍 **Independent verification** — a separate read-only session prevents self-review bias; configure agent, model, timeout via `adversarial_check`
+- 🧩 **Multi-instance** — every session runs its own workflow instance in the same project, in parallel, fully isolated
+- 📋 **Human review gates** — `manual_step` stops the session after DO, before verification, so you review first
+- 📦 **Natural language YAML** — `do`, `check`, `input`, `output` are plain descriptions, no DSL to learn
+- 🔀 **Branching & recovery** — route failures to specific steps (`on_fail: fix-build`), not just blind retry
+- 🪆 **Sub-workflows** — compose workflows from reusable parts (nesting to depth 5)
+- 🩺 **Doctor & create** — `/ralphflow-doctor` diagnoses definitions, `/ralphflow-create` designs one with you
+- 📊 **Execution logs & reports** — JSON Lines logging with per-step traces and archived final reports
+
+---
+
+## 📦 Installation
+
+Add to your opencode config (`~/.config/opencode/opencode.json` for global, or `opencode.json` in project root):
+
+```json
+{
+  "plugin": ["@yibener/ralph-flow"]
+}
 ```
 
-- The session going idle without a done tag gets a keep-alive re-injection of its DO prompt (bounded — after 5 idle nudges the driver stops and hands control to you)
-- Verification failures don't just retry blindly: the DO prompt carries the verifier's failure reason and the retry count
-- Infrastructure failures during CHECK (API errors, timeouts) do **not** burn a failure count — the workflow pauses in check phase and `/ralphflow-continue` re-runs only the verification
+Or clone locally:
 
-See [SYNC.md](SYNC.md) for the architecture mapping to the Claude Code sibling plugin, and [docs/](docs/README.md) for details.
+```bash
+git clone https://github.com/534529531/ralph-flow.git ~/.config/opencode/plugins/ralph-flow
+cd ~/.config/opencode/plugins/ralph-flow
+npm install && npm run build
+```
 
-## Custom Workflows
+> On first load, the plugin registers its commands, the read-only `ralph-check` agent, and syncs its bundled skills into the project.
 
-Drop a YAML into `.opencode/ralph-flow/workflows/<name>.yaml` (shadows a same-named built-in), or better: run `/ralphflow-create` and let it design + validate the file with you.
+### Upgrading from 1.x
+
+Pull and rebuild. On first startup 2.0 automatically migrates an interrupted 1.x workflow (`ralph-flow.local.md`) into the new multi-instance layout — reattach with `/ralphflow-continue`. Tool names changed from `ralphflow-start` to `ralphflow_start` (slash commands stay `/ralphflow-start`).
+
+---
+
+## 🚀 Quick Start
+
+```
+/ralphflow-start loop "Build a user authentication module with JWT and refresh tokens"
+```
+
+| Command | What it does |
+|---------|--------------|
+| `/ralphflow-status` | Show current step, phase, fail count (or all instances) |
+| `/ralphflow-continue` | Approve a manual review · resume a paused workflow · attach to an interrupted instance |
+| `/ralphflow-cancel` | Cancel and archive the final report |
+| `/ralphflow-list` | List available workflows and active instances |
+| `/ralphflow-doctor` | Diagnose all workflow definitions |
+| `/ralphflow-create` | Interactively design a custom workflow |
+
+---
+
+## 🛠️ Custom Workflows
+
+Place a `.yaml` file in `.opencode/ralph-flow/workflows/` (a project workflow shadows a same-named built-in), or run `/ralphflow-create` to design and validate one interactively.
 
 ```yaml
 description: Build, test, and document a feature
 
-manual_step: [design]        # human review gates (after DO, before CHECK)
-
 steps:
-  - id: design
-    desc: Design the feature
-    do: |
-      Write a design document covering data model, API surface and error handling.
-    check: |
-      Open design.md; verify it covers data model, API surface, error handling.
-    input: user requirements
+  - id: analyze
+    desc: Task analysis
+    do: Analyze the requirements and produce a design document.
+    input: User requirements
     output: "design.md"
-    on_pass: implement
-    on_fail: design
+    check: Open design.md; verify it covers the data model, API surface, and error handling.
+    on_pass: execute
+    on_fail: analyze
     max_fail_count: 3
 
-  - id: implement
-    desc: Implement per design
-    do: |
-      Implement the design. Run the full test suite until green.
-    check: |
-      你是一个挑剔的测试工程师：你的目标不是确认任务完成，而是想办法证明它没完成。
-      Run the test suite yourself; verify new code matches design.md.
+  - id: execute
+    desc: Implementation
+    do: Implement the design. Run the full test suite until it is green.
     input: design.md
-    output: working implementation
+    output: Working code with passing tests
+    check: Run the test suite yourself; verify the code matches design.md.
     on_pass: done
-    on_fail: implement
+    on_fail: execute
     max_fail_count: 5
 ```
 
-Every non-sub-workflow step **requires** `id`, `desc`, `do`, `check`, `input`, `output`, `on_pass`, `on_fail`, `max_fail_count` — a step missing one is *silently skipped* (run `/ralphflow-doctor` to catch this). Full schema: [docs/custom-workflows.md](docs/custom-workflows.md).
+> **Every normal step requires** `id`, `desc`, `do`, `check`, `input`, `output`, `on_pass`, `on_fail`, `max_fail_count`. A step missing any of these is **silently skipped** — run `/ralphflow-doctor` to catch that.
 
-## Documentation
+**Completion tags:** `<promise>done</promise>`, `<promise-check>true/false</promise-check>`
 
-- [How it works](docs/how-it-works.md) — architecture, state machine, verification
-- [Commands](docs/commands.md) — command & tool reference
-- [Custom workflows](docs/custom-workflows.md) — full YAML schema and design guide
-- [SYNC.md](SYNC.md) — structural mapping to the Claude Code sibling plugin
+See the [Custom Workflows Guide](docs/custom-workflows.md) for branching, recovery, sub-workflows, and advanced patterns.
 
-## License
+---
 
-MIT
+## 📚 Documentation
+
+| Topic | Description |
+|-------|-------------|
+| [Documentation Home](docs/README.md) | Start here for a guided reading order |
+| [Custom Workflows](docs/custom-workflows.md) | Create workflows, configure verification, nesting |
+| [How It Works](docs/how-it-works.md) | Architecture, events, state, file structure |
+| [Commands Reference](docs/commands.md) | All commands and log events |
+| [SYNC.md](SYNC.md) | Structural mapping to the Claude Code sibling plugin |
+
+---
+
+## 📝 License
+
+MIT — see [LICENSE](LICENSE).
+
+---
+
+<div align="center">
+
+**Built for [opencode](https://opencode.ai)** · [Report issue](https://github.com/534529531/ralph-flow/issues)
+
+</div>

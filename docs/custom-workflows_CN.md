@@ -2,36 +2,40 @@
 
 [English](custom-workflows.md) · [中文](custom-workflows_CN.md)
 
-在 `.opencode/ralph-flow/workflows/` 目录下创建 `.yaml` 文件即可定义自己的工作流，或运行 `/ralphflow-create` 交互式设计并验证。项目工作流会**遮蔽**同名内置工作流。
+把 `.yaml` 文件放到 `.opencode/ralph-flow/workflows/` 即可定义自己的工作流，或运行 `/ralphflow-create` 交互式设计并验证。项目工作流会**遮蔽**同名内置工作流。
 
-写完后运行 `/ralphflow-doctor` —— 它会抓出被静默丢弃的步骤（缺任何必填字段的步骤会被丢弃，其余照常运行）、不可达步骤、缺失的 `done`、无法解析的模板记号、坏的子工作流引用和循环。
+> 写完后运行 **`/ralphflow-doctor`**。它会在下面这些坑咬到你之前抓出来：缺必填字段的步骤会被**静默跳过**（其余工作流照常运行）、不可达步骤永不执行、没有通往 `done` 的路径的工作流永远无法完成、无法解析的 `{{...}}` 记号原样进入提示词。
 
 ---
 
 ## 快速示例
 
 ```yaml
+description: 先分析再实现
+
 steps:
   - id: analyze
-    desc: 需求分析
-    do: 分析用户需求并输出设计文档
-    input: 用户需求描述
-    output: design.md
-    check: 验证设计文档是否完整、技术方案是否合理
+    desc: 任务分析
+    do: 分析需求，产出设计文档。
+    input: 用户需求
+    output: "design.md"
+    check: 打开 design.md，核对是否完整、技术上合理。
     on_pass: execute
     on_fail: analyze
     max_fail_count: 3
 
   - id: execute
-    desc: 代码开发
-    do: 根据设计文档实现代码
+    desc: 实现
+    do: 按设计实现，跑测试直到全绿。
     input: design.md
-    output: 可工作的代码
-    check: 运行测试并验证实现
+    output: 测试通过的可工作代码
+    check: 自己跑测试套件，核对实现与 design.md 一致。
     on_pass: done
     on_fail: execute
     max_fail_count: 5
 ```
+
+执行从**第一个**步骤开始。`on_pass: done` 结束工作流。
 
 ---
 
@@ -42,32 +46,32 @@ steps:
 | 字段 | 必填 | 说明 |
 |------|------|------|
 | `id` | ✅ | 步骤唯一标识 |
-| `desc` | ✅ | 步骤描述 |
-| `do` | ✅ | 任务执行提示词 |
-| `input` | ✅ | 预期输入说明 |
-| `output` | ✅ | 预期输出说明 |
-| `check` | ✅ | 验证标准 |
-| `on_pass` | ✅ | 通过后的下一步（步骤 id 或 `"done"` 表示完成） |
-| `on_fail` | ✅ | 失败后的下一步（步骤 id） |
-| `max_fail_count` | ✅ | 最大失败次数（每个步骤独立） |
+| `desc` | ✅ | 人类可读描述（状态里会显示） |
+| `do` | ✅ | 任务提示词 —— 工作会话要做什么 |
+| `input` | ✅ | 本步骤消费什么 |
+| `output` | ✅ | 本步骤必须产出什么 |
+| `check` | ✅ | 独立会话执行的验证配方 |
+| `on_pass` | ✅ | 通过后的下一步 id，或 `"done"` 表示完成 |
+| `on_fail` | ✅ | 失败后重试/回退到的步骤 id（不允许 `"done"`） |
+| `max_fail_count` | ✅ | 暂停前的最大 CHECK 失败次数（数字 ≥ 1，每步独立） |
 
-> 每个必填字段都是**逐步骤**必填的。缺任何一个的步骤会被**静默跳过**，其余工作流照常运行 —— 用 `/ralphflow-doctor` 抓出来。绝不要省略 `input`/`output`。
+> ⚠️ **上面每个字段都是逐步骤必填的。** 缺任何一个的步骤会被**静默丢弃**，其余工作流照常运行。绝不要省略 `input`/`output`。`/ralphflow-doctor` 会报告每个被丢弃的步骤。
 
 ### 子工作流步骤
 
-不使用 `do`/`check`，而是调用另一个工作流：
+步骤可以用 `workflow:` 代替 `do`/`check` 调用另一个工作流：
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
 | `id` | ✅ | 步骤唯一标识 |
-| `desc` | ✅ | 步骤描述 |
+| `desc` | ✅ | 人类可读描述 |
 | `workflow` | ✅ | 要调用的工作流名称 |
-| `input` | ✅ | 预期输入说明 |
-| `output` | ✅ | 预期输出说明 |
-| `inputs` | ❌ | 传递给子工作流 `user_task` 的键值对参数 |
-| `on_pass` | ✅ | 通过后的下一步 |
-| `on_fail` | ✅ | 失败后的下一步 |
-| `max_fail_count` | ✅ | 最大失败次数 |
+| `input` | ✅ | 本步骤消费什么 |
+| `output` | ✅ | 本步骤必须产出什么 |
+| `inputs` | ❌ | 合并进子工作流任务的键值对 |
+| `on_pass` | ✅ | 通过后的下一步 id，或 `"done"` |
+| `on_fail` | ✅ | 失败后重试/回退到的步骤 id |
+| `max_fail_count` | ✅ | 暂停前的最大失败次数 |
 
 详见[工作流嵌套](#工作流嵌套)。
 
@@ -75,9 +79,12 @@ steps:
 
 ## 产出目录与模板变量
 
-每个实例有一个隔离的交付物目录 `.opencode/ralph-flow/artifacts/<任务摘要>-<后缀>/`，工作流结束后**保留**。每个 DO/CHECK 提示词都自动携带指向它的 产出目录 一节，所以你在 `output` 里写**裸文件名**（如 `"plan.md"`），工作会话和验证者都知道往哪放/去哪找。
+每个工作流实例有一个隔离的交付物目录 ——
+`.opencode/ralph-flow/artifacts/<任务摘要>-<后缀>/` —— 工作流结束后**保留**。每个 DO 和 CHECK 提示词都自动携带指向它的 产出目录 一节，所以：
 
-引擎**只**解析一个模板记号 `{{artifacts_dir}}`（字节精确 —— 花括号内不能有空格），而且你几乎用不到它。其他任何 `{{...}}` 记号会原样进入提示词；`/ralphflow-doctor` 会标记出来。
+- 在 `output` 里写**裸文件名**（如 `"design.md"`、`"plan.json"`）。工作会话和验证者都知道往产出目录里放/找。
+- 你**不需要**模板变量。引擎只解析一个记号 `{{artifacts_dir}}`（字节精确 —— 花括号内不能有空格），而且你几乎用不到它。
+- 其他任何 `{{...}}` 记号会原样进入提示词。`/ralphflow-doctor` 会标记出来。
 
 ---
 
@@ -93,7 +100,7 @@ description: 实现、测试并文档化一个功能
 
 ### `manual_step`
 
-需要**人工审查**的步骤 id。列表和逗号字符串两种写法都接受：
+需要**人工审查**的步骤 id。列表或逗号字符串两种写法都行：
 
 ```yaml
 manual_step: [design]
@@ -101,50 +108,49 @@ manual_step: [design]
 manual_step: design, review
 ```
 
-手动步骤在 **DO 完成后、验证开始前**暂停：会话用 📋 消息停下，好让你先审查工作成果。你运行 `/ralphflow-continue` 之前工作流**不会**推进 —— 这条命令**就是**启动独立验证的批准。你要改，会话就改并再次输出 `<promise>done</promise>`，审查门重新武装。
+手动步骤在 **DO 完成后、验证开始前**暂停：会话用 📋 消息停下，好让你审查工作成果。你运行 `/ralphflow-continue` 之前工作流**不会**推进 —— 这条命令**就是**启动独立验证的批准。你要改，会话就改并再次输出 `<promise>done</promise>`，审查门重新武装。
 
-> `manual_step` 里对不上真实步骤 id 的条目是**硬错误**（工作流无法加载）—— 打错字绝不能静默跳过你指望的审查门。
+> `manual_step` 里对不上真实步骤 id 的条目是**硬错误** —— 工作流无法加载。打错字绝不能静默跳过你指望的审查门。
 
 ### `adversarial_check`
 
-配置独立验证会话。默认情况下，CHECK 阶段使用只读的 `ralph-check` agent。你可以自定义：
+配置独立验证会话。默认 CHECK 阶段用只读的 `ralph-check` agent 和它的默认模型。可自定义其中任意项：
 
 ```yaml
 adversarial_check:
-  agent: build                      # 使用其他 agent
-  model:                            # 指定验证使用的模型
+  agent: build                      # 换一个 agent（默认 ralph-check，只读）
+  model:                            # 验证模型（对象形式）
     providerID: anthropic
     modelID: claude-haiku-4-5
-  # model: anthropic/claude-haiku-4-5   # 字符串形式也可以
-  system_prompt: |                  # 自定义检查的系统提示词
-    你是一个严格的代码审查员。
-    检查以下内容：
+  # model: anthropic/claude-haiku-4-5   # "provider/model" 字符串形式也可以
+  system_prompt: |                  # 给检查者的额外 system prompt
+    你是一个严格的代码审查员。检查：
     - 所有函数都有错误处理
-    - 没有硬编码的密钥
+    - 没有硬编码密钥
     - 测试覆盖边界情况
-  timeout_ms: 1800000               # 自定义超时时间（毫秒），默认 15 分钟，上限 1 小时
+  timeout_ms: 1800000               # 检查超时（毫秒）；默认 900000（15 分钟），上限 3600000（1 小时）
 ```
 
 | 字段 | 说明 | 默认值 |
 |------|------|--------|
-| `agent` | 使用哪个 agent 进行验证 | `ralph-check`（只读） |
-| `model` | 验证模型：`{providerID, modelID}` 对象或 `"provider/model"` 字符串 | agent 默认模型 |
-| `system_prompt` | 自定义检查的系统提示词 | 内置验证提示词 |
-| `timeout_ms` | 检查超时时间（毫秒，上限 `3600000`） | `900000`（15 分钟） |
+| `agent` | 用哪个 agent 验证 | `ralph-check`（只读） |
+| `model` | `{providerID, modelID}` 对象或 `"provider/model"` 字符串 | agent 默认模型 |
+| `system_prompt` | 给检查者的额外 system prompt | 内置验证提示词 |
+| `timeout_ms` | 检查超时（毫秒，上限 `3600000`） | `900000`（15 分钟） |
 
-> **裸**模型名（如 `sonnet`、`Opus`）无法解析到 provider，会静默回退到 agent 的默认模型。请用对象形式或 `"provider/model"` 字符串。`/ralphflow-doctor` 看到裸名会警告。
+> **裸**模型名（如 `sonnet`、`Opus`）无法解析到 provider，会静默回退到 agent 的默认模型 —— 请用对象形式或 `"provider/model"` 字符串。`/ralphflow-doctor` 看到裸名会警告。
 
 **使用场景：**
-- 使用**更便宜的模型**进行验证（如用 Haiku 检查 Sonnet 的工作）
-- 使用**更严格的 agent**，只读不写
-- 自定义**系统提示词**以适应特定领域的验证标准
-- 增加**超时时间**以适应复杂任务的验证需求
+- 用**更便宜的模型**验证（如用 Haiku 检查 Sonnet 的工作）
+- 用**更严格、只读不写**的 agent
+- 为特定领域自定义 **system prompt**
+- 为需要更长验证的任务增大**超时**
 
 ---
 
 ## 工作流嵌套
 
-步骤可以调用其他工作流，实现组合和复用。
+步骤可以调用其他工作流，实现组合与复用。子工作流步骤同样需要 `input`/`output`（和每个步骤一样）。
 
 ### 基本用法
 
@@ -153,7 +159,9 @@ adversarial_check:
 steps:
   - id: analyze
     desc: 需求分析
-    workflow: analyze           # 调用 workflows/analyze.yaml
+    workflow: analyze              # 调用 workflows/analyze.yaml
+    input: 用户需求
+    output: 分析产物
     inputs:
       task: "分析需求"
     on_pass: build
@@ -161,35 +169,39 @@ steps:
     max_fail_count: 3
 
   - id: build
-    desc: 代码实现
-    workflow: build             # 调用 workflows/build.yaml
+    desc: 实现
+    workflow: build                # 调用 workflows/build.yaml
+    input: 分析产物
+    output: 可工作代码
     on_pass: done
     on_fail: build
     max_fail_count: 3
 ```
 
-### 传递参数
+### 传递输入
 
-使用 `inputs` 向子工作流传递参数：
+用 `inputs` 向子工作流的任务传参：
 
 ```yaml
 steps:
   - id: analyze
-    desc: 分析功能需求
+    desc: 分析功能
     workflow: analyze
+    input: 功能请求
+    output: 设计文档
     inputs:
       task: "设计认证模块"
-      context: "我们使用 JWT 和 refresh token"
-    on_pass: build
+      context: "我们用带 refresh token 的 JWT"
+    on_pass: done
     on_fail: analyze
     max_fail_count: 3
 ```
 
-参数会被包含在子工作流的 `user_task` 中，AI 可以访问它们。
+`inputs` 会合并进子工作流的 `user_task`，其会话可以读到。
 
-### 多级嵌套
+### 多层嵌套
 
-工作流最多支持 **5 层嵌套**：
+工作流最多嵌套 **5 层**：
 
 ```
 full-dev.yaml
@@ -198,240 +210,195 @@ full-dev.yaml
             └── ...
 ```
 
-插件通过状态栈管理来保存父工作流的上下文。
+引擎为每个实例维护一个状态栈保存嵌套时的父级上下文；循环由 `/ralphflow-doctor` 检测。
 
 ### 工作原理
 
 1. 父工作流到达子工作流步骤
 2. 父状态被压入栈
-3. 子工作流以合并的上下文（参数 + 原始任务）开始
-4. 子工作流完成后，恢复父状态
-5. 父工作流根据子工作流结果（通过/失败）继续
-
-### 示例：模块化开发流水线
-
-```yaml
-# workflows/full-dev.yaml
-steps:
-  - id: analyze
-    desc: 需求分析
-    workflow: analyze
-    inputs:
-      task: "分析和设计"
-    on_pass: implement
-    on_fail: analyze
-    max_fail_count: 3
-
-  - id: implement
-    desc: 代码实现
-    workflow: implement
-    on_pass: test
-    on_fail: implement
-    max_fail_count: 5
-
-  - id: test
-    desc: 测试
-    workflow: test
-    on_pass: done
-    on_fail: test
-    max_fail_count: 3
-```
-
-每个子工作流（`analyze.yaml`、`implement.yaml`、`test.yaml`）可以有自己的步骤、验证和重试逻辑。
+3. 子工作流以组合上下文（inputs + 原始任务）启动
+4. 子工作流完成后，父状态被恢复
+5. 父级根据子工作流结果（通过/失败）继续
 
 ---
 
 ## 完成标记
 
-AI 通过 XML 风格的标记来标识完成状态：
+会话用 XML 式标记表示完成：
 
-| 阶段 | 标记 | 说明 |
+| 阶段 | 标记 | 含义 |
 |------|------|------|
-| DO 执行阶段 | `<promise>done</promise>` | 任务完成 |
-| CHECK 检查阶段 | `<promise-check>true</promise-check>` | 验证通过 |
-| CHECK 检查阶段 | `<promise-check>false</promise-check>` | 验证未通过 |
+| DO | `<promise>done</promise>` | 任务完成 |
+| CHECK | `<promise-check>true</promise-check>` | 通过 |
+| CHECK | `<promise-check>false</promise-check>` | 失败 |
 
-> 标记**不区分大小写**，允许空格。`<promise>DONE</promise>` 同样有效。
+> 标记大小写不敏感、容忍空白。done 标记须在最后一行（或最后 100 字符内）；check 标记须独占验证者的最后一行。代码围栏或行内代码里的标记会被忽略。
 
 ---
 
-## 多步骤流转设计
+## 多步骤流程设计
 
-### 线性流转
+> 下面每个示例都是完整、合法的工作流 —— 每个普通步骤都带 `input` 和 `output`。
 
-最简单的模式 —— 步骤按顺序执行：
+### 线性流程
+
+最简单的模式 —— 步骤顺序执行：
 
 ```yaml
 steps:
   - id: design
     desc: 设计阶段
-    do: 创建技术设计文档
-    check: 验证设计完整性
+    do: 创建技术设计。
+    input: 用户需求
+    output: "design.md"
+    check: 核对 design.md 是否完整、合理。
     on_pass: implement
     on_fail: design
     max_fail_count: 3
 
   - id: implement
     desc: 实现阶段
-    do: 根据设计编写代码
-    check: 运行测试
+    do: 按 design.md 写代码。
+    input: design.md
+    output: 可工作代码
+    check: 跑测试并核对通过。
     on_pass: done
     on_fail: implement
     max_fail_count: 5
 ```
 
-### 分支流转
+### 分支流程
 
-步骤可以根据检查结果跳转到不同步骤：
+根据检查结果跳到不同步骤：
 
 ```yaml
 steps:
   - id: analyze
     desc: 分析问题
-    do: 判断是 bug 修复还是新功能
-    check: 分析是否正确？
+    do: 判断这是 bug 修复还是新功能。
+    input: 用户报告
+    output: "analysis.md（对任务的分类）"
+    check: analysis.md 的分类是否有报告依据支撑？
     on_pass: implement
     on_fail: clarify
     max_fail_count: 2
 
   - id: clarify
     desc: 请求澄清
-    do: 向用户询问更多细节
-    check: 用户是否提供了足够信息？
+    do: 向用户询问缺失细节并记录回答。
+    input: analysis.md
+    output: "clarification.md（含回答）"
+    check: clarification.md 是否含有足以推进的细节？
     on_pass: analyze
     on_fail: clarify
     max_fail_count: 3
 
   - id: implement
     desc: 实现修复
-    do: 编写代码
-    check: 是否正常工作？
+    do: 写代码。
+    input: analysis.md
+    output: 可工作代码
+    check: 是否能构建并通过测试？
     on_pass: done
     on_fail: implement
     max_fail_count: 5
 ```
 
-### 恢复流转
+### 恢复流程
 
-使用 `on_fail` 路由到专门的恢复步骤：
+用 `on_fail` 路由到专门的恢复步骤：
 
 ```yaml
 steps:
   - id: build
     desc: 构建项目
-    do: 执行构建流程
-    check: 构建是否成功？
+    do: 运行构建。
+    input: 源码树
+    output: 构建产物
+    check: 构建成功了吗？
     on_pass: test
     on_fail: fix-build
     max_fail_count: 2
 
   - id: fix-build
     desc: 修复构建错误
-    do: 读取错误输出并修复问题
-    check: 构建是否通过？
+    do: 阅读错误输出并修复问题。
+    input: 构建错误输出
+    output: 能构建的源码树
+    check: 现在构建能过吗？
     on_pass: test
     on_fail: fix-build
     max_fail_count: 5
 
   - id: test
-    desc: 运行测试
-    do: 执行测试套件
-    check: 所有测试是否通过？
+    desc: 跑测试
+    do: 执行测试套件。
+    input: 构建产物
+    output: 测试结果
+    check: 所有测试都通过吗？
     on_pass: done
     on_fail: fix-tests
     max_fail_count: 3
 
   - id: fix-tests
     desc: 修复失败的测试
-    do: 分析测试失败原因并修复
-    check: 测试是否通过？
+    do: 分析失败并修复。
+    input: 测试失败输出
+    output: 通过的测试套件
+    check: 现在测试通过吗？
     on_pass: done
     on_fail: fix-tests
     max_fail_count: 5
 ```
 
-### 循环流转（回退）
+### 循环流程（回环）
 
-使用 `on_fail` 回退到前面的步骤，形成循环：
+把 `on_fail` 指向更早的步骤形成环：
 
 ```yaml
 steps:
   - id: design
     desc: 设计
-    do: 创建技术设计
-    check: 设计是否完整合理？
+    do: 创建技术设计。
+    input: 需求
+    output: "design.md"
+    check: 设计是否完整、合理？
     on_pass: implement
     on_fail: design
     max_fail_count: 3
 
   - id: implement
     desc: 实现
-    do: 根据设计编写代码
-    check: 代码能否通过编译和 lint？
+    do: 按 design.md 写代码。
+    input: design.md
+    output: 能编译、lint 干净的代码
+    check: 代码能编译并通过 lint 吗？
     on_pass: test
-    on_fail: design          # 实现发现问题时回退到设计
+    on_fail: design          # 实现暴露出设计缺陷则回到 design
     max_fail_count: 3
 
   - id: test
     desc: 测试
-    do: 运行完整测试套件
-    check: 所有测试是否通过？
+    do: 跑全量测试套件。
+    input: 实现
+    output: 测试结果
+    check: 所有测试都通过吗？
     on_pass: done
-    on_fail: implement       # 测试失败时回退到实现
+    on_fail: implement       # 测试失败则回到 implement
     max_fail_count: 5
 ```
 
-形成循环：`design → implement → test → implement → test → ...`
-
-如果实现发现设计有问题，回退到 `design`；如果测试失败，回退到 `implement`。工作流自然收敛到可工作的解决方案。
-
-### 完整流水线（多循环）
-
-```yaml
-steps:
-  - id: analyze
-    desc: 需求分析
-    do: 分析需求并创建规格说明
-    check: 规格是否完整？
-    on_pass: design
-    on_fail: analyze
-    max_fail_count: 3
-
-  - id: design
-    desc: 技术设计
-    do: 创建架构和设计文档
-    check: 设计是否合理？
-    on_pass: implement
-    on_fail: analyze         # 设计需要重新思考时回退到分析
-    max_fail_count: 3
-
-  - id: implement
-    desc: 代码实现
-    do: 编写代码
-    check: 能否编译通过？
-    on_pass: test
-    on_fail: design          # 实现遇到阻碍时回退到设计
-    max_fail_count: 3
-
-  - id: test
-    desc: 测试
-    do: 运行测试
-    check: 所有测试是否通过？
-    on_pass: done
-    on_fail: implement       # 测试失败时回退到实现
-    max_fail_count: 5
-```
-
-多个循环：`analyze ↔ design → implement ↔ test`
+形成环 `design → implement → test → implement → test → …`。实现暴露设计缺陷就回到 `design`；测试失败就回到 `implement`。工作流自然收敛到可工作的解。
 
 ---
 
-## 使用建议
+## 建议
 
-- **保持步骤聚焦** — 每个步骤只做一件事
-- **使用描述性的 `desc`** — 会显示在状态输出中
-- **设置合理的 `max_fail_count`** — 太低会频繁暂停，太高浪费 token
-- **编写清晰的 `check` 提示词** — 验证质量取决于你对"完成"的描述
-- **谨慎使用 `manual_step`** — 自动继续是工作流的核心优势
-- **使用子工作流复用** — 常见模式（分析、构建、测试）可以跨工作流共享
-- **用更便宜的模型验证** — `adversarial_check.model` 可以节省成本
+- **步骤要聚焦** —— 每个步骤把一件事做好。
+- **写自包含的 `check` 配方** —— 验证者完全没看过 DO 对话，所以要写明打开哪些文件、跑哪些命令、具体的通过/失败标准。模糊标准（"代码质量好"）让 CHECK 失效。
+- **轻量 persona 助推验证** —— `check` 开头加一句如「你是一个挑剔的测试工程师：你的目标不是确认任务完成，而是想办法证明它没完成。」很有用。保持一行，别搞重型角色设定。
+- **合理设 `max_fail_count`** —— 有界步骤 3–5，磨到全绿的循环设大（如 100）。
+- **在错误方向代价高的地方用 `manual_step`** —— 方案、设计、破坏性操作。
+- **用子工作流复用** —— 通用模式（分析、构建、测试）可以共享。
+- **验证用更便宜的模型** —— `adversarial_check.model` 能在保持质量的同时省钱。
+- **`do`/`check` 正文用用户的语言写。**
