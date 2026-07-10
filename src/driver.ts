@@ -23,6 +23,14 @@ type Client = any;
 const MAX_DO_REINJECT = 5;
 const ORPHAN_NOTIFY_TTL_MS = 30 * 60 * 1000;
 
+// Per-session in-flight guard. The driver mirrors the Claude Stop hook: it holds
+// NO engine lock (its state is read via listInstances and its writes are
+// instId-scoped marker files), so a long injectPrompt/getLastAssistantMessage
+// can never starve a ralphflow_continue tool call of the engine's state lock.
+// This set just prevents two overlapping idle drives of the SAME session from
+// racing on that session's markers.
+const drivingSessions = new Set<string>();
+
 // ─── Helpers (mirror of the hook's file utils) ───────────────────────────────
 
 function readTextFile(filePath: string): string {
@@ -131,9 +139,9 @@ export async function handleSessionIdle(
   engine: Engine,
   sessionId: string
 ): Promise<void> {
-  await engine.withLock(async () => {
-    engine.beginOp(sessionId);
-
+  if (drivingSessions.has(sessionId)) return; // a drive is already in flight for this session
+  drivingSessions.add(sessionId);
+  try {
     const instances = engine.listInstances();
     if (instances.length === 0) return;
 
@@ -332,7 +340,9 @@ export async function handleSessionIdle(
 
     await injectPrompt(client, sessionId,
       `## 🔨 Ralph Flow: ${statePhase.toUpperCase()} 阶段\n\n**工作流**: ${stateWorkflow}\n**实例**: \`${mine.id}\`\n${stepInfo}\n\n${phaseGuidance}`);
-  });
+  } finally {
+    drivingSessions.delete(sessionId);
+  }
 }
 
 // ─── Session lifecycle events (opencode-specific; no Claude hook equivalent) ─

@@ -13,7 +13,7 @@
 | `mcp-server/server.mjs` 工具注册以外的全部（L43–L2235） | `src/engine.ts` | 逐节镜像，函数名/顺序/文案一致 |
 | `server.mjs` adversarialCheck（spawn `claude -p`） | `src/check.ts` | 同一结果契约 `{passed, infra?, reason}`；执行载体换为 SDK 独立 session |
 | `server.mjs` server.tool(...) ×6 | `src/tools.ts` | 六个工具同名（ralphflow_start/continue/cancel/status/list/doctor），continue 同样是三阶段编排 |
-| `hooks/done-detect.js`（Stop hook） | `src/driver.ts` | session.idle 事件驱动；marker 文件名逐一相同 |
+| `hooks/done-detect.js`（Stop hook） | `src/driver.ts` | session.idle 事件驱动；marker 文件名逐一相同。**关键约束**：驱动器和 Stop hook 一样**不持引擎内存锁**（读经 listInstances，写是 instId 专属 marker 文件），只用一个每会话在途守卫去重——否则包在 `withLock` 里跨 `injectPrompt`（驱动一整轮模型）会攥着锁几十秒，把 `ralphflow_continue` 饿成 "State lock timeout" |
 | `hooks/post-tool-phase.js`（PostToolUse） | **无对应文件** | opencode 工具调用自带 sessionID，owner 绑定在工具内完成；响应里的 `[instance: id]` 标记也随之取消 |
 | `skills/ralphflow-*/SKILL.md` ×7 | `src/commands.ts` | 逐字移植为 command 模板（路径 `.claude/` → `.opencode/`） |
 | `skills/<domain>/`（c-to-rust ×5、everything2rust ×7） | `skills/<domain>/` | 目录整体复制；Claude 版由 `plugin.json` 的 `"skills": ["./skills"]` 原生加载（零拷贝）；opencode 无此机制，`setup.ts` 启动时同步到**全局** `~/.config/opencode/skills/`（带 `.ralph-flow-managed` 标记，不覆盖用户同名 skill，且清理旧版误拷进项目的副本） |

@@ -132,6 +132,55 @@ afterEach(() => {
 });
 
 describe("handleSessionIdle", () => {
+  it("does NOT hold the engine state lock across injectPrompt (regression: State lock timeout)", async () => {
+    startInstance("build");
+    lastAssistantText = "still working..."; // no done tag → drive injects a keep-alive/report
+
+    // A prompt that blocks until we release it — simulates a long model turn.
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    const slowClient = {
+      session: {
+        messages: async () => ({ data: [{ info: { role: "assistant" }, parts: [{ type: "text", text: lastAssistantText }] }] }),
+        prompt: async () => { await gate; return { data: {} }; },
+      },
+    };
+
+    // Start the idle drive; it will block inside injectPrompt (the gated prompt).
+    const drive = handleSessionIdle(slowClient, engine, "sess-1");
+    await new Promise((r) => setTimeout(r, 20)); // let it reach the blocked prompt
+
+    // While the drive is blocked, a tool-style withLock MUST still acquire fast.
+    // Before the fix the driver held the lock across injectPrompt, so this would
+    // wait the full 30s deadline and throw "State lock timeout".
+    const t0 = Date.now();
+    await engine.withLock(async () => { /* trivial critical section */ });
+    expect(Date.now() - t0).toBeLessThan(500);
+
+    release();
+    await drive;
+  });
+
+  it("re-entrant idle for the same session is dropped while one is in flight", async () => {
+    startInstance("build");
+    lastAssistantText = "working...";
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    let prompts = 0;
+    const slowClient = {
+      session: {
+        messages: async () => ({ data: [{ info: { role: "assistant" }, parts: [{ type: "text", text: lastAssistantText }] }] }),
+        prompt: async () => { prompts++; await gate; return { data: {} }; },
+      },
+    };
+    const first = handleSessionIdle(slowClient, engine, "sess-1");
+    await new Promise((r) => setTimeout(r, 20));
+    await handleSessionIdle(slowClient, engine, "sess-1"); // should no-op (guarded)
+    release();
+    await first;
+    expect(prompts).toBe(1);
+  });
+
   it("done tag on a normal step → instructs calling ralphflow_continue and persists the marker", async () => {
     const instId = startInstance("build");
     lastAssistantText = "did the work\n<promise>done</promise>";
