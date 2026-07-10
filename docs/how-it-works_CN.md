@@ -208,13 +208,12 @@ flowchart LR
 
 ## 文件结构
 
-所有生成的文件都收敛在 `.opencode/ralph-flow/` 下：
+项目级状态在 `.opencode/ralph-flow/` 下；用户全局配置在 `~/.config/opencode/` 下。
 
 ```
-.opencode/
+<项目>/.opencode/
 ├── agents/
 │   └── ralph-check.md              # 只读验证 agent（自动写入）
-├── skills/                         # 插件 skills 同步到这里（自动）
 └── ralph-flow/
     ├── instances/
     │   └── <id>/                   # 每个工作流实例一个目录
@@ -231,7 +230,14 @@ flowchart LR
     │   └── <任务摘要>-<后缀>/       # 交付物 —— 完成后保留
     ├── reports/
     │   └── <id>-final-report.md    # 完成/取消时归档
-    └── workflows/                  # 项目自定义工作流（遮蔽内置）
+    └── workflows/                  # 仅本项目的自定义工作流（最高优先级）
+
+~/.config/opencode/                 # 用户全局 —— 不在你的项目目录里
+├── skills/                         # 自带 skill 同步到这里（自动，带 managed 标记）
+└── ralph-flow/
+    └── workflows/                  # 全局自定义工作流（所有项目）
 ```
 
-内置工作流（`loop`、`spec`、`c-to-rust`、`everything2rust`）从插件自己的 `workflows/` 目录解析，因此始终反映已安装版本 —— 绝不拷贝进项目（拷贝会导致过期）。
+**工作流解析顺序**是 `项目 → 全局 → 插件内置`。内置工作流（`loop`、`spec`、`c-to-rust`、`everything2rust`）从插件自己的 `workflows/` 目录解析，因此始终反映已安装版本 —— 绝不拷贝进项目或全局目录（拷贝会导致过期）。项目或全局目录里的同名工作流会遮蔽下层。
+
+**Skill** 不由我们的引擎加载 —— opencode 原生的 `skill` 工具从固定文件位置发现它们。自带的 c-to-rust / everything2rust skill 同步到全局 `~/.config/opencode/skills/`（每个带 `.ralph-flow-managed` 标记，你自己的同名 skill 绝不被动），这样你的项目目录保持干净。

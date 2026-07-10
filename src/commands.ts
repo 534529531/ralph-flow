@@ -133,9 +133,10 @@ Call the \`ralphflow_list\` tool to show:
 - All workflow names with a brief description of each
 - All active workflow instances in this project (id, workflow, step, state, owner-session liveness)
 
-Workflows are loaded from:
-1. Project custom workflows (.opencode/ralph-flow/workflows/) — shadow same-named built-ins
-2. Plugin built-in workflows (ralph-flow/workflows/)`,
+Workflows are resolved in order (a same-named workflow at an earlier tier shadows the later ones):
+1. Project custom (.opencode/ralph-flow/workflows/) — this project only
+2. Global custom (~/.config/opencode/ralph-flow/workflows/) — all projects, survives plugin updates
+3. Plugin built-in (bundled with the plugin)`,
   },
 
   "ralphflow-cancel": {
@@ -204,7 +205,11 @@ User input: $ARGUMENTS
 
 2. **Design the step graph and present it** as a compact overview (step id → what it does → on_pass/on_fail targets) before writing the file. Adjust per feedback.
 
-3. **Write the YAML** to \`.opencode/ralph-flow/workflows/<name>.yaml\` (create the directory if needed). Kebab-case name. If the name matches a built-in (\`loop\`, \`spec\`, \`c-to-rust\`, \`everything2rust\`), tell the user it will shadow the built-in and confirm that's intended.
+3. **Write the YAML** (kebab-case name). Ask the user for the scope, or default to project:
+   - project-only → \`.opencode/ralph-flow/workflows/<name>.yaml\`
+   - available in all projects → \`~/.config/opencode/ralph-flow/workflows/<name>.yaml\` (global; survives plugin updates)
+
+   Create the directory if needed. If the name matches a built-in (\`loop\`, \`spec\`, \`c-to-rust\`, \`everything2rust\`), tell the user it will shadow the built-in and confirm that's intended.
 
 4. **Validate**: call the \`ralphflow_doctor\` tool and check the new workflow's section. Fix every problem AND warning it reports for this workflow, re-run doctor, repeat until its verdict is "可启动" with no warnings.
 

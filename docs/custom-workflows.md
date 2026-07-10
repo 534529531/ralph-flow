@@ -2,7 +2,14 @@
 
 [English](custom-workflows.md) · [中文](custom-workflows_CN.md)
 
-Create your own workflow by placing a `.yaml` file in `.opencode/ralph-flow/workflows/`, or run `/ralphflow-create` to design and validate one interactively. A project workflow **shadows** a same-named built-in.
+Create your own workflow by placing a `.yaml` file in one of two locations, or run `/ralphflow-create` to design and validate one interactively:
+
+| Location | Scope |
+|----------|-------|
+| `.opencode/ralph-flow/workflows/` | **This project only** |
+| `~/.config/opencode/ralph-flow/workflows/` | **Global** — every project, and survives plugin updates |
+
+Resolution order is **project → global → plugin built-in**: a same-named workflow at an earlier tier **shadows** the later ones (so you can override a built-in globally, or override your global one per-project). The global tier is what you want for online installs, where the plugin package itself is a managed location you can't edit.
 
 > After writing a workflow, run **`/ralphflow-doctor`**. It catches the traps below before they bite: a step missing a required field is **silently skipped** (the rest of the workflow still runs), unreachable steps never execute, a workflow with no path to `done` never finishes, and unresolvable `{{...}}` tokens reach the prompt verbatim.
 

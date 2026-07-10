@@ -208,13 +208,12 @@ See [Commands Reference](commands.md#log-events) for the full list of events.
 
 ## File Structure
 
-All generated files are scoped under `.opencode/ralph-flow/`:
+Per-project state lives under `.opencode/ralph-flow/`; user-global config lives under `~/.config/opencode/`.
 
 ```
-.opencode/
+<project>/.opencode/
 ├── agents/
 │   └── ralph-check.md              # Read-only verifier agent (auto-written)
-├── skills/                         # Plugin skills synced here (auto)
 └── ralph-flow/
     ├── instances/
     │   └── <id>/                   # One directory per workflow instance
@@ -231,7 +230,14 @@ All generated files are scoped under `.opencode/ralph-flow/`:
     │   └── <task>-<suffix>/        # Deliverables — survive completion
     ├── reports/
     │   └── <id>-final-report.md    # Archived on completion/cancel
-    └── workflows/                  # Project custom workflows (shadow built-ins)
+    └── workflows/                  # Project-only custom workflows (highest priority)
+
+~/.config/opencode/                 # user-global — NOT in your project tree
+├── skills/                         # Bundled skills synced here (auto, managed marker)
+└── ralph-flow/
+    └── workflows/                  # Global custom workflows (all projects)
 ```
 
-Built-in workflows (`loop`, `spec`, `c-to-rust`, `everything2rust`) resolve from the plugin's own `workflows/` directory, so they always reflect the installed version — they are never copied into the project (which would let them go stale).
+**Workflow resolution** is `project → global → plugin built-in`. The built-ins (`loop`, `spec`, `c-to-rust`, `everything2rust`) resolve from the plugin's own `workflows/` directory, so they always reflect the installed version — they are never copied into your project or global dir (which would let them go stale). A same-named workflow in the project or global dir shadows the tiers below it.
+
+**Skills** aren't loaded by our engine — opencode's native `skill` tool discovers them from fixed filesystem locations. The bundled c-to-rust / everything2rust skills are synced into the global `~/.config/opencode/skills/` (each carrying a `.ralph-flow-managed` marker so your own same-named skills are never touched), keeping your project tree clean.

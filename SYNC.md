@@ -16,7 +16,7 @@
 | `hooks/done-detect.js`（Stop hook） | `src/driver.ts` | session.idle 事件驱动；marker 文件名逐一相同 |
 | `hooks/post-tool-phase.js`（PostToolUse） | **无对应文件** | opencode 工具调用自带 sessionID，owner 绑定在工具内完成；响应里的 `[instance: id]` 标记也随之取消 |
 | `skills/ralphflow-*/SKILL.md` ×7 | `src/commands.ts` | 逐字移植为 command 模板（路径 `.claude/` → `.opencode/`） |
-| `skills/<domain>/`（c-to-rust ×5、everything2rust ×7） | `skills/<domain>/` | 目录整体复制；`setup.ts` 启动时同步进项目 `.opencode/skills/`（带 `.ralph-flow-managed` 标记，不覆盖用户自建同名 skill） |
+| `skills/<domain>/`（c-to-rust ×5、everything2rust ×7） | `skills/<domain>/` | 目录整体复制；Claude 版由 `plugin.json` 的 `"skills": ["./skills"]` 原生加载（零拷贝）；opencode 无此机制，`setup.ts` 启动时同步到**全局** `~/.config/opencode/skills/`（带 `.ralph-flow-managed` 标记，不覆盖用户同名 skill，且清理旧版误拷进项目的副本） |
 | `workflows/*.yaml` ×4 | `workflows/*.yaml` ×4 | 见下方「工作流文本转换」 |
 | （无——Claude 插件自带 skill/agent 机制） | `src/setup.ts` | ralph-check agent 文件、skills 同步、pre-2.0 残留清理 |
 | `server.mjs` migrateLegacyInstance（单实例 JSON 布局） | `engine.ts` migrateLegacyInstance | 迁移源不同：opencode 旧版是 `ralph-flow.local.md`（markdown frontmatter） |
@@ -35,6 +35,9 @@
 | 差异点 | Claude Code 版 | opencode 版 |
 |---|---|---|
 | 状态根目录 | `.claude/ralph-flow/` | `.opencode/ralph-flow/` |
+| 全局配置家目录 | `$CLAUDE_CONFIG_DIR` 或 `~/.claude` | `$XDG_CONFIG_HOME/opencode` 或 `~/.config/opencode` |
+| 全局工作流目录 | `~/.claude/ralph-flow/workflows/` | `~/.config/opencode/ralph-flow/workflows/`（逻辑一致：项目 > 全局 > 内置三层解析） |
+| skill 发现 | `plugin.json` 原生加载，零拷贝、不碰项目 | 无原生机制，`setup.ts` 同步到全局 `~/.config/opencode/skills/` |
 | 会话身份 | ppid → `~/.claude/sessions/` 追踪文件 | 工具/事件自带 sessionID |
 | 会话存活判定 | 追踪文件 pid 是否存活 | 本进程见过该会话且未删除（`seenSessions`）。opencode 重启 ⇒ 全部属主判死 ⇒ 正好触发接管旅程 |
 | done 检测触发 | Stop hook 读 transcript JSONL | `session.idle` 事件 + `client.session.messages` |

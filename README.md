@@ -133,7 +133,7 @@ Eleven steps: survey the source system and run it for real, capture a behavior s
 /ralphflow-start everything2rust "Rewrite this Python CLI in Rust"
 ```
 
-The `c-to-rust` and `everything2rust` workflows drive 12 bundled skills (auto-synced into `.opencode/skills/`) covering planning, test generation, implementation patterns, auditing, and final validation.
+The `c-to-rust` and `everything2rust` workflows drive 12 bundled skills (auto-synced into the global `~/.config/opencode/skills/`, so your project tree stays clean) covering planning, test generation, implementation patterns, auditing, and final validation.
 
 ---
 
@@ -197,7 +197,7 @@ cd ~/.config/opencode/plugins/ralph-flow
 npm install && npm run build
 ```
 
-> On first load, the plugin registers its commands, the read-only `ralph-check` agent, and syncs its bundled skills into the project.
+> On first load, the plugin registers its commands, the read-only `ralph-check` agent, and syncs its bundled skills into the global `~/.config/opencode/skills/` (not your project).
 
 ### Upgrading from 1.x
 
@@ -224,7 +224,12 @@ Pull and rebuild. On first startup 2.0 automatically migrates an interrupted 1.x
 
 ## 🛠️ Custom Workflows
 
-Place a `.yaml` file in `.opencode/ralph-flow/workflows/` (a project workflow shadows a same-named built-in), or run `/ralphflow-create` to design and validate one interactively.
+Drop a `.yaml` file in one of two places, or run `/ralphflow-create` to design and validate one interactively:
+
+- `.opencode/ralph-flow/workflows/` — **this project only**
+- `~/.config/opencode/ralph-flow/workflows/` — **global**, available in every project and untouched by plugin updates
+
+Resolution order is **project → global → built-in**; a same-named workflow at an earlier tier shadows the later ones.
 
 ```yaml
 description: Build, test, and document a feature

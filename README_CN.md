@@ -133,7 +133,7 @@ flowchart LR
 /ralphflow-start everything2rust "把这个 Python CLI 用 Rust 重写"
 ```
 
-`c-to-rust` 和 `everything2rust` 由 12 个自带 skill 驱动（自动同步到 `.opencode/skills/`），覆盖规划、测试生成、实现模式、审计和最终验收。
+`c-to-rust` 和 `everything2rust` 由 12 个自带 skill 驱动（自动同步到全局 `~/.config/opencode/skills/`，你的项目目录保持干净），覆盖规划、测试生成、实现模式、审计和最终验收。
 
 ---
 
@@ -197,7 +197,7 @@ cd ~/.config/opencode/plugins/ralph-flow
 npm install && npm run build
 ```
 
-> 首次加载时，插件会注册命令、只读的 `ralph-check` agent，并把自带 skills 同步到项目里。
+> 首次加载时，插件会注册命令、只读的 `ralph-check` agent，并把自带 skills 同步到全局 `~/.config/opencode/skills/`（不是你的项目）。
 
 ### 从 1.x 升级
 
@@ -224,7 +224,12 @@ npm install && npm run build
 
 ## 🛠️ 自定义工作流
 
-把 `.yaml` 文件放到 `.opencode/ralph-flow/workflows/`（项目工作流会遮蔽同名内置），或运行 `/ralphflow-create` 交互式设计并验证。
+把 `.yaml` 文件放到下面两个位置之一，或运行 `/ralphflow-create` 交互式设计并验证：
+
+- `.opencode/ralph-flow/workflows/` —— **仅本项目**
+- `~/.config/opencode/ralph-flow/workflows/` —— **全局**，所有项目可用，插件更新不会覆盖
+
+解析顺序是**项目 → 全局 → 内置**；同名工作流靠前的层遮蔽靠后的。
 
 ```yaml
 description: 实现、测试并文档化一个功能
