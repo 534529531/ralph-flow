@@ -213,15 +213,15 @@ export async function adversarialCheck(
     }
 
     const responseText = extractResponseText(response).trim();
-    engine.logEvent(instId, "info", "adversarial_check_response", { stepId: step.id, len: responseText.length, preview: responseText.substring(0, 500) });
-
     if (!responseText) {
       return { passed: false, infra: true, reason: "验证返回空响应。" };
     }
 
     const passed = engine.parseCheckResult(responseText);
     const reason = engine.getAdversarialCheckReason(responseText);
-    engine.logEvent(instId, "info", "adversarial_check_result", { stepId: step.id, passed, reason: reason.substring(0, 200) });
+    // One clear line per check (verdict + a short reason snippet). The full
+    // reason lives in state.last_failure_reason and the final report.
+    engine.logEvent(instId, "info", "adversarial_check_result", { stepId: step.id, passed, len: responseText.length, reason: reason.substring(0, 160) });
     return { passed, reason };
   } finally {
     clearInterval(keepalive);

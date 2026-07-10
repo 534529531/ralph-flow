@@ -287,6 +287,9 @@ export function createTools(engine: Engine, client: Client) {
 
       // Phase 2: run the independent check. NO lock is held here — the check
       // drives a whole verifier session and must never block other tool calls.
+      // Surface live progress on the tool call itself (opencode's native
+      // mechanism) so the user isn't staring at a silent spinner for ~1 min.
+      const setTitle = (t: string) => { try { context.metadata?.({ title: t }); } catch {} };
       let checkResult;
       try {
         // Re-verify the instance is still in the same check state (a concurrent
@@ -297,8 +300,11 @@ export function createTools(engine: Engine, client: Client) {
             || preCheckState.current_step !== phase1.state.current_step) {
           return "工作流在验证开始前已被取消或更改。";
         }
+        setTitle(`🔍 独立验证中：${phase1.step.id}（只读会话）`);
         checkResult = await adversarialCheck(client, engine, phase1.instId, sessionId, phase1.step, phase1.checkPrompt, phase1.state.user_task, phase1.workflow.adversarial_check);
+        setTitle(checkResult.infra ? `⚠️ 验证未能运行：${phase1.step.id}` : (checkResult.passed ? `✓ 验证通过：${phase1.step.id}` : `✗ 验证未过：${phase1.step.id}`));
       } catch (err: any) {
+        setTitle(`⚠️ 验证异常：${phase1.step.id}`);
         engine.logEvent(phase1.instId, "error", "adversarial_check_uncaught", { stepId: phase1.step.id, error: err.message });
         const failureReason = `对抗性检查崩溃：${err.message}`;
         const st = engine.readState(phase1.instId);
