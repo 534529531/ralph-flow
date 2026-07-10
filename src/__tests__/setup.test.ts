@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "fs";
 import path from "path";
 import os from "os";
+import yaml from "js-yaml";
 import { setup } from "../setup.js";
 
 let projectDir: string;
@@ -40,6 +41,20 @@ describe("setup — skills go to the global dir, not the project", () => {
     expect(fs.readFileSync(globalAgent, "utf-8")).toContain("edit: deny");
     // project stays clean
     expect(fs.existsSync(path.join(projectDir, ".opencode", "agents"))).toBe(false);
+  });
+
+  it("the generated agent frontmatter is valid YAML and encodes a read-only bash allow-list", () => {
+    setup(projectDir);
+    const raw = fs.readFileSync(path.join(globalHome, "opencode", "agent", "ralph-check.md"), "utf-8");
+    const fm = raw.match(/^---\n([\s\S]*?)\n---/);
+    expect(fm).not.toBeNull();
+    const meta = yaml.load(fm![1]) as any;
+    expect(meta.permission.edit).toBe("deny");
+    expect(meta.permission.external_directory).toBe("allow"); // extra_dirs must stay readable
+    expect(meta.permission.bash["*"]).toBe("deny");           // deny by default
+    expect(meta.permission.bash["cat *"]).toBe("allow");
+    expect(meta.permission.bash["cargo test *"]).toBe("allow");
+    expect(meta.permission.bash["rm *"]).toBeUndefined();      // mutating → not allow-listed
   });
 
   it("does not clobber a user's own global ralph-check agent", () => {

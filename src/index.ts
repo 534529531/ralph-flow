@@ -16,7 +16,7 @@
 
 import type { Plugin, PluginModule, Config } from "@opencode-ai/plugin";
 import { RALPH_COMMANDS } from "./commands.js";
-import { createEngine, type Platform } from "./engine.js";
+import { createEngine, type Platform, RALPH_CHECK_AGENT_PERMISSION } from "./engine.js";
 import { createTools } from "./tools.js";
 import { handleSessionIdle, handleSessionGone } from "./driver.js";
 import { abortActiveCheck, isCheckSession } from "./check.js";
@@ -58,11 +58,9 @@ const RalphFlowPlugin: Plugin = async ({ client, directory }) => {
         input.agent["ralph-check"] = {
           description: "Ralph Flow check phase agent - read-only verification",
           mode: "all",
-          permission: {
-            edit: "deny",
-            bash: "allow",
-            external_directory: "allow",
-          },
+          // Read-only: deny edits and mutating shell (allow-list parity with the
+          // Claude version's --allowedTools). See RALPH_CHECK_AGENT_PERMISSION.
+          permission: RALPH_CHECK_AGENT_PERMISSION,
         } as any;
       }
     },

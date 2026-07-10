@@ -2,9 +2,31 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { createEngine, type Platform, type Engine } from "../engine.js";
+import { createEngine, type Platform, type Engine, RALPH_CHECK_AGENT_PERMISSION, RALPH_CHECK_BASH_PERMISSION } from "../engine.js";
 import { detectDoneTag, stripCodeBlocks, handleSessionIdle, __resetDrivingSessions } from "../driver.js";
 import { createTools } from "../tools.js";
+
+// ─── Read-only verifier permissions (Claude --allowedTools parity) ───────────
+
+describe("ralph-check verifier permissions", () => {
+  it("denies edits and denies bash by default (allow-list, not blind allow)", () => {
+    expect(RALPH_CHECK_AGENT_PERMISSION.edit).toBe("deny");
+    expect(typeof RALPH_CHECK_AGENT_PERMISSION.bash).toBe("object");
+    expect(RALPH_CHECK_BASH_PERMISSION["*"]).toBe("deny");
+  });
+
+  it("allows read-only inspection + test/build commands", () => {
+    for (const cmd of ["cat *", "grep *", "git status *", "npm test *", "pytest *", "cargo test *", "cargo clippy *"]) {
+      expect(RALPH_CHECK_BASH_PERMISSION[cmd]).toBe("allow");
+    }
+  });
+
+  it("does NOT allow-list mutating shell (they fall through to the deny default)", () => {
+    for (const cmd of ["rm *", "mv *", "cp *", "cargo fix *", "cargo fmt", "git commit *", "git push *", "git checkout *", "chmod *"]) {
+      expect(RALPH_CHECK_BASH_PERMISSION[cmd]).toBeUndefined();
+    }
+  });
+});
 
 // ─── Done-tag detection (mirror of hook-tests) ───────────────────────────────
 
@@ -194,7 +216,12 @@ describe("handleSessionIdle", () => {
     await handleSessionIdle(makeClient(), engine, "sess-1");
     const texts = injected.map((i) => i.text);
     // visible CHECK-phase notice (with criteria) + visible result, both noReply
-    expect(texts.some((t) => t.includes("🔍 CHECK 阶段") && t.includes("检查依据"))).toBe(true);
+    // The CHECK phase message shows the full verifier context: user task, what DO
+    // was supposed to produce (task desc, input, expected output), and check criteria.
+    expect(texts.some((t) => t.includes("🔍 CHECK 阶段") && t.includes("检查依据")
+      && t.includes("用户需求") && t.includes("task")
+      && t.includes("Do 阶段任务") && t.includes("build the thing")
+      && t.includes("user input") && t.includes("thing.md"))).toBe(true);
     expect(texts.some((t) => t.includes("检查结果：通过 ✓"))).toBe(true);
     // advanced to the next step (review) and injected its DO prompt (drives model)
     expect(engine.readState(instId)!.current_step).toBe("review");
@@ -207,10 +234,36 @@ describe("handleSessionIdle", () => {
     lastAssistantText = "did the work\n<promise>done</promise>";
     await handleSessionIdle(makeClient(), engine, "sess-1");
     const texts = injected.map((i) => i.text);
-    expect(texts.some((t) => t.includes("检查结果：未通过 ✗"))).toBe(true);
+    expect(texts.some((t) => t.includes("检查结果：失败 ✗"))).toBe(true);
     // stayed on build, fail_count incremented, retry DO prompt injected
     expect(engine.readState(instId)!.current_step).toBe("build");
     expect(engine.readState(instId)!.fail_count).toBe(1);
+  });
+
+  it("discards the check verdict if the instance was paused mid-check (owner session gone)", async () => {
+    // Simulate handleSessionGone firing WHILE the ~1-min check runs: the owner
+    // session is aborted/deleted and the instance is paused. A passing verdict
+    // must be DISCARDED — applying it would clear the pause and inject the next
+    // DO prompt into a now-dead session, orphaning the instance.
+    checkVerdict = "true";
+    const instId = startInstance("build");
+    lastAssistantText = "did the work\n<promise>done</promise>";
+    const client: any = makeClient();
+    const origPrompt = client.session.prompt;
+    client.session.prompt = async (args: any) => {
+      if (String(args.path.id).startsWith("chk-")) {
+        const s = engine.readState(instId)!;
+        engine.writeState({ ...s, paused: true, pause_reason: "session_deleted" }, instId);
+      }
+      return origPrompt(args);
+    };
+    await handleSessionIdle(client, engine, "sess-1");
+    const st = engine.readState(instId)!;
+    expect(st.paused).toBe(true);            // pause preserved
+    expect(st.current_step).toBe("build");   // NOT advanced
+    expect(st.current_phase).toBe("check");  // left where it was
+    // no "advance to next step" drive was injected
+    expect(injected.some((i) => i.text.includes("下一步") && i.text.includes("review"))).toBe(false);
   });
 
   it("done tag on a MANUAL step → stops for user review (noReply), arms the gate", async () => {
@@ -294,9 +347,12 @@ describe("handleSessionIdle", () => {
     expect(injected.length).toBe(0);
   });
 
-  it("check phase → silent", async () => {
+  it("check phase → silent while a check is actually running", async () => {
     const instId = startInstance("build");
     engine.writeState({ ...engine.readState(instId)!, current_phase: "check" }, instId);
+    // Simulate a running adversarial check: write a session marker so the idle
+    // handler knows a check is in progress and stays silent.
+    engine.writeAdversarialSession("chk-running", instId);
     lastAssistantText = "waiting";
     await handleSessionIdle(makeClient(), engine, "sess-1");
     expect(injected.length).toBe(0);

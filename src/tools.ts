@@ -201,13 +201,15 @@ export function createTools(engine: Engine, client: Client) {
           engine.recordStepStart(instId, step.id, "do");
           engine.logEvent(instId, "info", "step_start", { step: step.id, phase: "do" });
           const staleTop = engine.popState(instId);
-          if (staleTop && !(staleTop.workflow_name === state.workflow_name && staleTop.current_step === state.current_step)) {
+          const staleIsMismatch = staleTop && !(staleTop.workflow_name === state.workflow_name && staleTop.current_step === state.current_step);
+          if (staleIsMismatch) {
             engine.pushState(staleTop, instId);
           }
           engine.pushState({ ...state, current_step: step.id, current_phase: "do", fail_count: 0, paused: false, pause_reason: undefined }, instId);
           const subResult = engine.resolveSubWorkflowEntry(instId, step.workflow, state.user_task, step, MAX_NESTING_DEPTH, previousReason, previousFailCount);
           if (subResult.error) {
-            engine.popState(instId);
+            engine.popState(instId); // undo our push
+            if (staleIsMismatch) engine.popState(instId); // also undo the stale push-back
             engine.writeState({ ...state, paused: true, pause_reason: "config_error", last_failure_reason: subResult.text }, instId);
             return subResult.text;
           }
@@ -247,7 +249,21 @@ export function createTools(engine: Engine, client: Client) {
             return `崩溃恢复：步骤 "${state.current_step}" 在工作流中未找到。`;
           }
           if (isSubWorkflowStep(step)) {
-            return `崩溃恢复：步骤 "${step.id}" 是子工作流步骤。调用 \`ralphflow_continue\` 重新进入。`;
+            const staleTop = engine.popState(instId);
+            const staleIsMismatch = staleTop && !(staleTop.workflow_name === state.workflow_name && staleTop.current_step === state.current_step);
+            if (staleIsMismatch) {
+              engine.pushState(staleTop, instId);
+            }
+            engine.pushState({ ...state, current_step: step.id, current_phase: "do", fail_count: state.fail_count || 0 }, instId);
+            const subResult = engine.resolveSubWorkflowEntry(instId, step.workflow, state.user_task, step, MAX_NESTING_DEPTH, "之前的验证被中断（进程崩溃）。请重新执行任务。", state.fail_count || 0);
+            if (subResult.error) {
+              engine.popState(instId); // undo our push
+              if (staleIsMismatch) engine.popState(instId); // also undo the stale push-back
+              engine.writeState({ ...state, paused: true, pause_reason: "config_error", last_failure_reason: subResult.text }, instId);
+              return subResult.text;
+            }
+            engine.markPromptDelivered(engine.readState(instId)?.current_step || step.id, instId);
+            return `## ⚠️ 崩溃恢复\n\n进程在验证期间崩溃。\n\n---\n\n重新进入子工作流：**${step.id}**\n\n---\n\n${subResult.text}`;
           }
           if (workflow.manual_step && workflow.manual_step.includes(step.id)) {
             engine.writeManualStepMarker(instId);
@@ -261,14 +277,23 @@ export function createTools(engine: Engine, client: Client) {
 
       const step = engine.getStep(workflow, state.current_step);
       if (!step) return `步骤 "${state.current_step}" 未找到。`;
-      if (isSubWorkflowStep(step)) {
-        return `步骤 "${step.id}" 是子工作流步骤。已自动处理。`;
-      }
 
       // 5. Attach: taking over an instance that died MID-DO (no done tag, no
       //    manual gate). Re-issue the DO prompt — the check runs on the
       //    next idle after the model re-does this step.
       if (attached && !engine.markerExists(DONE_TAG_MARKER, instId) && !engine.markerExists(MANUAL_GATE_MARKER, instId)) {
+        if (isSubWorkflowStep(step)) {
+          engine.pushState({ ...state, current_step: step.id, current_phase: "do", fail_count: state.fail_count || 0 }, instId);
+          const subResult = engine.resolveSubWorkflowEntry(instId, step.workflow, state.user_task, step, MAX_NESTING_DEPTH, state.last_failure_reason, state.fail_count || 0);
+          if (subResult.error) {
+            engine.popState(instId);
+            engine.writeState({ ...state, paused: true, pause_reason: "config_error", last_failure_reason: subResult.text }, instId);
+            return subResult.text;
+          }
+          engine.markPromptDelivered(engine.readState(instId)?.current_step || step.id, instId);
+          engine.logEvent(instId, "info", "instance_attached_resume_do", { instance: instId, step: step.id });
+          return `## 已接管工作流实例 \`${instId}\`\n\n该实例中断于 DO 阶段，继续执行子工作流。\n\n---\n\n${subResult.text}`;
+        }
         if (workflow.manual_step && workflow.manual_step.includes(step.id)) {
           engine.writeManualStepMarker(instId);
         }

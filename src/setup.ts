@@ -20,7 +20,8 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, cpSync, renameSync, rmSync, statSync, appendFileSync } from "fs";
 import { join, dirname, isAbsolute } from "path";
 import { fileURLToPath } from "url";
-import { RALPH_FLOW_DIR } from "./engine.js";
+import yaml from "js-yaml";
+import { RALPH_FLOW_DIR, RALPH_CHECK_AGENT_PERMISSION } from "./engine.js";
 
 function getPluginRoot(): string {
   const __filename = fileURLToPath(import.meta.url);
@@ -55,13 +56,16 @@ function getGlobalConfigHome(): string | null {
 
 const MANAGED_MARKER = ".ralph-flow-managed";
 
+// The permission block is generated from the single source of truth
+// (RALPH_CHECK_AGENT_PERMISSION) so the on-disk agent file and the in-memory
+// agent registered in index.ts can never drift apart.
+const AGENT_FRONTMATTER = yaml.dump(
+  { description: "Ralph Flow check phase agent - read-only verification", mode: "all", permission: RALPH_CHECK_AGENT_PERMISSION },
+  { lineWidth: -1, quotingType: '"' }
+).trimEnd();
+
 const AGENT_CONTENT = `---
-description: Ralph Flow check phase agent - read-only verification
-mode: all
-permission:
-  edit: deny
-  bash: allow
-  external_directory: allow
+${AGENT_FRONTMATTER}
 ---
 你是 Ralph Flow 检查阶段的专用 agent。
 
@@ -155,7 +159,7 @@ function setupSkills(): void {
     const dest = join(globalSkillsDir, name);
     if (existsSync(dest) && !existsSync(join(dest, MANAGED_MARKER))) continue; // user-authored — hands off
     try {
-      cpSync(src, dest, { recursive: true });
+      cpSync(src, dest, { recursive: true, force: true });
       writeFileSync(join(dest, MANAGED_MARKER), "This skill is managed by the ralph-flow plugin and refreshed on startup. Remove this marker file to take ownership.\n");
     } catch (e) {
       diag(`[ralph-flow] skill sync failed (${name}):`, e);

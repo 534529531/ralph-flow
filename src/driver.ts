@@ -20,7 +20,7 @@
 import fs from "fs";
 import path from "path";
 import type { Engine, WorkflowDef, NormalStepDef, RalphFlowState } from "./engine.js";
-import { isSubWorkflowStep, MANUAL_GATE_MARKER, DONE_TAG_MARKER } from "./engine.js";
+import { isSubWorkflowStep, MANUAL_GATE_MARKER, DONE_TAG_MARKER, DEFAULT_ADVERSARIAL_TIMEOUT_MS } from "./engine.js";
 import { adversarialCheck } from "./check.js";
 
 type Client = any;
@@ -96,12 +96,6 @@ export async function injectPrompt(
 
 // ─── Check orchestration (idle-driven & tool-driven share this) ──────────────
 
-const PAUSE_REASON_CN: Record<string, string> = {
-  max_failures: "已达最大失败次数",
-  config_error: "工作流配置错误",
-  check_error: "验证进程未能运行（额度/API/超时）",
-};
-
 /**
  * Run the independent check for a step whose DO just completed, injecting the
  * visible CHECK-phase and result messages, then advance / retry / pause the
@@ -121,9 +115,14 @@ export async function runCheckAndAdvance(
   step: NormalStepDef,
   state: RalphFlowState
 ): Promise<void> {
-  // Record DO completion and transition to check.
-  engine.logEvent(instId, "info", "done_detected", { step: state.current_step });
-  engine.addStepRecord(instId, state.current_step, "do", "passed", 0);
+  // Record DO completion and transition to check. The DO-completion records are
+  // written only on the real do→check edge; this function is also re-entered
+  // with the state already in "check" (infra-error retry after continue, or the
+  // crashed-check anomaly path), where re-recording would double the report rows.
+  if (state.current_phase === "do") {
+    engine.logEvent(instId, "info", "done_detected", { step: state.current_step });
+    engine.addStepRecord(instId, state.current_step, "do", "passed", state.fail_count || 0);
+  }
   engine.clearManualStepMarker(instId);
   engine.clearManualGate(instId);
   engine.clearReinjectCounter(instId);
@@ -135,9 +134,22 @@ export async function runCheckAndAdvance(
 
   const checkPrompt = engine.buildCheckPrompt(instId, step, state.user_task);
 
-  // Visible: what is being checked.
+  // Visible: the full context the independent verifier sees — user task, what the
+  // DO phase was supposed to produce, and the check criteria. The original v1
+  // plugin injected the complete buildCheckPrompt; the user should see everything
+  // the verifier judges against, not just the check criteria in isolation.
+  const visibleSections: string[] = [];
+  if (state.user_task) {
+    visibleSections.push(`### 用户需求\n\n${state.user_task}`);
+  }
+  visibleSections.push(`### Do 阶段任务\n\n**任务描述**：${engine.renderStepText(instId, step.do)}\n\n**输入**：${engine.renderStepText(instId, step.input)}\n\n**预期输出**：${engine.renderStepText(instId, step.output)}`);
+  visibleSections.push(`### 检查依据\n\n${engine.renderStepText(instId, step.check)}`);
+  // Report the CONFIGURED timeout ceiling, not a made-up "~1 minute". The
+  // verifier independently explores the project and runs the check commands
+  // (builds/tests can take minutes); its only hard bound is this timeout.
+  const timeoutMin = Math.max(1, Math.round((workflow.adversarial_check?.timeout_ms || DEFAULT_ADVERSARIAL_TIMEOUT_MS) / 60000));
   await injectPrompt(client, sessionId,
-    `## 🔍 CHECK 阶段\n\n正在用**独立只读会话**验证步骤 \`${step.id}\`（约需 1 分钟，独立于本对话）。\n\n### 检查依据\n\n${engine.renderStepText(instId, step.check)}`,
+    `## 🔍 CHECK 阶段\n\n正在用**独立只读会话**验证步骤 \`${step.id}\`（独立于本对话，最长 ${timeoutMin} 分钟后超时）。\n\n${visibleSections.join("\n\n")}`,
     true);
 
   let checkResult;
@@ -153,11 +165,15 @@ export async function runCheckAndAdvance(
     return;
   }
 
-  // Re-check state: a cancel or a concurrent continue may have moved on.
+  // Re-check state: a cancel, a concurrent continue, or a session-gone pause
+  // (owner session aborted/deleted while the ~1-min check ran) may have moved
+  // on. If paused, DISCARD the verdict — applying it would clear the pause and
+  // inject the next DO prompt into a now-dead session, orphaning the instance.
+  // Keeping it paused lets a new session attach cleanly via ralphflow_continue.
   const cur = engine.readState(instId);
-  if (!cur || !cur.active || cur.current_phase !== "check"
+  if (!cur || !cur.active || cur.paused || cur.current_phase !== "check"
       || cur.workflow_name !== state.workflow_name || cur.current_step !== state.current_step) {
-    engine.logEvent(instId, "warn", "check_result_discarded", { reason: "state changed during check" });
+    engine.logEvent(instId, "warn", "check_result_discarded", { reason: cur?.paused ? "instance paused during check" : "state changed during check" });
     return;
   }
 
@@ -171,42 +187,30 @@ export async function runCheckAndAdvance(
     return;
   }
 
-  // Visible: the verdict and its reason (its own clean message).
-  await injectPrompt(client, sessionId,
-    `## ${checkResult.passed ? "检查结果：通过 ✓" : "检查结果：未通过 ✗"}（步骤 \`${step.id}\`）\n\n### ${checkResult.passed ? "通过原因" : "失败原因"}\n\n${checkResult.reason || "（验证者未给出原因）"}`,
-    true);
-
   engine.addStepRecord(instId, cur.current_step, "check", checkResult.passed ? "passed" : "failed", cur.fail_count || 0, checkResult.reason);
   const result = checkResult.passed
     ? engine.handleCheckPassed(instId, cur, workflow, step, checkResult)
     : engine.handleCheckFailed(instId, cur, workflow, step, checkResult);
 
-  if (result.completed) {
-    await injectPrompt(client, sessionId, `## 🎉 工作流完成\n\n所有步骤已通过独立验证。`, true);
-    return;
-  }
-  if (result.paused) {
-    const paused = engine.readState(instId);
-    const why = paused?.pause_reason ? (PAUSE_REASON_CN[paused.pause_reason] || paused.pause_reason) : "未知原因";
-    await injectPrompt(client, sessionId,
-      `## ⏸️ 工作流已暂停\n\n原因：${why}。\n\n${paused?.last_failure_reason || ""}\n\n修复问题后运行 \`/ralphflow-continue\` 从当前步骤恢复。`,
-      true);
-    return;
+  // Set up the next DO phase markers before injecting the transition text
+  // (handleCheckPassed/Failed already updated the state and cached the DO prompt).
+  if (!result.completed && !result.paused) {
+    const next = engine.readState(instId);
+    if (next && next.active && next.current_phase === "do") {
+      engine.clearDoneTagDetected(instId);
+      engine.clearManualGate(instId);
+      const nextWf = next.workflow_name === workflow.name ? workflow : engine.loadWorkflow(next.workflow_name);
+      if (nextWf?.manual_step?.includes(next.current_step)) engine.writeManualStepMarker(instId);
+      engine.markPromptDelivered(next.current_step, instId);
+    }
   }
 
-  // Advanced to the next step's DO phase — drive the model with its DO prompt.
-  const next = engine.readState(instId);
-  if (next && next.active && !next.paused && next.current_phase === "do") {
-    engine.clearDoneTagDetected(instId);
-    engine.clearManualGate(instId);
-    const nextWf = next.workflow_name === workflow.name ? workflow : engine.loadWorkflow(next.workflow_name);
-    if (nextWf?.manual_step?.includes(next.current_step)) engine.writeManualStepMarker(instId);
-    engine.markPromptDelivered(next.current_step, instId);
-    // handleCheckPassed already built & cached the next DO prompt.
-    const doPrompt = readTextFile(path.join(engine.getInstanceDir(instId), ".do-prompt-cache"));
-    await injectPrompt(client, sessionId,
-      `## ▶️ 下一步：\`${next.current_step}\`\n\n---\n\n${doPrompt}`);
-  }
+  // Use the engine's transition text directly — same approach as the Claude Code
+  // version (which returns result.text as the tool response). This gives the user
+  // the full context: check verdict + reason + transition (sub-workflow completion
+  // notices, next-step info, DO prompt) in one coherent message. Completions and
+  // pauses are noReply (workflow stopped); advances must drive the model.
+  await injectPrompt(client, sessionId, result.text, result.completed || result.paused);
 }
 
 // ─── Extract last assistant message (mirror of the hook's transcript read) ───
@@ -307,10 +311,25 @@ export async function handleSessionIdle(
 
     // Sub-workflow steps advance through the engine, never through idle nudges.
     const workflow: WorkflowDef | null = engine.loadWorkflow(stateWorkflow);
+    if (!workflow) {
+      // Workflow deleted after instance creation — pause to avoid silent stall.
+      engine.writeState({ ...state, paused: true, pause_reason: "config_error", last_failure_reason: `工作流 "${stateWorkflow}" 未找到。` }, mine.id);
+      return;
+    }
     const currentStep = workflow ? engine.getStep(workflow, stateStep) : null;
     if (currentStep && isSubWorkflowStep(currentStep)) return;
+    // Step removed from YAML after instance creation — pause, don't silently deadlock.
+    if (!currentStep) {
+      engine.writeState({ ...state, paused: true, pause_reason: "config_error", last_failure_reason: `步骤 "${stateStep}" 在工作流 "${stateWorkflow}" 中未找到。` }, mine.id);
+      return;
+    }
 
     const { text: lastOutput, hasToolUse } = await getLastAssistantMessage(client, sessionId);
+
+    // Re-check paused: handleSessionGone may have paused the instance during the
+    // await above (session deleted/aborted while we were fetching messages).
+    const freshState = engine.readState(mine.id);
+    if (!freshState || !freshState.active || freshState.paused) return;
 
     const hasDoneTag = lastOutput ? detectDoneTag(lastOutput) : false;
 
@@ -381,8 +400,16 @@ export async function handleSessionIdle(
 
     const alreadyReported = !shouldReportPhase();
 
-    // Check phase: always suppress during verification (no action needed)
-    if (statePhase === "check") return;
+    // Check phase: normally silent while the verifier runs. But after a
+    // check_error pause is cleared by continue, the state is unpaused "check"
+    // with no active verifier — re-trigger the check here so the continue
+    // tool's promise ("空闲时自动重新验证") actually works.
+    if (statePhase === "check") {
+      if (!state.paused && currentStep && !isSubWorkflowStep(currentStep) && !engine.readAdversarialSession(mine.id)) {
+        await runCheckAndAdvance(client, engine, sessionId, mine.id, workflow!, currentStep as NormalStepDef, state);
+      }
+      return;
+    }
 
     let phaseGuidance = "";
 
@@ -417,7 +444,7 @@ export async function handleSessionIdle(
         const cachedPromptForKeepalive = readTextFile(doPromptCacheFile);
         const keepaliveTask = cachedPromptForKeepalive ? `\n\n${cachedPromptForKeepalive}` : "";
         await injectPrompt(client, sessionId,
-          `继续执行步骤 \`${stateStep}\` 的任务。${keepaliveTask}\n\n当所有要求满足后，在单独一行输出 \`<promise>done</promise>\`。如果任务已完成且需要验证，调用 \`ralphflow_continue\`。`);
+          `继续执行步骤 \`${stateStep}\` 的任务。${keepaliveTask}\n\n当所有要求满足后，在单独一行输出 \`<promise>done</promise>\`。`);
         return;
       }
 

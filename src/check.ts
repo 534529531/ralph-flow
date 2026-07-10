@@ -166,16 +166,24 @@ export async function adversarialCheck(
     let response: unknown;
     let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
     try {
+      const promptPromise = client.session.prompt({
+        path: { id: checkSessionId },
+        body: {
+          ...(model ? { model } : {}),
+          agent,
+          system: systemPrompt,
+          parts: [{ type: "text", text: checkPrompt }],
+        },
+      });
+      // If the timeout (or an abort) wins the race, this promise stays pending
+      // and later rejects — most reliably right after we call session.abort().
+      // Without a handler that late rejection is an UnhandledPromiseRejection
+      // (there is no process-level guard), which can crash the opencode host.
+      // A no-op catch makes the late rejection harmless; the race result is
+      // still driven by the awaited Promise.race below.
+      Promise.resolve(promptPromise).catch(() => {});
       response = await Promise.race([
-        client.session.prompt({
-          path: { id: checkSessionId },
-          body: {
-            ...(model ? { model } : {}),
-            agent,
-            system: systemPrompt,
-            parts: [{ type: "text", text: checkPrompt }],
-          },
-        }),
+        promptPromise,
         // The timer MUST be cleared when the prompt wins the race — an
         // uncleared setTimeout keeps the event loop alive for the full timeout
         // (up to 1h), delaying process exit and leaking one timer per check.
@@ -185,7 +193,7 @@ export async function adversarialCheck(
       ]);
     } catch (err: any) {
       if (aborted || !engine.instanceExists(instId)) {
-        return { passed: false, reason: "工作流实例已被取消。" };
+        return { passed: false, infra: true, reason: "工作流实例已被取消。" };
       }
       if (String(err.message).includes("timeout")) {
         // Abort the runaway generation before reporting.
@@ -215,7 +223,7 @@ export async function adversarialCheck(
     }
 
     if (aborted) {
-      return { passed: false, reason: "工作流实例已被取消。" };
+      return { passed: false, infra: true, reason: "工作流实例已被取消。" };
     }
 
     const responseText = extractResponseText(response).trim();

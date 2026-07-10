@@ -401,7 +401,12 @@ export function createEngine(projectDir: string, platform: Platform) {
       // Pure-logic transitions (sub-workflow entry, check routing) build fresh
       // state objects without session_id; without this they would orphan the
       // instance. An explicit session_id in `state` still wins (ownership claim).
-      const session_id = state.session_id ?? readState(id)?.session_id;
+      // Preserve existing session_id only when the caller's state does not
+      // mention the key at all. An explicit session_id (even null, to clear
+      // ownership) must win — otherwise the comment is lying to callers.
+      const session_id = Object.prototype.hasOwnProperty.call(state, "session_id")
+        ? state.session_id
+        : readState(id)?.session_id;
       atomicWriteJson(getStateFile(id), { ...state, session_id, instance_id: id });
     } catch (e: any) {
       diag("[ralph-flow] Error writing state:", e.message);
@@ -1989,5 +1994,58 @@ export const DEFAULT_ADVERSARIAL_SYSTEM_PROMPT = `你是一个严格的检查者
 标签必须独占最后一行。`;
 
 export const DEFAULT_ADVERSARIAL_TIMEOUT_MS = 900_000;
+
+// ─── Read-only verifier permissions (parity with the Claude version) ─────────
+//
+// The Claude plugin runs the checker as `claude -p --allowedTools "…"` with an
+// explicit ALLOW-list: Read/Glob/Grep + a curated set of non-mutating Bash
+// subcommands (never rm/mv/cargo-fix/plain-fmt). opencode's agent permission
+// model is the native equivalent: `bash` accepts a `{ pattern: action }` map
+// where the command string is matched against glob patterns, the most-specific
+// match wins, and `"*"` is the fallback. We deny by default and allow the SAME
+// command set the Claude version does, so `bash: allow` no longer lets the
+// verifier mutate the very workspace it is judging.
+//
+// Patterns use the trailing-space form ("cat *") so short names can't overmatch
+// a mutating command (e.g. a bare "tr*" would also match "truncate"). Bare
+// forms are added only for the handful of commands checks commonly run without
+// arguments.
+export type PermissionAction = "allow" | "deny" | "ask";
+
+export const RALPH_CHECK_BASH_PERMISSION: Record<string, PermissionAction> = {
+  "*": "deny",
+  // Inspection / read-only file + text tools.
+  "cat *": "allow", "head *": "allow", "tail *": "allow", "ls *": "allow",
+  "find *": "allow", "grep *": "allow", "wc *": "allow", "file *": "allow", "stat *": "allow",
+  "awk *": "allow", "sed *": "allow", "cut *": "allow", "sort *": "allow", "uniq *": "allow",
+  "tr *": "allow", "cd *": "allow", "xargs *": "allow",
+  // Read-only text / arithmetic / structured-data helpers used by check scripts.
+  "jq *": "allow", "bc *": "allow", "echo *": "allow", "printf *": "allow",
+  "test *": "allow", "true": "allow", "true *": "allow",
+  "diff *": "allow", "cmp *": "allow", "comm *": "allow", "basename *": "allow",
+  "dirname *": "allow", "realpath *": "allow", "readlink *": "allow", "pwd": "allow", "pwd *": "allow",
+  "nm *": "allow",
+  // Git inspection (never mutating).
+  "git status": "allow", "git status *": "allow", "git diff": "allow", "git diff *": "allow",
+  "git log": "allow", "git log *": "allow", "git show *": "allow",
+  // Test runners.
+  "npm test": "allow", "npm test *": "allow", "npm run test *": "allow",
+  "pytest": "allow", "pytest *": "allow", "go test *": "allow", "make test": "allow", "make test *": "allow",
+  // Cargo verification — build/test/run only touch target/, never source.
+  // `cargo fmt` is allowed ONLY with --check (plain fmt rewrites source).
+  "cargo build": "allow", "cargo build *": "allow", "cargo test": "allow", "cargo test *": "allow",
+  "cargo run *": "allow", "cargo nextest *": "allow", "cargo clippy": "allow", "cargo clippy *": "allow",
+  "cargo llvm-cov *": "allow", "cargo geiger *": "allow", "cargo clean *": "allow",
+  "cargo fmt --check*": "allow", "cargo metadata *": "allow", "cargo tree *": "allow",
+  "cargo audit *": "allow", "cargo deny *": "allow",
+};
+
+/** The full permission block for the read-only ralph-check verifier agent. */
+export const RALPH_CHECK_AGENT_PERMISSION = {
+  edit: "deny" as PermissionAction,
+  webfetch: "allow" as PermissionAction,
+  external_directory: "allow" as PermissionAction,
+  bash: RALPH_CHECK_BASH_PERMISSION,
+};
 
 
