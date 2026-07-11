@@ -24,7 +24,7 @@
 /ralphflow-start loop "实现用户认证"
 
 # 任务源在项目外 —— 验证器需要读取权限
-/ralphflow-start c-to-rust "迁移 ~/legacy/parser.c" extra_dirs=~/legacy
+/ralphflow-start spec "重构 ~/legacy 里的模块" extra_dirs=~/legacy
 
 # 查看状态（本会话，或全部实例）
 /ralphflow-status

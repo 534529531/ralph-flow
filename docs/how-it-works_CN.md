@@ -237,6 +237,6 @@ flowchart LR
     └── workflows/                  # 全局自定义工作流（所有项目）
 ```
 
-**工作流解析顺序**是 `项目 → 全局 → 插件内置`。内置工作流（`loop`、`spec`、`c-to-rust`、`everything2rust`）从插件自己的 `workflows/` 目录解析，因此始终反映已安装版本 —— 绝不拷贝进项目或全局目录（拷贝会导致过期）。项目或全局目录里的同名工作流会遮蔽下层。
+**工作流解析顺序**是 `项目 → 全局 → 插件内置`。内置工作流（`loop`、`spec`）从插件自己的 `workflows/` 目录解析，因此始终反映已安装版本 —— 绝不拷贝进项目或全局目录（拷贝会导致过期）。项目或全局目录里的同名工作流会遮蔽下层。
 
-**Skill** 不由我们的引擎加载 —— opencode 原生的 `skill` 工具从固定文件位置发现它们。自带的 c-to-rust / everything2rust skill 同步到全局 `~/.config/opencode/skills/`（每个带 `.ralph-flow-managed` 标记，你自己的同名 skill 绝不被动），这样你的项目目录保持干净。
+**Skill** 不由我们的引擎加载 —— opencode 原生的 `skill` 工具从固定文件位置发现它们。插件自带的 skill（若有）同步到全局 `~/.config/opencode/skills/`（每个带 `.ralph-flow-managed` 标记，你自己的同名 skill 绝不被动），这样你的项目目录保持干净。

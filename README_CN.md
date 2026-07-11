@@ -106,35 +106,6 @@ flowchart LR
     V --> A["7. archive"]
 ```
 
-### c-to-rust — C → 惯用安全 Rust
-
-> **适用场景**：把 C 项目逐模块迁移到 Rust binary，带 TDD 安全网，`unsafe` 控制在 10% 以内。
-
-九步：探测项目、把测试移植成红阶段基线、翻译核心模块再翻译全量、每一遍独立审计、最后一道 QA 验收关口。
-
-```
-/ralphflow-start c-to-rust "把这个 C 解析器迁移到 Rust"
-```
-
-```mermaid
-flowchart LR
-    E["setup-env"] --> A["analyze"] --> B["baseline"]
-    B --> IC["impl-core"] --> AC["audit-core"]
-    AC --> IF["impl-full"] --> AF["audit-full"] --> V["verify"]
-```
-
-### everything2rust — 任意语言 → Rust
-
-> **适用场景**：把*任意*语言写的系统重写为行为等价的 Rust，用 golden 语料和 ADR 驱动。
-
-十一步：勘察源系统并真实跑起来、采集行为契约 + golden 语料、带决策记录做设计（`design` 步骤是**人工审查门**），再 TDD 实现、审计、验收。
-
-```
-/ralphflow-start everything2rust "把这个 Python CLI 用 Rust 重写"
-```
-
-`c-to-rust` 和 `everything2rust` 由 12 个自带 skill 驱动（自动同步到全局 `~/.config/opencode/skills/`，你的项目目录保持干净），覆盖规划、测试生成、实现模式、审计和最终验收。
-
 ---
 
 ## 工作原理

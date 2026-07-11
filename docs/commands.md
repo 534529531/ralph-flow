@@ -24,7 +24,7 @@
 /ralphflow-start loop "Build user authentication"
 
 # Task source outside the project — the verifier needs read access
-/ralphflow-start c-to-rust "Port ~/legacy/parser.c" extra_dirs=~/legacy
+/ralphflow-start spec "Refactor the module in ~/legacy" extra_dirs=~/legacy
 
 # Check status (this session, or all instances)
 /ralphflow-status

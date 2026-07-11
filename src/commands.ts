@@ -208,7 +208,7 @@ User input: $ARGUMENTS
    - project-only → \`.opencode/ralph-flow/workflows/<name>.yaml\`
    - available in all projects → \`~/.config/opencode/ralph-flow/workflows/<name>.yaml\` (global; survives plugin updates)
 
-   Create the directory if needed. If the name matches a built-in (\`loop\`, \`spec\`, \`c-to-rust\`, \`everything2rust\`), tell the user it will shadow the built-in and confirm that's intended.
+   Create the directory if needed. If the name matches a built-in (\`loop\`, \`spec\`), tell the user it will shadow the built-in and confirm that's intended.
 
 4. **Validate**: call the \`ralphflow_doctor\` tool and check the new workflow's section. Fix every problem AND warning it reports for this workflow, re-run doctor, repeat until its verdict is "可启动" with no warnings.
 

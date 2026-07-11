@@ -106,35 +106,6 @@ flowchart LR
     V --> A["7. archive"]
 ```
 
-### c-to-rust — C → idiomatic safe Rust
-
-> **Best for**: migrating a C project to a Rust binary, module by module, with a TDD safety net and `unsafe` kept under 10%.
-
-Nine steps: probe the project, port the tests as a red baseline, translate core then full modules, audit each pass independently, and gate on a final QA verification.
-
-```
-/ralphflow-start c-to-rust "Port this C parser to Rust"
-```
-
-```mermaid
-flowchart LR
-    E["setup-env"] --> A["analyze"] --> B["baseline"]
-    B --> IC["impl-core"] --> AC["audit-core"]
-    AC --> IF["impl-full"] --> AF["audit-full"] --> V["verify"]
-```
-
-### everything2rust — any language → Rust
-
-> **Best for**: rewriting a system written in *any* language to Rust with behavioral equivalence, driven by golden corpora and ADRs.
-
-Eleven steps: survey the source system and run it for real, capture a behavior spec + golden corpus, design with recorded decisions (a **manual review gate** on `design`), then TDD-implement, audit, and verify.
-
-```
-/ralphflow-start everything2rust "Rewrite this Python CLI in Rust"
-```
-
-The `c-to-rust` and `everything2rust` workflows drive 12 bundled skills (auto-synced into the global `~/.config/opencode/skills/`, so your project tree stays clean) covering planning, test generation, implementation patterns, auditing, and final validation.
-
 ---
 
 ## How It Works

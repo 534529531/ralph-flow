@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { fileURLToPath } from "url";
 import yaml from "js-yaml";
 import { setup } from "../setup.js";
 
@@ -9,11 +10,20 @@ let projectDir: string;
 let globalHome: string;
 let savedXdg: string | undefined;
 
+// The plugin ships no skills by default. To keep the skill-sync behavior under
+// test regardless of what (if anything) is bundled, each test seeds a throwaway
+// fixture skill into the plugin's own skills/ dir and removes it afterwards.
+const PLUGIN_ROOT = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))));
+const FIXTURE_SKILL = "__rf_test_skill__";
+const fixtureSkillDir = path.join(PLUGIN_ROOT, "skills", FIXTURE_SKILL);
+
 beforeEach(() => {
   projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ralph-flow-proj-"));
   globalHome = fs.mkdtempSync(path.join(os.tmpdir(), "ralph-flow-home-"));
   savedXdg = process.env.XDG_CONFIG_HOME;
   process.env.XDG_CONFIG_HOME = globalHome;
+  fs.mkdirSync(fixtureSkillDir, { recursive: true });
+  fs.writeFileSync(path.join(fixtureSkillDir, "SKILL.md"), "---\nname: fixture\n---\nfixture skill\n");
 });
 
 afterEach(() => {
@@ -21,15 +31,16 @@ afterEach(() => {
   else process.env.XDG_CONFIG_HOME = savedXdg;
   fs.rmSync(projectDir, { recursive: true, force: true });
   fs.rmSync(globalHome, { recursive: true, force: true });
+  fs.rmSync(fixtureSkillDir, { recursive: true, force: true });
 });
 
 describe("setup — skills go to the global dir, not the project", () => {
   it("writes the bundled skills into ~/.config/opencode/skills and NOT the project", () => {
     setup(projectDir);
     const globalSkills = path.join(globalHome, "opencode", "skills");
-    // A representative bundled skill lands globally with the managed marker
-    expect(fs.existsSync(path.join(globalSkills, "c-to-rust-plan", "SKILL.md"))).toBe(true);
-    expect(fs.existsSync(path.join(globalSkills, "c-to-rust-plan", ".ralph-flow-managed"))).toBe(true);
+    // A bundled skill lands globally with the managed marker
+    expect(fs.existsSync(path.join(globalSkills, FIXTURE_SKILL, "SKILL.md"))).toBe(true);
+    expect(fs.existsSync(path.join(globalSkills, FIXTURE_SKILL, ".ralph-flow-managed"))).toBe(true);
     // The project tree stays clean
     expect(fs.existsSync(path.join(projectDir, ".opencode", "skills"))).toBe(false);
   });
@@ -74,7 +85,8 @@ describe("setup — skills go to the global dir, not the project", () => {
   });
 
   it("does not clobber a user-authored global skill of the same name", () => {
-    const globalSkills = path.join(globalHome, "opencode", "skills", "c-to-rust-plan");
+    // A user owns a skill named exactly like the bundled fixture, without a marker.
+    const globalSkills = path.join(globalHome, "opencode", "skills", FIXTURE_SKILL);
     fs.mkdirSync(globalSkills, { recursive: true });
     fs.writeFileSync(path.join(globalSkills, "SKILL.md"), "MY OWN SKILL");
     setup(projectDir); // no managed marker present → hands off
@@ -82,7 +94,7 @@ describe("setup — skills go to the global dir, not the project", () => {
   });
 
   it("cleans up a managed project skill copy left by an older version", () => {
-    const projSkill = path.join(projectDir, ".opencode", "skills", "c-to-rust-plan");
+    const projSkill = path.join(projectDir, ".opencode", "skills", "sample-skill");
     fs.mkdirSync(projSkill, { recursive: true });
     fs.writeFileSync(path.join(projSkill, "SKILL.md"), "old managed copy");
     fs.writeFileSync(path.join(projSkill, ".ralph-flow-managed"), "managed");

@@ -237,6 +237,6 @@ Per-project state lives under `.opencode/ralph-flow/`; user-global config lives 
     └── workflows/                  # Global custom workflows (all projects)
 ```
 
-**Workflow resolution** is `project → global → plugin built-in`. The built-ins (`loop`, `spec`, `c-to-rust`, `everything2rust`) resolve from the plugin's own `workflows/` directory, so they always reflect the installed version — they are never copied into your project or global dir (which would let them go stale). A same-named workflow in the project or global dir shadows the tiers below it.
+**Workflow resolution** is `project → global → plugin built-in`. The built-ins (`loop`, `spec`) resolve from the plugin's own `workflows/` directory, so they always reflect the installed version — they are never copied into your project or global dir (which would let them go stale). A same-named workflow in the project or global dir shadows the tiers below it.
 
-**Skills** aren't loaded by our engine — opencode's native `skill` tool discovers them from fixed filesystem locations. The bundled c-to-rust / everything2rust skills are synced into the global `~/.config/opencode/skills/` (each carrying a `.ralph-flow-managed` marker so your own same-named skills are never touched), keeping your project tree clean.
+**Skills** aren't loaded by our engine — opencode's native `skill` tool discovers them from fixed filesystem locations. Any skills the plugin bundles are synced into the global `~/.config/opencode/skills/` (each carrying a `.ralph-flow-managed` marker so your own same-named skills are never touched), keeping your project tree clean.

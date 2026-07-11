@@ -10,7 +10,7 @@ New to ralph-flow? Start here:
 
 1. [Installation](../README.md#-installation) — Install the plugin
 2. [Quick Start](../README.md#-quick-start) — Run your first workflow
-3. [Built-in Workflows](../README.md#built-in-workflows) — `loop`, `spec`, `c-to-rust`, `everything2rust`
+3. [Built-in Workflows](../README.md#built-in-workflows) — `loop`, `spec`
 
 ## Guides
 

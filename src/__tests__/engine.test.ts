@@ -300,9 +300,9 @@ steps:
     expect(bad!.desc).toContain("定义无效");
   });
 
-  it("ships the four built-in workflows", () => {
+  it("ships the built-in workflows", () => {
     const names = engine.listWorkflows().map((w) => w.name);
-    for (const n of ["loop", "spec", "c-to-rust", "everything2rust"]) {
+    for (const n of ["loop", "spec"]) {
       expect(names).toContain(n);
     }
   });

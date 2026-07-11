@@ -134,9 +134,9 @@ function cleanupProjectAgentCopy(projectDir: string): void {
  * Sync the plugin's bundled skills into opencode's GLOBAL skills dir
  * (~/.config/opencode/skills/), NOT the project — opencode's `skill` tool only
  * discovers skills from fixed filesystem locations, and the global one keeps
- * the user's project tree clean while making the c-to-rust / everything2rust
- * skills available in every project (the closest analogue to the Claude Code
- * plugin, which loads its skills straight from the plugin package).
+ * the user's project tree clean while making any bundled skills available in
+ * every project (the closest analogue to the Claude Code plugin, which loads
+ * its skills straight from the plugin package).
  *
  * Only dirs carrying the managed marker (or not existing yet) are written, so a
  * user's own skill with the same name is never clobbered. Managed copies are
