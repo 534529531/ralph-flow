@@ -27,12 +27,17 @@ type Client = any;
 export function createTools(engine: Engine, client: Client) {
   // ─── Tool: ralphflow_start ──────────────────────────────────────────────────
 
+  // One-time orientation shown at start so first-time users learn the rhythm:
+  // most of the run is autonomous (just wait); they are only pulled in at clearly
+  // announced handoff points (manual review, or a pause on repeated failure).
+  const ONBOARDING = `> 💡 **怎么配合它**：工作流会「自动执行 → 自动独立验证」一步步推进，**大多数时间你只需等待，不用管**。只有两类时刻会**明确提示「轮到你了」**：① 手动审查步骤，② 连续失败或异常导致的暂停。看到 🙋 就是需要你操作；看到 ⏳/🔍 就是自动进行中、静候即可。任何时候想调整方向，直接发消息就行。`;
+
   const ralphflow_start = tool({
-    description: "Start a workflow instance. Provide workflow name and task description. Multiple sessions can each run their own instance in the same project.",
+    description: "启动一个工作流实例。需提供工作流名称和任务描述。同一项目下多个会话可各自运行自己的实例。",
     args: {
-      workflow: tool.schema.string().describe("Workflow name (use ralphflow_list to see available workflows)"),
-      task: tool.schema.string().describe("Task description - what should be accomplished"),
-      extra_dirs: tool.schema.array(tool.schema.string()).optional().describe("Directories OUTSIDE the project that the task's source material lives in (absolute paths or ~/...). The independent CHECK verifier gets read access to them; each must exist or the start is refused."),
+      workflow: tool.schema.string().describe("工作流名称（用 ralphflow_list 查看可用工作流）"),
+      task: tool.schema.string().describe("任务描述——需要完成什么"),
+      extra_dirs: tool.schema.array(tool.schema.string()).optional().describe("任务源材料所在的、项目目录之外的目录（绝对路径或 ~/...）。独立的 CHECK 验证器会获得对它们的只读访问；每个目录必须存在，否则拒绝启动。"),
     },
     async execute({ workflow, task, extra_dirs }, context) {
       const sessionId = context.sessionID;
@@ -101,7 +106,7 @@ export function createTools(engine: Engine, client: Client) {
         engine.markPromptDelivered(engine.readState(instId)?.current_step || firstStep.id, instId);
         engine.logEvent(instId, "info", "workflow_start", { workflow, instance: instId });
         const stepsOverview = workflowDef.steps.map((s, i) => `  ${i + 1}. **${s.id}**: ${s.desc}${isSubWorkflowStep(s) ? ` (子工作流: ${s.workflow})` : ""}`).join("\n");
-        return `工作流 "${workflow}" 已启动（实例 \`${instId}\`）。\n\n任务：${task}\n\n## 步骤概览\n${stepsOverview}\n\n启动子工作流：**${firstStep.id}** → ${firstStep.workflow}${extraDirsNote}${othersNote}\n\n---\n\n${subResult.text}`;
+        return `工作流 "${workflow}" 已启动（实例 \`${instId}\`）。\n\n任务：${task}\n\n## 步骤概览\n${stepsOverview}\n\n启动子工作流：**${firstStep.id}** → ${firstStep.workflow}${extraDirsNote}${othersNote}\n\n${ONBOARDING}\n\n---\n\n${subResult.text}`;
       }
 
       engine.writeState(baseState, instId);
@@ -113,7 +118,7 @@ export function createTools(engine: Engine, client: Client) {
       }
       engine.markPromptDelivered(firstStep.id, instId);
       const stepsOverview = workflowDef.steps.map((s, i) => `  ${i + 1}. **${s.id}**: ${s.desc}${isSubWorkflowStep(s) ? ` (子工作流: ${s.workflow})` : ""}`).join("\n");
-      return `工作流 "${workflow}" 已启动（实例 \`${instId}\`）。\n\n任务：${task}\n\n## 步骤概览\n${stepsOverview}\n\n开始：**${firstStep.id}** - ${firstStep.desc}${extraDirsNote}${othersNote}\n\n---\n\n${engine.buildDoPrompt(instId, firstStep, task)}`;
+      return `工作流 "${workflow}" 已启动（实例 \`${instId}\`）。\n\n任务：${task}\n\n## 步骤概览\n${stepsOverview}\n\n开始：**${firstStep.id}** - ${firstStep.desc}${extraDirsNote}${othersNote}\n\n${ONBOARDING}\n\n---\n\n${engine.buildDoPrompt(instId, firstStep, task)}`;
     },
   });
 
@@ -127,9 +132,9 @@ export function createTools(engine: Engine, client: Client) {
   // the same visible messages as normal steps).
 
   const ralphflow_continue = tool({
-    description: "Approve a manual review / resume a paused workflow / attach to an interrupted instance. Does NOT run verification — that happens automatically when you go idle. (Optional instance id, unique prefix allowed.)",
+    description: "批准手动审查 / 恢复暂停的工作流 / 接管中断的实例。不会运行验证——验证会在你空闲时自动进行。（可选实例 id，支持唯一前缀。）",
     args: {
-      instance: tool.schema.string().optional().describe("Instance id (unique prefix allowed). Only needed to attach to a specific instance from a new session."),
+      instance: tool.schema.string().optional().describe("实例 id（支持唯一前缀）。仅在从新会话接管特定实例时需要。"),
     },
     async execute({ instance }, context) {
       const sessionId = context.sessionID;
@@ -312,9 +317,9 @@ export function createTools(engine: Engine, client: Client) {
   // ─── Tool: ralphflow_cancel ─────────────────────────────────────────────────
 
   const ralphflow_cancel = tool({
-    description: "Cancel a workflow instance and clean up its state (optional instance id, unique prefix allowed).",
+    description: "取消一个工作流实例并清理其状态（可选实例 id，支持唯一前缀）。",
     args: {
-      instance: tool.schema.string().optional().describe("Instance id (unique prefix allowed). Only needed to cancel a specific instance not bound to this session."),
+      instance: tool.schema.string().optional().describe("实例 id（支持唯一前缀）。仅在取消未绑定到本会话的特定实例时需要。"),
     },
     async execute({ instance }, context) {
       const sessionId = context.sessionID;
@@ -336,9 +341,9 @@ export function createTools(engine: Engine, client: Client) {
   // ─── Tool: ralphflow_status ─────────────────────────────────────────────────
 
   const ralphflow_status = tool({
-    description: "Show workflow status: the current session's instance, a specific instance, or an overview of all instances.",
+    description: "显示工作流状态：本会话的实例、指定实例，或所有实例的概览。",
     args: {
-      instance: tool.schema.string().optional().describe("Instance id (unique prefix allowed) to inspect a specific instance."),
+      instance: tool.schema.string().optional().describe("实例 id（支持唯一前缀），用于查看特定实例。"),
     },
     async execute({ instance }, context) {
       const sessionId = context.sessionID;
@@ -430,7 +435,7 @@ export function createTools(engine: Engine, client: Client) {
   // ─── Tool: ralphflow_list ───────────────────────────────────────────────────
 
   const ralphflow_list = tool({
-    description: "List all available workflows and active workflow instances.",
+    description: "列出所有可用的工作流和活跃的工作流实例。",
     args: {},
     async execute() {
       const workflows = engine.listWorkflows();
@@ -448,7 +453,7 @@ export function createTools(engine: Engine, client: Client) {
   // ─── Tool: ralphflow_doctor ─────────────────────────────────────────────────
 
   const ralphflow_doctor = tool({
-    description: "Diagnose all workflow definitions (project + plugin): validation errors with full reason lists, silently-skipped steps, unreachable steps, unresolvable template tokens, broken sub-workflow references and cycles, project/plugin shadowing, ignored non-workflow YAML files, and corrupt instance state. Read-only.",
+    description: "诊断所有工作流定义（项目 + 插件）：完整的校验错误列表、被静默跳过的步骤、不可达步骤、无法解析的模板记号、损坏的子工作流引用与环、项目/插件遮蔽、被忽略的非工作流 YAML，以及损坏的实例状态。只读。",
     args: {},
     async execute() {
       return engine.buildDoctorReport();

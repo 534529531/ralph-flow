@@ -243,6 +243,53 @@ steps:
     expect(problems.some((p) => p.includes("manual_step"))).toBe(true);
   });
 
+  it("hard-errors on manual_step referencing a composite (sub-workflow) step", () => {
+    writeProjectWorkflow("manual-composite", `
+manual_step: [nest]
+steps:
+  - id: nest
+    desc: nested
+    workflow: child
+    input: i
+    output: o
+    on_pass: done
+    on_fail: nest
+    max_fail_count: 1
+`);
+    const problems: string[] = [];
+    expect(engine.loadWorkflow("manual-composite", problems)).toBeNull();
+    expect(problems.some((p) => p.includes("子工作流") && p.includes("nest"))).toBe(true);
+  });
+
+  it("still accepts manual_step on a normal step alongside a composite step", () => {
+    writeProjectWorkflow("manual-mixed", `
+manual_step: [a]
+steps:
+  - id: a
+    desc: d
+    do: x
+    check: y
+    input: i
+    output: o
+    on_pass: nest
+    on_fail: a
+    max_fail_count: 1
+  - id: nest
+    desc: nested
+    workflow: child
+    input: i
+    output: o
+    on_pass: done
+    on_fail: nest
+    max_fail_count: 1
+`);
+    const problems: string[] = [];
+    const wf = engine.loadWorkflow("manual-mixed", problems);
+    expect(wf).not.toBeNull();
+    expect(wf!.manual_step).toEqual(["a"]);
+    expect(problems.length).toBe(0);
+  });
+
   it("parses manual_step in both list and comma-string form", () => {
     writeProjectWorkflow("m1", `
 manual_step: a

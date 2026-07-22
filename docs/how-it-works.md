@@ -1,174 +1,173 @@
-# How It Works
+# 工作原理
 
-[English](how-it-works.md) · [中文](how-it-works_CN.md)
 
-This document explains the internal mechanics of ralph-flow.
+本文档解释 ralph-flow 的内部工作机制。
 
 ---
 
-## Core Cycle
+## 核心循环
 
-Every workflow follows the same fundamental cycle:
+每个工作流都遵循同一个基本循环：
 
 ```mermaid
 flowchart TD
-    Start(["You run /ralphflow-start"]) --> State["Plugin creates a workflow instance"]
-    State --> DoPrompt["Tool returns the DO-phase prompt"]
-    DoPrompt --> AI["Session executes the task"]
-    AI -->|"done tag detected"| DoneTag["session.idle fires<br/>Driver detects the done tag"]
-    DoneTag --> Manual{"manual step?"}
-    Manual -->|"yes"| Review["📋 Session stops<br/>User reviews, then /ralphflow-continue"]
-    Manual -->|"no"| CallContinue["Driver instructs: call ralphflow_continue"]
+    Start(["运行 /ralphflow-start"]) --> State["插件创建一个工作流实例"]
+    State --> DoPrompt["工具返回 DO 阶段提示词"]
+    DoPrompt --> AI["会话执行任务"]
+    AI -->|"检测到 done 标记"| DoneTag["session.idle 触发<br/>驱动器检测 done 标记"]
+    DoneTag --> Manual{"手动步骤？"}
+    Manual -->|"是"| Review["📋 会话停下<br/>用户审查后 /ralphflow-continue"]
+    Manual -->|"否"| CallContinue["驱动器提示：调用 ralphflow_continue"]
     Review --> CheckPrompt
-    CallContinue --> CheckPrompt["ralphflow_continue creates an independent check session"]
-    CheckPrompt --> AICheck["Independent session verifies the result"]
-    AICheck -->|"true"| Pass["Engine reads on_pass"]
-    AICheck -->|"false"| Fail["Engine increments fail_count"]
-    AICheck -->|"infra error"| Infra["Pause in check phase<br/>continue re-runs only the check"]
-    Pass -->|"on_pass: done"| Complete["Instance completed<br/>Report archived, dir removed"]
-    Pass -->|"next step id"| DoPrompt
-    Fail -->|"below limit"| DoPrompt
-    Fail -->|"limit reached"| Pause["Workflow paused<br/>Waiting for /ralphflow-continue"]
-    Pause -->|user continues| DoPrompt
+    CallContinue --> CheckPrompt["ralphflow_continue 创建独立验证会话"]
+    CheckPrompt --> AICheck["独立会话验证结果"]
+    AICheck -->|"true"| Pass["引擎读取 on_pass"]
+    AICheck -->|"false"| Fail["引擎递增 fail_count"]
+    AICheck -->|"基础设施故障"| Infra["在 check 阶段暂停<br/>continue 只重跑验证"]
+    Pass -->|"on_pass: done"| Complete["实例完成<br/>归档报告，删除目录"]
+    Pass -->|"下一步 id"| DoPrompt
+    Fail -->|"未达上限"| DoPrompt
+    Fail -->|"达到上限"| Pause["工作流暂停<br/>等待 /ralphflow-continue"]
+    Pause -->|用户继续| DoPrompt
 ```
 
-### Phase Details
+### 阶段细节
 
-**DO Phase** (the working session):
-1. The `ralphflow_start` / `ralphflow_continue` tool returns the step's DO prompt
-2. The session executes the task (writes code, runs commands, produces the named output)
-3. When done, it outputs `<promise>done</promise>` on the last line
-4. The driver detects the tag via the `session.idle` event
+**DO 阶段**（工作会话）：
+1. `ralphflow_start` / `ralphflow_continue` 工具返回步骤的 DO 提示词
+2. 会话执行任务（写代码、跑命令、产出指定输出）
+3. 完成后在最后一行输出 `<promise>done</promise>`
+4. 驱动器通过 `session.idle` 事件检测标记
 
-**CHECK Phase** (an independent session):
-1. `ralphflow_continue` builds the step's check prompt and spins up a fresh verifier session (the read-only `ralph-check` agent)
-2. The verifier explores the project and evaluates the work against the check criteria — it never saw the DO conversation
-3. It returns `<promise-check>true</promise-check>` or `<promise-check>false</promise-check>` on its last line
-4. The engine processes the result and either advances (`on_pass`) or retries with the failure reason (`on_fail`)
-5. The verifier session is deleted
+**CHECK 阶段**（独立会话）：
+1. `ralphflow_continue` 构建步骤的检查提示词，拉起一个全新的验证会话（只读 `ralph-check` agent）
+2. 验证者自主探索项目，按检查依据评估工作成果 —— 它完全没看过 DO 阶段的对话
+3. 在最后一行返回 `<promise-check>true</promise-check>` 或 `<promise-check>false</promise-check>`
+4. 引擎处理结果，要么推进（`on_pass`），要么带失败原因重试（`on_fail`）
+5. 验证会话被删除
 
 ---
 
-## Independent Session Verification
+## 独立会话验证
 
-The CHECK phase uses an **independent session** to verify task completion, preventing self-review bias.
+CHECK 阶段用**独立会话**验证任务完成情况，杜绝自我审查偏差。
 
 ```mermaid
 sequenceDiagram
-    participant Main as Working Session
+    participant Main as 工作会话
     participant Tool as ralphflow_continue
-    participant Check as Verifier Session
+    participant Check as 验证会话
 
-    Main->>Tool: DO complete (done tag) → call ralphflow_continue
-    Tool->>Check: Create fresh session with the check prompt
-    Check->>Check: Independent verification (read-only)
-    Check->>Tool: Returns pass/fail + reason
-    Tool->>Main: Returns next-step prompt (or retry with reason)
-    Tool->>Check: Auto-delete session
+    Main->>Tool: DO 完成（done 标记）→ 调用 ralphflow_continue
+    Tool->>Check: 用检查提示词创建全新会话
+    Check->>Check: 独立验证（只读）
+    Check->>Tool: 返回 通过/失败 + 原因
+    Tool->>Main: 返回下一步提示词（或带原因重试）
+    Tool->>Check: 自动删除会话
 ```
 
-### Why independent sessions?
+### 为什么用独立会话？
 
-- **No self-review bias** — the checker has no memory of the implementation process
-- **Strict verification** — checks against criteria only, not against what the AI "intended"
-- **Clean context** — no accumulated context that could soften the judgment
+- **无自我审查偏差** —— 检查者对实现过程毫无记忆
+- **严格验证** —— 只对照检查依据，不迁就 AI"本来想做什么"
+- **干净上下文** —— 没有累积上下文软化判断
 
-### Verifier permissions
+### 验证者权限
 
-The CHECK phase uses the `ralph-check` agent by default:
+CHECK 阶段默认用 `ralph-check` agent：
 
-| Permission | Config | Description |
-|------------|--------|-------------|
-| `edit` | `deny` | The checker cannot modify code — it only reads and verifies |
-| `bash` | `allow` | Can run verification commands (tests, builds, file checks) |
-| `external_directory` | `allow` | Can read `extra_dirs` declared at start (source material outside the project) |
+| 权限 | 配置 | 说明 |
+|------|------|------|
+| `edit` | `deny` | 检查者不能改代码 —— 只读、只验证 |
+| `bash` | `allow` | 可运行验证命令（测试、构建、文件检查） |
+| `external_directory` | `allow` | 可读取启动时声明的 `extra_dirs`（项目外的源材料） |
 
-The plugin registers the `ralph-check` agent two ways — in-memory via its `config` hook, and as a file in the global `~/.config/opencode/agent/` (never your project) — so no manual configuration is needed.
+插件用两种方式注册 `ralph-check` agent —— 通过 `config` hook 在内存里注册，以及在全局 `~/.config/opencode/agent/` 写一份文件（不碰你的项目）—— 无需手动配置。
 
-To override, specify in your workflow YAML:
+如需覆盖，在工作流 YAML 中指定：
 
 ```yaml
 adversarial_check:
-  agent: build                 # use a different agent
-  model:                       # use a specific model
+  agent: build                 # 使用其他 agent
+  model:                       # 使用特定模型
     providerID: anthropic
     modelID: claude-haiku-4-5
-  system_prompt: |             # extra system prompt for the checker
-    You are a strict code reviewer.
-  timeout_ms: 3600000          # capped at 1 hour
+  system_prompt: |             # 给检查者的额外 system prompt
+    你是一个严格的代码审查者。
+  timeout_ms: 3600000          # 上限 1 小时
 ```
 
-The `model` field also accepts a `"provider/model"` string. A bare model name (e.g. `sonnet`) cannot be resolved and falls back to the agent's default model — `/ralphflow-doctor` warns about this.
+`model` 字段也接受 `"provider/model"` 字符串。裸模型名（如 `sonnet`）无法解析，会回退到 agent 的默认模型 —— `/ralphflow-doctor` 会警告。
 
-### Infrastructure vs work failures
+### 基础设施故障 vs 工作故障
 
-If the verifier session itself can't run (API error, timeout, session-create failure), that says **nothing** about the quality of the work. The engine does **not** count it as a step failure and does **not** send the working session back to redo finished work. Instead it pauses in the check phase; the next `/ralphflow-continue` re-runs **only** the verification.
-
----
-
-## Manual Review Gates
-
-Steps listed in a workflow's `manual_step` pause **after DO completes but before verification**. When the done tag is detected on such a step, the driver does *not* drive the model forward — it stops the session with a 📋 message and waits. The user's `/ralphflow-continue` is the approval that starts the independent verification. If the user asks for changes, the session makes them and emits `<promise>done</promise>` again — the gate re-arms.
+如果验证会话本身跑不起来（API 错误、超时、会话创建失败），这**不能**说明工作成果的质量。引擎**不**把它计入步骤失败，也**不**让工作会话回去重做已完成的工作。它在 check 阶段暂停；下一次 `/ralphflow-continue` **只**重跑验证。
 
 ---
 
-## Multi-Step Flow & Sub-Workflows
+## 手动审查门
 
-When a check passes, the engine reads `on_pass` and transitions to the next step's DO phase. When it fails, it reads `on_fail` — either retrying the same step (with failure context) or jumping to a recovery step.
-
-A step can delegate to another workflow via `workflow:` instead of `do`/`check`. The parent state is pushed onto a per-instance stack; when the sub-workflow completes, the engine pops back and advances the parent. Nesting is capped at depth 5, and cycles are detected by `/ralphflow-doctor`.
-
-### Failure context
-
-When a step fails, the retry DO prompt carries:
-- The verifier's exact failure reason
-- The current retry count and `max_fail_count`
-
-This helps the working session fix the actual problem instead of repeating the failed approach.
+工作流 `manual_step` 里列出的步骤在 **DO 完成后、验证开始前**暂停。当这类步骤检测到 done 标记时，驱动器**不**驱动模型继续 —— 而是用 📋 消息停下会话等待。用户的 `/ralphflow-continue` 是启动独立验证的批准。用户要改，会话就改，然后再次输出 `<promise>done</promise>` —— 审查门重新武装。
 
 ---
 
-## Multi-Instance Model
+## 多步骤流程与子工作流
 
-One plugin process serves every session of a project. Each `ralphflow_start` creates an isolated **instance**:
+检查通过时，引擎读取 `on_pass` 进入下一步的 DO 阶段。失败时读取 `on_fail` —— 要么带失败上下文重试当前步，要么跳到恢复步骤。
+
+步骤可以用 `workflow:` 代替 `do`/`check` 委托给另一个工作流。父状态被压入每实例的栈；子工作流完成后引擎弹出并推进父级。嵌套上限 5 层，循环由 `/ralphflow-doctor` 检测。
+
+### 失败上下文
+
+步骤失败时，重试的 DO 提示词携带：
+- 验证者给出的具体失败原因
+- 当前重试次数和 `max_fail_count`
+
+这帮助工作会话去修真正的问题，而不是重复失败的做法。
+
+---
+
+## 多实例模型
+
+一个插件进程服务项目的所有会话。每次 `ralphflow_start` 创建一个隔离的**实例**：
 
 ```mermaid
 flowchart LR
-    S1["Session A"] -->|owns| I1["instance loop-...-a1b2"]
-    S2["Session B"] -->|owns| I2["instance spec-...-c3d4"]
+    S1["会话 A"] -->|拥有| I1["实例 loop-...-a1b2"]
+    S2["会话 B"] -->|拥有| I2["实例 spec-...-c3d4"]
     I1 --- D1[".../instances/loop-...-a1b2/"]
     I2 --- D2[".../instances/spec-...-c3d4/"]
 ```
 
-- One session drives at most one instance; parallel sessions each drive their own.
-- The driver only ever acts on the instance whose `session_id` matches the idling session — parallel sessions and the verifier session never interfere.
-- Any session's `/ralphflow-continue` can take an instance over (there is no session-liveness probe, so ownership is advisory). See [Commands → Instance model](commands.md#instance-model).
+- 一个会话最多驱动一个实例；多个并行会话各驱动各的。
+- 驱动器只作用于 `session_id` 与空闲会话匹配的实例 —— 并行会话和验证会话互不干扰。
+- 任何会话的 `/ralphflow-continue` 都可接管某个实例（没有会话存活探测，所有权是建议性的）。见 [命令 → 实例模型](commands.md#实例模型)。
 
 ---
 
-## Session Events
+## 会话事件
 
-The plugin hooks opencode's session events to drive workflows:
+插件挂接 opencode 的会话事件来驱动工作流：
 
-| Event | Trigger | Action |
-|-------|---------|--------|
-| `session.idle` | Session finishes responding | Detect the done tag, drive the workflow / keep-alive |
-| `session.compacted` | Context was compacted | Re-drive with the cached DO prompt |
-| `session.error` (aborted) | User interrupted the run | Pause the instance |
-| `session.deleted` | Session removed | Pause the instance |
+| 事件 | 触发时机 | 动作 |
+|------|----------|------|
+| `session.idle` | 会话响应结束 | 检测 done 标记，驱动工作流 / 保活 |
+| `session.compacted` | 上下文被压缩 | 用缓存的 DO 提示词重新驱动 |
+| `session.error`（aborted） | 用户中断了运行 | 暂停实例 |
+| `session.deleted` | 会话被删除 | 暂停实例（变成孤儿） |
 
-### Tag detection
+### 标记检测
 
-- `<promise>done</promise>` — DO phase complete (detected on the last line or within the last 100 chars; ignored inside code fences/inline code)
-- `<promise-check>true|false</promise-check>` — CHECK verdict (must occupy the verifier's last line)
+- `<promise>done</promise>` —— DO 阶段完成（在最后一行或最后 100 字符内检测；代码围栏/行内代码里的忽略）
+- `<promise-check>true|false</promise-check>` —— CHECK 结论（必须独占验证者的最后一行）
 
-Tags are case-insensitive and tolerate whitespace.
+标记大小写不敏感，容忍空白差异。
 
 ---
 
-## State Management
+## 状态管理
 
-Each instance's state lives in `.opencode/ralph-flow/instances/<id>/state.json`:
+每个实例的状态存放在 `.opencode/ralph-flow/instances/<id>/state.json`：
 
 ```json
 {
@@ -179,20 +178,20 @@ Each instance's state lives in `.opencode/ralph-flow/instances/<id>/state.json`:
   "fail_count": 0,
   "user_task": "...",
   "paused": false,
-  "session_id": "<owning session id>",
+  "session_id": "<属主会话 id>",
   "instance_id": "loop-260710120000-ab12"
 }
 ```
 
-Writes are atomic (temp file + rename), and a corrupt/invalid file is backed up rather than trusted. The plugin manages these files — do not edit them manually.
+写入是原子的（临时文件 + rename），损坏/非法文件会被备份而非信任。这些文件由插件管理 —— 不要手动编辑。
 
-Interrupted **pre-2.0** workflows (`ralph-flow.local.md`) are migrated into this layout on first startup.
+中断的 **1.x** 工作流（`ralph-flow.local.md`）会在首次启动时迁移到这个布局。
 
 ---
 
-## Logging
+## 日志
 
-Per-instance events are logged to `.opencode/ralph-flow/instances/<id>/logs/execution.log` in JSON Lines format (rotated at 10 MB):
+每实例事件记录到 `.opencode/ralph-flow/instances/<id>/logs/execution.log`，JSON Lines 格式（10 MB 轮转）：
 
 ```jsonl
 {"ts":"...","level":"info","event":"workflow_start","workflow":"loop","instance":"loop-...-ab12"}
@@ -202,41 +201,41 @@ Per-instance events are logged to `.opencode/ralph-flow/instances/<id>/logs/exec
 {"ts":"...","level":"info","event":"workflow_end","workflow":"loop"}
 ```
 
-See [Commands Reference](commands.md#log-events) for the full list of events.
+完整事件列表见 [命令参考](commands.md#日志事件)。
 
 ---
 
-## File Structure
+## 文件结构
 
-Per-project state lives under `.opencode/ralph-flow/`; user-global config lives under `~/.config/opencode/`.
+项目级状态在 `.opencode/ralph-flow/` 下；用户全局配置在 `~/.config/opencode/` 下。
 
 ```
-<project>/.opencode/
+<项目>/.opencode/
 └── ralph-flow/
     ├── instances/
-    │   └── <id>/                   # One directory per workflow instance
-    │       ├── state.json          # Workflow state (do NOT edit)
-    │       ├── state-stack.json    # Sub-workflow nesting stack
-    │       ├── artifacts-dir        # Name of this instance's artifacts dir
-    │       ├── .do-prompt-cache     # Current DO prompt (keep-alive re-injects)
-    │       ├── .manual-gate         # Manual review markers
+    │   └── <id>/                   # 每个工作流实例一个目录
+    │       ├── state.json          # 工作流状态（勿手改）
+    │       ├── state-stack.json    # 子工作流嵌套栈
+    │       ├── artifacts-dir        # 本实例产出目录的名字
+    │       ├── .do-prompt-cache     # 当前 DO 提示词（保活重注入）
+    │       ├── .manual-gate         # 手动审查标记
     │       └── logs/
     │           ├── execution.log
     │           └── step-records.json
     ├── artifacts/
-    │   └── <task>-<suffix>/        # Deliverables — survive completion
+    │   └── <任务摘要>-<后缀>/       # 交付物 —— 完成后保留
     ├── reports/
-    │   └── <id>-final-report.md    # Archived on completion/cancel
-    └── workflows/                  # Project-only custom workflows (highest priority)
+    │   └── <id>-final-report.md    # 完成/取消时归档
+    └── workflows/                  # 仅本项目的自定义工作流（最高优先级）
 
-~/.config/opencode/                 # user-global — NOT in your project tree
+~/.config/opencode/                 # 用户全局 —— 不在你的项目目录里
 ├── agent/
-│   └── ralph-check.md              # Read-only verifier agent (auto-written, managed)
-├── skills/                         # Bundled skills synced here (auto, managed marker)
+│   └── ralph-check.md              # 只读验证 agent（自动写入，带 managed 标记）
+├── skills/                         # 自带 skill 同步到这里（自动，带 managed 标记）
 └── ralph-flow/
-    └── workflows/                  # Global custom workflows (all projects)
+    └── workflows/                  # 全局自定义工作流（所有项目）
 ```
 
-**Workflow resolution** is `project → global → plugin built-in`. The built-ins (`loop`, `spec`) resolve from the plugin's own `workflows/` directory, so they always reflect the installed version — they are never copied into your project or global dir (which would let them go stale). A same-named workflow in the project or global dir shadows the tiers below it.
+**工作流解析顺序**是 `项目 → 全局 → 插件内置`。内置工作流（`loop`、`spec`）从插件自己的 `workflows/` 目录解析，因此始终反映已安装版本 —— 绝不拷贝进项目或全局目录（拷贝会导致过期）。项目或全局目录里的同名工作流会遮蔽下层。
 
-**Skills** aren't loaded by our engine — opencode's native `skill` tool discovers them from fixed filesystem locations. Any skills the plugin bundles are synced into the global `~/.config/opencode/skills/` (each carrying a `.ralph-flow-managed` marker so your own same-named skills are never touched), keeping your project tree clean.
+**Skill** 不由我们的引擎加载 —— opencode 原生的 `skill` 工具从固定文件位置发现它们。插件自带的 skill（若有）同步到全局 `~/.config/opencode/skills/`（每个带 `.ralph-flow-managed` 标记，你自己的同名 skill 绝不被动），这样你的项目目录保持干净。

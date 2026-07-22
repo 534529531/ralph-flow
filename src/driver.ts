@@ -149,7 +149,7 @@ export async function runCheckAndAdvance(
   // (builds/tests can take minutes); its only hard bound is this timeout.
   const timeoutMin = Math.max(1, Math.round((workflow.adversarial_check?.timeout_ms || DEFAULT_ADVERSARIAL_TIMEOUT_MS) / 60000));
   await injectPrompt(client, sessionId,
-    `## 🔍 CHECK 阶段\n\n正在用**独立只读会话**验证步骤 \`${step.id}\`（独立于本对话，最长 ${timeoutMin} 分钟后超时）。\n\n${visibleSections.join("\n\n")}`,
+    `## 🔍 CHECK 阶段 · 自动验证中\n\n正在用**独立只读会话**验证步骤 \`${step.id}\`（与本对话隔离运行，最长 ${timeoutMin} 分钟）。\n\n⏳ **现在无需你操作，请等待结果。** 这一步由独立会话完成，在这里发消息不会加快它、也不影响判定。\n> 迟迟没有结果时：\`/ralphflow-status\` 看进度，或 \`/ralphflow-cancel\` 取消。\n\n---\n\n以下是它正在核对的依据（供你了解，不用回复）：\n\n${visibleSections.join("\n\n")}`,
     true);
 
   let checkResult;
@@ -161,7 +161,7 @@ export async function runCheckAndAdvance(
     if (st && st.active && st.current_phase === "check" && st.current_step === state.current_step && st.workflow_name === state.workflow_name) {
       engine.writeState({ ...st, paused: true, pause_reason: "check_error", last_failure_reason: `对抗性检查崩溃：${err.message}` }, instId);
     }
-    await injectPrompt(client, sessionId, `## ⚠️ 验证未能运行\n\n对抗性检查崩溃：${err.message}\n\n工作流已暂停（不计入失败次数，已完成的工作保持原样）。问题解决后运行 \`/ralphflow-continue\` 重新验证。`, true);
+    await injectPrompt(client, sessionId, `## ⚠️ 验证未能运行 · 🙋 轮到你了\n\n对抗性检查崩溃：${err.message}\n\n这是**验证程序自身**的问题，不是你工作成果的问题——本次不计入失败次数，已完成的工作保持原样。\n\n👉 处理后运行 \`/ralphflow-continue\` 即可重新验证（无需重做任务），或 \`/ralphflow-cancel\` 放弃。`, true);
     return;
   }
 
@@ -182,7 +182,7 @@ export async function runCheckAndAdvance(
     engine.writeState({ ...cur, paused: true, pause_reason: "check_error", last_failure_reason: checkResult.reason }, instId);
     engine.logEvent(instId, "warn", "workflow_paused", { workflow: cur.workflow_name, step: cur.current_step, reason: "check_infra_error" });
     await injectPrompt(client, sessionId,
-      `## ⚠️ 验证未能运行\n\n${checkResult.reason}\n\n这是验证进程自身的问题（额度/API/超时），**不是**工作成果的问题：本次不计入失败次数，已完成的工作无需重做。问题解决后运行 \`/ralphflow-continue\` 直接重新验证。`,
+      `## ⚠️ 验证未能运行 · 🙋 轮到你了\n\n${checkResult.reason}\n\n这是验证进程自身的问题（额度/API/超时），**不是**你工作成果的问题：本次不计入失败次数，已完成的工作无需重做。\n\n👉 问题解决后运行 \`/ralphflow-continue\` 直接重新验证，或 \`/ralphflow-cancel\` 放弃。`,
       true);
     return;
   }
@@ -371,7 +371,7 @@ export async function handleSessionIdle(
       if (fileExists(manualStepMarker)) {
         writeFileSafe(manualGateMarker, Date.now().toString());
         await injectPrompt(client, sessionId,
-          `📋 手动步骤 \`${stateStep}\` 已完成，等待你的审查。\n\n- 满意后运行 /ralphflow-continue 进入独立验证\n- 需要修改直接在对话里说明，修改完成后会再次提示审查\n- 放弃可运行 /ralphflow-cancel`,
+          `## 🙋 轮到你审查\n\n手动步骤 \`${stateStep}\` 已完成，**现在停下等你**——你有三个选择：\n\n- ✅ **满意** → 运行 \`/ralphflow-continue\`，进入独立验证并继续\n- ✏️ **要改** → 直接在对话里说要改什么，模型会修改，改完再次提示你审查\n- 🗑️ **放弃** → 运行 \`/ralphflow-cancel\`\n\n在你做出选择前，工作流会一直停在这里，你可以放心地跟模型来回讨论。`,
           true);
         return;
       }
@@ -395,6 +395,19 @@ export async function handleSessionIdle(
       if (currentStep && !isSubWorkflowStep(currentStep)) {
         await runCheckAndAdvance(client, engine, sessionId, mine.id, workflow!, currentStep as NormalStepDef, state);
       }
+      return;
+    }
+
+    // ── Manual step, DO phase, no done tag yet: human-in-the-loop, stay silent ─
+    // A manual step exists so a human stays in control while the work is done.
+    // If the model stops here without a done tag — e.g. it paused to ask the user
+    // a clarifying question — an auto keep-alive nudge would bulldoze that very
+    // exchange. Do NOT drive: let the user reply (or nudge it themselves). The
+    // step still advances the moment the model emits done (→ Case 1 arms the
+    // review gate); the initial DO prompt was already delivered by the tool /
+    // transition that entered this step, so nothing here is starved of input.
+    if (statePhase === "do" && fileExists(manualStepMarker)) {
+      removeFile(postToolMarker);
       return;
     }
 
@@ -424,7 +437,7 @@ export async function handleSessionIdle(
       // model acts again).
       if (reinjectCount > MAX_DO_REINJECT && !hasToolUse) {
         await injectPrompt(client, sessionId,
-          `## ⚠️ Ralph Flow 已停止自动驱动\n\n步骤 \`${stateStep}\` 的 DO 阶段已连续 ${reinjectCount} 次收到继续提示但未产出完成标记，会话已停止，请人工介入：\n1. 查看任务卡在哪里，补充信息后让模型继续\n2. 若任务实际已完成，运行 /ralphflow-continue 进入验证\n3. 运行 /ralphflow-cancel 取消工作流`,
+          `## ⏸ 已暂停自动驱动 · 🙋 轮到你了\n\n步骤 \`${stateStep}\` 的 DO 阶段连续 ${reinjectCount} 次被催促仍未完成，为避免空转已停下等你：\n\n1. 🔍 看看卡在哪，补充信息后**直接发消息**让模型继续\n2. ✅ 若其实已经做完 → 运行 \`/ralphflow-continue\` 进入验证\n3. 🗑️ 运行 \`/ralphflow-cancel\` 取消\n\n（工作流没有真正暂停——你或模型一有动作就会自动恢复驱动。）`,
           true);
         return;
       }

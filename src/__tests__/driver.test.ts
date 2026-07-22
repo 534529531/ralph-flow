@@ -165,6 +165,17 @@ afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
+describe("start onboarding", () => {
+  it("the start message teaches turn-taking (auto vs. 轮到你了)", async () => {
+    const tools = createTools(engine, makeClient());
+    const res = await tools.ralphflow_start.execute(
+      { workflow: "wf", task: "build a thing" }, { sessionID: "sess-onboard" } as any);
+    const text = typeof res === "string" ? res : (res as any).output;
+    expect(text).toContain("怎么配合它"); // orientation blurb present
+    expect(text).toContain("轮到你了");   // names the user-turn signal
+  });
+});
+
 describe("handleSessionIdle", () => {
   it("the driver drives via promptAsync (non-blocking), not the blocking prompt", async () => {
     // Regression for the stall bug: a driving injection must NOT block on the
@@ -219,6 +230,7 @@ describe("handleSessionIdle", () => {
     // The CHECK phase message shows the full verifier context: user task, what DO
     // was supposed to produce (task desc, input, expected output), and check criteria.
     expect(texts.some((t) => t.includes("🔍 CHECK 阶段") && t.includes("检查依据")
+      && t.includes("无需你操作") // turn-taking guidance: wait, don't interact
       && t.includes("用户需求") && t.includes("task")
       && t.includes("Do 阶段任务") && t.includes("build the thing")
       && t.includes("user input") && t.includes("thing.md"))).toBe(true);
@@ -271,8 +283,8 @@ describe("handleSessionIdle", () => {
     lastAssistantText = "prepared\n<promise>done</promise>";
     await handleSessionIdle(makeClient(), engine, "sess-1");
     expect(injected.length).toBe(1);
-    expect(injected[0].text).toContain("📋");
-    expect(injected[0].text).toContain("等待你的审查");
+    expect(injected[0].text).toContain("轮到你审查");
+    expect(injected[0].text).toContain("/ralphflow-continue");
     expect(injected[0].noReply).toBe(true); // user-facing, must NOT drive the model
     expect(fs.existsSync(path.join(engine.getInstanceDir(instId), ".manual-gate"))).toBe(true);
   });
@@ -286,6 +298,30 @@ describe("handleSessionIdle", () => {
     await handleSessionIdle(makeClient(), engine, "sess-1");
     expect(injected.length).toBe(0);
     expect(fs.existsSync(path.join(engine.getInstanceDir(instId), ".manual-gate"))).toBe(true);
+  });
+
+  it("manual step, DO phase, model asks a question (no done tag) → no auto-nudge", async () => {
+    // Regression: during a manual step's DO phase the human is in the loop. If the
+    // model pauses to ask the user a clarifying question BEFORE emitting the done
+    // tag, the driver must stay silent — a keep-alive nudge here would bulldoze the
+    // exchange the manual step exists for.
+    const instId = startInstance("review"); // review ∈ manual_step, marker armed
+    lastAssistantText = "在准备审查材料前，你想要 markdown 还是 PDF 格式？"; // a question, no done tag
+    await handleSessionIdle(makeClient(), engine, "sess-1");
+    expect(injected.length).toBe(0); // stayed silent, did not nudge
+    // no gate yet (no done tag) and still in DO — nothing was mutated
+    expect(fs.existsSync(path.join(engine.getInstanceDir(instId), ".manual-gate"))).toBe(false);
+    expect(engine.readState(instId)!.current_phase).toBe("do");
+  });
+
+  it("a NORMAL step in the same spot DOES still get nudged (fix is manual-only)", async () => {
+    // Guard against over-suppression: the silence is scoped to manual steps. A
+    // normal step that stops without a done tag must still be kept alive.
+    startInstance("build"); // build ∉ manual_step
+    lastAssistantText = "先想一下该怎么做"; // no done tag, no tool use
+    await handleSessionIdle(makeClient(), engine, "sess-1");
+    expect(injected.length).toBe(1);
+    expect(injected[0].text).toContain("DO 阶段");
   });
 
   it("done tag while phase is check → ignored, no stale marker", async () => {
@@ -321,7 +357,7 @@ describe("handleSessionIdle", () => {
     injected = [];
     await handleSessionIdle(makeClient(), engine, "sess-1");
     expect(injected.length).toBe(1);
-    expect(injected[0].text).toContain("已停止自动驱动");
+    expect(injected[0].text).toContain("已暂停自动驱动");
     expect(injected[0].noReply).toBe(true);
     // Workflow itself is NOT paused
     expect(engine.readState(engine.listInstances()[0].id)!.paused).toBe(false);
@@ -386,7 +422,7 @@ describe("handleSessionIdle", () => {
     const instId = startInstance("review"); // review is in manual_step
     lastAssistantText = "prepared\n<promise>done</promise>";
     await handleSessionIdle(makeClient(), engine, "sess-1");
-    expect(injected.some((i) => i.text.includes("📋") && i.text.includes("等待你的审查"))).toBe(true);
+    expect(injected.some((i) => i.text.includes("轮到你审查") && i.text.includes("/ralphflow-continue"))).toBe(true);
     // no check ran → still in do, no verdict message
     expect(engine.readState(instId)!.current_phase).toBe("do");
     expect(injected.some((i) => i.text.includes("检查结果"))).toBe(false);

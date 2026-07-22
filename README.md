@@ -2,46 +2,45 @@
 
 # ralph-flow
 
-**Workflow automation plugin for [opencode](https://opencode.ai)**
+**[opencode](https://opencode.ai) 工作流自动化插件**
 
-Make AI actually follow complex workflows — execute, verify, retry until done.
+让 AI 真正遵循复杂工作流 —— 执行、验证、重试，直到完成。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![opencode plugin](https://img.shields.io/badge/opencode-plugin-green.svg)](https://opencode.ai)
 
-[English](README.md) · [中文](README_CN.md)
 
 </div>
 
 ---
 
-## The Problem
+## 问题
 
-You tell an AI: "Implement user auth, write tests, update docs, and make sure all tests pass."
+你对 AI 说："实现用户认证，写测试，更新文档，确保所有测试通过。"
 
-What actually happens:
-- AI writes some code and stops
-- Tests are never run
-- Docs are forgotten
-- No verification that anything actually works
+实际发生的是：
+- AI 写了点代码就停了
+- 测试从来没跑过
+- 文档被遗忘
+- 没有任何验证
 
-**Even when you ask AI to verify itself, it fails:**
-- The AI is both player and referee — it lowers the bar for its own work
-- It's overconfident — "looks good to me" without actually checking
-- It blames external factors — "the test environment is broken", "existing code has issues", "dependencies are outdated"
+**即使你让 AI 自己验证，也不行：**
+- AI 既当运动员又当裁判 —— 对自己的工作降低标准
+- 过度自信 —— 没实际检查就说"看起来没问题"
+- 甩锅外部因素 —— "测试环境坏了"、"现有代码有问题"、"依赖过时了"
 
-**AI doesn't follow multi-step workflows.** It loses context, skips steps, and never truly verifies its own work.
+**AI 不会遵循多步骤工作流。** 它丢上下文、跳步骤、从不真正验证自己的工作。
 
-## The Solution
+## 解决方案
 
-ralph-flow forces AI to follow structured workflows with **independent verification at every step**. It's not just prompt engineering — it's a state machine that won't let the AI skip steps or claim "done" without proof.
+ralph-flow 强制 AI 遵循结构化工作流，**每一步都有独立验证**。这不只是提示词工程 —— 而是一个状态机，不允许 AI 跳过步骤，也不允许没有证据就宣称"完成"。
 
-Each step runs two phases:
+每个步骤分两个阶段：
 
-- **DO** — the working session executes the task and ends with a `<promise>done</promise>` tag
-- **CHECK** — an **independent session** (a read-only verifier that saw none of the DO conversation) re-verifies the work against the step's criteria
+- **DO** —— 工作会话执行任务，最后一行输出 `<promise>done</promise>` 标记
+- **CHECK** —— 一个**独立会话**（只读验证者，完全没看过 DO 阶段的对话）按步骤的检查依据重新验证
 
-Pass → next step. Fail → retry, carrying the failure reason. Too many failures → pause for you.
+通过 → 下一步。失败 → 带着失败原因重试。失败太多次 → 暂停等你介入。
 
 ---
 
@@ -49,51 +48,51 @@ Pass → next step. Fail → retry, carrying the failure reason. Too many failur
 
 | | ralph-loop | ralph-flow |
 |---|---|---|
-| **Type** | Prompt technique | opencode plugin |
-| **How it works** | Instructions in system prompt | Event-driven state machine |
-| **Verification** | Self-review (biased) | Independent session (unbiased) |
-| **Multi-step** | Single loop | Multi-step pipelines with branching |
-| **State management** | None | Full state tracking, pause/resume, takeover |
-| **Parallelism** | One at a time | One instance per session, in parallel |
-| **Failure handling** | Retry blindly | Retry with failure context |
-| **Human gates** | None | `manual_step` review before verification |
-| **Logging** | None | JSON Lines execution logs + reports |
-| **Setup** | Copy prompt to AGENTS.md | Install plugin, auto-registers commands |
+| **类型** | 提示词技巧 | opencode 插件 |
+| **工作方式** | 系统提示词中的指令 | 事件驱动的状态机 |
+| **验证方式** | 自我审查（有偏差） | 独立会话（无偏差） |
+| **多步骤** | 单循环 | 多步骤流水线，支持分支 |
+| **状态管理** | 无 | 完整状态追踪，暂停/恢复，接管 |
+| **并行** | 一次一个 | 每会话一个实例，可并行 |
+| **失败处理** | 盲目重试 | 携带失败上下文重试 |
+| **人工审查门** | 无 | `manual_step` 在验证前停下审查 |
+| **日志** | 无 | JSON Lines 执行日志 + 报告 |
+| **配置** | 复制提示词到 AGENTS.md | 安装插件，自动注册命令 |
 
-**ralph-flow is the evolution of ralph-loop** — same core idea (execute → verify → retry), built as a proper plugin with state management, independent verification, and multi-step support.
+**ralph-flow 是 ralph-loop 的进化版** —— 相同的核心理念（执行 → 验证 → 重试），但作为正式插件构建，具备状态管理、独立验证和多步骤支持。
 
 ---
 
-## Built-in Workflows
+## 内置工作流
 
-### loop — Auto-loop execution
+### loop — 检查点驱动循环
 
-> Based on [opencode-ralph-loop](https://github.com/charfeng1/opencode-ralph-loop)
+> 基于 [opencode-ralph-loop](https://github.com/charfeng1/opencode-ralph-loop) 用工作流重新实现
 
-> **Best for**: open-ended tasks, bug fixes, feature development where the scope is clear.
+> **适用场景**：开放式任务、Bug 修复、范围明确的功能开发。
 
-Decomposes your request into a verifiable checkpoint list, then keeps executing until every checkpoint passes. Each cycle runs DO → CHECK, passing only when the review criteria are met.
+先把你的需求拆解成可验证的检查点清单，再持续执行直到每个检查点通过。每轮执行 DO → CHECK 循环，满足审查标准才算通过。
 
 ```
-/ralphflow-start loop "Build a user authentication module with JWT and refresh tokens"
+/ralphflow-start loop "用 JWT 和 refresh token 实现用户认证模块"
 ```
 
 ```mermaid
 flowchart LR
-    C["1. checkpoints<br/>(decompose into a<br/>verifiable list)"] --> L["2. loop<br/>(execute until every<br/>checkpoint passes)"]
+    C["1. checkpoints<br/>（拆解为可验证清单）"] --> L["2. loop<br/>（执行到每个检查点通过）"]
     L --> Done["done"]
 ```
 
-### spec — Spec-driven development pipeline
+### spec — 规范驱动开发流水线
 
-> Based on [OpenSpec](https://github.com/Fission-AI/OpenSpec)
+> 基于 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 用工作流重新实现
 
-> **Best for**: structured feature work that benefits from requirements → design → implementation.
+> **适用场景**：需要需求 → 设计 → 实现的结构化功能开发。
 
-A seven-step pipeline from proposal to archive. Each step produces an artifact that feeds the next, with independent verification at every gate.
+七步流水线，从提议到归档。每一步产出构件后流入下一步，并在每个关口独立验证。
 
 ```
-/ralphflow-start spec "Add user authentication with OAuth2 support"
+/ralphflow-start spec "添加 OAuth2 用户认证功能"
 ```
 
 ```mermaid
@@ -108,51 +107,51 @@ flowchart LR
 
 ---
 
-## How It Works
+## 工作原理
 
 ```mermaid
 flowchart TD
-    Start(["/ralphflow-start"]) --> Inst["Create a workflow instance"]
-    Inst --> DO["DO phase: session executes the step"]
-    DO --> DoneTag{"done tag?"}
-    DoneTag -->|"keep working"| DO
-    DoneTag -->|"detected"| Manual{"manual step?"}
-    Manual -->|"yes"| Review["📋 Stop — user reviews,<br/>then /ralphflow-continue"]
-    Manual -->|"no"| Continue["call ralphflow_continue"]
+    Start(["/ralphflow-start"]) --> Inst["创建工作流实例"]
+    Inst --> DO["DO 阶段: 会话执行步骤"]
+    DO --> DoneTag{"有 done 标记？"}
+    DoneTag -->|"继续干活"| DO
+    DoneTag -->|"检测到"| Manual{"手动步骤？"}
+    Manual -->|"是"| Review["📋 停下 —— 用户审查，<br/>然后 /ralphflow-continue"]
+    Manual -->|"否"| Continue["调用 ralphflow_continue"]
     Review --> CHECK
-    Continue --> CHECK["CHECK phase:<br/>independent read-only session verifies"]
-    CHECK --> Pass{"Pass?"}
-    Pass -->|"yes"| Next{"on_pass"}
-    Pass -->|"no"| Fail["fail_count + 1"]
-    Pass -->|"infra error"| Infra["Pause in check phase —<br/>continue re-runs only the check"]
-    Next -->|"next step"| DO
-    Next -->|"done"| Complete["Workflow complete<br/>Report archived"]
-    Fail -->|"below limit"| DO
-    Fail -->|"limit reached"| Pause["Paused — /ralphflow-continue to resume"]
-    Pause -->|"user resumes"| DO
+    Continue --> CHECK["CHECK 阶段:<br/>独立只读会话验证"]
+    CHECK --> Pass{"通过？"}
+    Pass -->|"是"| Next{"on_pass"}
+    Pass -->|"否"| Fail["失败计数 + 1"]
+    Pass -->|"基础设施故障"| Infra["在 check 阶段暂停 ——<br/>continue 只重跑验证"]
+    Next -->|"下一步"| DO
+    Next -->|"done"| Complete["工作流完成<br/>归档报告"]
+    Fail -->|"未超限"| DO
+    Fail -->|"达到上限"| Pause["暂停 —— /ralphflow-continue 恢复"]
+    Pause -->|"用户恢复"| DO
 ```
 
-The CHECK phase uses a **separate session** with no memory of the implementation — it judges strictly against the criteria, not against what the AI "intended" to do. If verification itself can't run (API error, timeout), that's an infrastructure failure: it does **not** burn a retry — the workflow pauses in check phase and the next `/ralphflow-continue` re-runs only the verification.
+CHECK 阶段使用一个对实现过程毫无记忆的**独立会话** —— 它严格对照检查依据判断，而不是迁就 AI"本来想做什么"。如果验证本身跑不起来（API 错误、超时），那是基础设施故障：**不**消耗重试次数 —— 工作流在 check 阶段暂停，下一次 `/ralphflow-continue` 只重跑验证。
 
 ---
 
-## ✨ Features
+## ✨ 特性
 
-- 🔄 **Auto-loop with failure context** — retries carry the verifier's exact failure reason so the AI fixes the real problem instead of repeating it
-- 🔍 **Independent verification** — a separate read-only session prevents self-review bias; configure agent, model, timeout via `adversarial_check`
-- 🧩 **Multi-instance** — every session runs its own workflow instance in the same project, in parallel, fully isolated
-- 📋 **Human review gates** — `manual_step` stops the session after DO, before verification, so you review first
-- 📦 **Natural language YAML** — `do`, `check`, `input`, `output` are plain descriptions, no DSL to learn
-- 🔀 **Branching & recovery** — route failures to specific steps (`on_fail: fix-build`), not just blind retry
-- 🪆 **Sub-workflows** — compose workflows from reusable parts (nesting to depth 5)
-- 🩺 **Doctor & create** — `/ralphflow-doctor` diagnoses definitions, `/ralphflow-create` designs one with you
-- 📊 **Execution logs & reports** — JSON Lines logging with per-step traces and archived final reports
+- 🔄 **带失败上下文的自动循环** —— 重试携带验证者给出的具体失败原因，让 AI 去修真正的问题而不是重复它
+- 🔍 **独立验证** —— 独立的只读会话杜绝自我审查偏差；通过 `adversarial_check` 配置 agent、模型、超时
+- 🧩 **多实例并行** —— 同一项目里每个会话跑自己的工作流实例，并行、完全隔离
+- 📋 **人工审查门** —— `manual_step` 在 DO 完成后、验证前停下会话，让你先审查
+- 📦 **自然语言 YAML** —— `do`、`check`、`input`、`output` 都是白话描述，没有 DSL 要学
+- 🔀 **分支与恢复** —— 把失败路由到特定步骤（`on_fail: fix-build`），不只是盲目重试
+- 🪆 **子工作流** —— 用可复用组件组合工作流（嵌套上限 5 层）
+- 🩺 **诊断与创建** —— `/ralphflow-doctor` 诊断定义，`/ralphflow-create` 和你一起设计
+- 📊 **执行日志与报告** —— JSON Lines 日志带逐步骤追踪，归档最终报告
 
 ---
 
-## 📦 Installation
+## 📦 安装
 
-Add to your opencode config (`~/.config/opencode/opencode.json` for global, or `opencode.json` in project root):
+添加到你的 opencode 配置（全局 `~/.config/opencode/opencode.json`，或项目根目录的 `opencode.json`）：
 
 ```json
 {
@@ -160,7 +159,7 @@ Add to your opencode config (`~/.config/opencode/opencode.json` for global, or `
 }
 ```
 
-Or clone locally:
+或本地克隆：
 
 ```bash
 git clone https://github.com/534529531/ralph-flow.git ~/.config/opencode/plugins/ralph-flow
@@ -168,93 +167,93 @@ cd ~/.config/opencode/plugins/ralph-flow
 npm install && npm run build
 ```
 
-> On first load, the plugin registers its commands, the read-only `ralph-check` agent, and syncs its bundled skills into the global `~/.config/opencode/skills/` (not your project).
+> 首次加载时，插件会注册命令、只读的 `ralph-check` agent，并把自带 skills 同步到全局 `~/.config/opencode/skills/`（不是你的项目）。
 
-### Upgrading from 1.x
+### 从 1.x 升级
 
-Pull and rebuild. On first startup 2.0 automatically migrates an interrupted 1.x workflow (`ralph-flow.local.md`) into the new multi-instance layout — reattach with `/ralphflow-continue`. Tool names changed from `ralphflow-start` to `ralphflow_start` (slash commands stay `/ralphflow-start`).
-
----
-
-## 🚀 Quick Start
-
-```
-/ralphflow-start loop "Build a user authentication module with JWT and refresh tokens"
-```
-
-| Command | What it does |
-|---------|--------------|
-| `/ralphflow-status` | Show current step, phase, fail count (or all instances) |
-| `/ralphflow-continue` | Approve a manual review · resume a paused workflow · attach to an interrupted instance |
-| `/ralphflow-cancel` | Cancel and archive the final report |
-| `/ralphflow-list` | List available workflows and active instances |
-| `/ralphflow-doctor` | Diagnose all workflow definitions |
-| `/ralphflow-create` | Interactively design a custom workflow |
+拉取代码重新构建。2.0 首次启动时自动把 1.x 中断的工作流（`ralph-flow.local.md`）迁移到新的多实例布局 —— 用 `/ralphflow-continue` 重新接管。工具名从 `ralphflow-start` 改为 `ralphflow_start`（斜杠命令不变，仍是 `/ralphflow-start`）。
 
 ---
 
-## 🛠️ Custom Workflows
+## 🚀 快速开始
 
-Drop a `.yaml` file in one of two places, or run `/ralphflow-create` to design and validate one interactively:
+```
+/ralphflow-start loop "用 JWT 和 refresh token 实现用户认证模块"
+```
 
-- `.opencode/ralph-flow/workflows/` — **this project only**
-- `~/.config/opencode/ralph-flow/workflows/` — **global**, available in every project and untouched by plugin updates
+| 命令 | 作用 |
+|------|------|
+| `/ralphflow-status` | 显示当前步骤、阶段、失败计数（或全部实例） |
+| `/ralphflow-continue` | 批准手动审查 · 恢复暂停的工作流 · 接管中断的实例 |
+| `/ralphflow-cancel` | 取消并归档最终报告 |
+| `/ralphflow-list` | 列出可用工作流和活跃实例 |
+| `/ralphflow-doctor` | 诊断所有工作流定义 |
+| `/ralphflow-create` | 交互式设计自定义工作流 |
 
-Resolution order is **project → global → built-in**; a same-named workflow at an earlier tier shadows the later ones.
+---
+
+## 🛠️ 自定义工作流
+
+把 `.yaml` 文件放到下面两个位置之一，或运行 `/ralphflow-create` 交互式设计并验证：
+
+- `.opencode/ralph-flow/workflows/` —— **仅本项目**
+- `~/.config/opencode/ralph-flow/workflows/` —— **全局**，所有项目可用，插件更新不会覆盖
+
+解析顺序是**项目 → 全局 → 内置**；同名工作流靠前的层遮蔽靠后的。
 
 ```yaml
-description: Build, test, and document a feature
+description: 实现、测试并文档化一个功能
 
 steps:
   - id: analyze
-    desc: Task analysis
-    do: Analyze the requirements and produce a design document.
-    input: User requirements
+    desc: 任务分析
+    do: 分析需求，产出设计文档。
+    input: 用户需求
     output: "design.md"
-    check: Open design.md; verify it covers the data model, API surface, and error handling.
+    check: 打开 design.md，核对是否覆盖数据模型、API 形态、错误处理。
     on_pass: execute
     on_fail: analyze
     max_fail_count: 3
 
   - id: execute
-    desc: Implementation
-    do: Implement the design. Run the full test suite until it is green.
+    desc: 实现
+    do: 按设计实现，跑全量测试直到全绿。
     input: design.md
-    output: Working code with passing tests
-    check: Run the test suite yourself; verify the code matches design.md.
+    output: 测试通过的可工作代码
+    check: 自己跑测试套件；核对代码与 design.md 一致。
     on_pass: done
     on_fail: execute
     max_fail_count: 5
 ```
 
-> **Every normal step requires** `id`, `desc`, `do`, `check`, `input`, `output`, `on_pass`, `on_fail`, `max_fail_count`. A step missing any of these is **silently skipped** — run `/ralphflow-doctor` to catch that.
+> **每个普通步骤都必须有** `id`、`desc`、`do`、`check`、`input`、`output`、`on_pass`、`on_fail`、`max_fail_count`。缺任何一个的步骤会被**静默跳过** —— 用 `/ralphflow-doctor` 抓出来。
 
-**Completion tags:** `<promise>done</promise>`, `<promise-check>true/false</promise-check>`
+**完成标记：** `<promise>done</promise>`、`<promise-check>true/false</promise-check>`
 
-See the [Custom Workflows Guide](docs/custom-workflows.md) for branching, recovery, sub-workflows, and advanced patterns.
+分支、恢复、子工作流等高级模式见[自定义工作流指南](docs/custom-workflows.md)。
 
 ---
 
-## 📚 Documentation
+## 📚 文档
 
-| Topic | Description |
-|-------|-------------|
-| [Documentation Home](docs/README.md) | Start here for a guided reading order |
-| [Custom Workflows](docs/custom-workflows.md) | Create workflows, configure verification, nesting |
-| [How It Works](docs/how-it-works.md) | Architecture, events, state, file structure |
-| [Commands Reference](docs/commands.md) | All commands and log events |
-| [SYNC.md](SYNC.md) | Structural mapping to the Claude Code sibling plugin |
+| 主题 | 说明 |
+|------|------|
+| [文档主页](docs/README.md) | 从这里开始，有引导式阅读顺序 |
+| [自定义工作流](docs/custom-workflows.md) | 创建工作流、配置验证、嵌套 |
+| [工作原理](docs/how-it-works.md) | 架构、事件、状态、文件结构 |
+| [命令参考](docs/commands.md) | 所有命令和日志事件 |
+| [SYNC.md](SYNC.md) | 与 Claude Code 姊妹插件的结构映射 |
 
 ---
 
 ## 📝 License
 
-MIT — see [LICENSE](LICENSE).
+MIT —— 见 [LICENSE](LICENSE)。
 
 ---
 
 <div align="center">
 
-**Built for [opencode](https://opencode.ai)** · [Report issue](https://github.com/534529531/ralph-flow/issues)
+**为 [opencode](https://opencode.ai) 打造** · [反馈问题](https://github.com/534529531/ralph-flow/issues)
 
 </div>

@@ -56,7 +56,7 @@ const RalphFlowPlugin: Plugin = async ({ client, directory }) => {
       input.agent = input.agent ?? {};
       if (!input.agent["ralph-check"]) {
         input.agent["ralph-check"] = {
-          description: "Ralph Flow check phase agent - read-only verification",
+          description: "Ralph Flow 检查阶段 agent —— 只读验证",
           mode: "all",
           // Read-only: deny edits and mutating shell (allow-list parity with the
           // Claude version's --allowedTools). See RALPH_CHECK_AGENT_PERMISSION.
@@ -66,6 +66,24 @@ const RalphFlowPlugin: Plugin = async ({ client, directory }) => {
     },
 
     tool: tools,
+
+    // Full-automation permission gate. Ralph Flow drives the model unattended,
+    // so an interactive permission prompt would stall the loop forever. Auto-allow
+    // permissions, but ONLY for the session that owns an active ralph-flow instance
+    // — never for arbitrary sessions, and never for the read-only verifier session
+    // (its agent-level denies in RALPH_CHECK_AGENT_PERMISSION must stand so the
+    // checker can't mutate the workspace it is judging).
+    "permission.ask": async (input: any, output: { status: "ask" | "deny" | "allow" }) => {
+      try {
+        const sessionId: string | undefined = input?.sessionID;
+        if (!sessionId) return;
+        if (isCheckSession(sessionId)) return; // read-only verifier: leave its gate untouched
+        const ownsActiveInstance = engine.listInstances().some((i) => i.owner === sessionId);
+        if (ownsActiveInstance) output.status = "allow";
+      } catch {
+        // Never let a plugin error turn into a denied/hung permission prompt.
+      }
+    },
 
     event: async ({ event }) => {
       const props: any = (event as any).properties || {};

@@ -1,47 +1,46 @@
-# ralph-flow Documentation
+# ralph-flow 文档
 
-[English](README.md) · [中文](README_CN.md)
 
-Welcome to the ralph-flow documentation. This guide helps you get the most out of workflow automation in opencode.
+欢迎阅读 ralph-flow 文档。本指南帮助你充分利用 opencode 的工作流自动化功能。
 
-## Getting Started
+## 快速开始
 
-New to ralph-flow? Start here:
+第一次使用 ralph-flow？从这里开始：
 
-1. [Installation](../README.md#-installation) — Install the plugin
-2. [Quick Start](../README.md#-quick-start) — Run your first workflow
-3. [Built-in Workflows](../README.md#built-in-workflows) — `loop`, `spec`
+1. [安装方式](../README.md#-安装) — 安装插件
+2. [快速开始](../README.md#-快速开始) — 运行你的第一个工作流
+3. [内置工作流](../README.md#内置工作流) — `loop`、`spec`
 
-## Guides
+## 指南
 
-Step-by-step guides for common tasks:
+常见任务的分步指南：
 
-| Guide | Description |
-|-------|-------------|
-| [Custom Workflows](custom-workflows.md) | Create your own workflows with YAML |
-| [Artifacts & Templates](custom-workflows.md#artifacts-directory--template-variables) | Where deliverables go, and the one template token |
-| [Nested Workflows](custom-workflows.md#nested-workflows) | Compose workflows from reusable parts |
-| [Verification Config](custom-workflows.md#adversarial_check) | Configure independent verification sessions |
+| 指南 | 说明 |
+|------|------|
+| [自定义工作流](custom-workflows.md) | 用 YAML 创建自己的工作流 |
+| [产出目录与模板](custom-workflows.md#产出目录与模板变量) | 交付物放哪、唯一的模板记号 |
+| [工作流嵌套](custom-workflows.md#工作流嵌套) | 组合可复用的工作流组件 |
+| [验证配置](custom-workflows.md#adversarial_check) | 配置独立验证会话 |
 
-## Reference
+## 参考
 
-Technical reference documentation:
+技术参考文档：
 
-| Reference | Description |
-|-----------|-------------|
-| [How It Works](how-it-works.md) | Architecture, session events, state, multi-instance model |
-| [Commands](commands.md) | All slash commands, tools, and log events |
-| [File Structure](how-it-works.md#file-structure) | Where everything lives |
-| [SYNC.md](../SYNC.md) | Structural mapping to the Claude Code sibling plugin |
+| 参考 | 说明 |
+|------|------|
+| [工作原理](how-it-works.md) | 架构、会话事件、状态、多实例模型 |
+| [命令参考](commands.md) | 所有 slash 命令、工具和日志事件 |
+| [文件结构](how-it-works.md#文件结构) | 文件存放位置 |
+| [SYNC.md](../SYNC.md) | 与 Claude Code 姊妹插件的结构映射 |
 
-## Reading Order
+## 阅读顺序
 
-**For beginners:**
-1. README (features, installation, quick start)
-2. Custom Workflows (create your first workflow, then run `/ralphflow-doctor`)
-3. Commands (learn all available commands)
+**初学者：**
+1. README（功能、安装、快速开始）
+2. 自定义工作流（创建第一个工作流，然后跑 `/ralphflow-doctor`）
+3. 命令参考（了解所有可用命令）
 
-**For advanced users:**
-1. Custom Workflows → Nested Workflows (compose complex pipelines)
-2. Custom Workflows → adversarial_check (optimize verification)
-3. How It Works (understand the internals and the multi-instance model)
+**进阶用户：**
+1. 自定义工作流 → 工作流嵌套（组合复杂流水线）
+2. 自定义工作流 → adversarial_check（优化验证）
+3. 工作原理（了解内部机制和多实例模型）

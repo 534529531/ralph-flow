@@ -1,5 +1,6 @@
 node_modules/
 dist/
+.claude/
 .opencode/ralph-flow/node_modules/
 .opencode/ralph-flow/package.json
 .opencode/ralph-flow/package-lock.json

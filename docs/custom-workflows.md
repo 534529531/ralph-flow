@@ -1,250 +1,249 @@
-# Custom Workflows
+# 自定义工作流
 
-[English](custom-workflows.md) · [中文](custom-workflows_CN.md)
 
-Create your own workflow by placing a `.yaml` file in one of two locations, or run `/ralphflow-create` to design and validate one interactively:
+把 `.yaml` 文件放到下面两个位置之一即可定义自己的工作流，或运行 `/ralphflow-create` 交互式设计并验证：
 
-| Location | Scope |
-|----------|-------|
-| `.opencode/ralph-flow/workflows/` | **This project only** |
-| `~/.config/opencode/ralph-flow/workflows/` | **Global** — every project, and survives plugin updates |
+| 位置 | 作用范围 |
+|------|----------|
+| `.opencode/ralph-flow/workflows/` | **仅本项目** |
+| `~/.config/opencode/ralph-flow/workflows/` | **全局** —— 所有项目可用，插件更新不会覆盖 |
 
-Resolution order is **project → global → plugin built-in**: a same-named workflow at an earlier tier **shadows** the later ones (so you can override a built-in globally, or override your global one per-project). The global tier is what you want for online installs, where the plugin package itself is a managed location you can't edit.
+解析顺序是**项目 → 全局 → 插件内置**：同名工作流靠前的层**遮蔽**靠后的（所以你可以在全局覆盖某个内置，或在某个项目覆盖你的全局版本）。线上安装时插件包本身是不可编辑的托管目录，这时全局层就是你想要的。
 
-> After writing a workflow, run **`/ralphflow-doctor`**. It catches the traps below before they bite: a step missing a required field is **silently skipped** (the rest of the workflow still runs), unreachable steps never execute, a workflow with no path to `done` never finishes, and unresolvable `{{...}}` tokens reach the prompt verbatim.
+> 写完后运行 **`/ralphflow-doctor`**。它会在下面这些坑咬到你之前抓出来：缺必填字段的步骤会被**静默跳过**（其余工作流照常运行）、不可达步骤永不执行、没有通往 `done` 的路径的工作流永远无法完成、无法解析的 `{{...}}` 记号原样进入提示词。
 
 ---
 
-## Quick Example
+## 快速示例
 
 ```yaml
-description: Analyze then implement
+description: 先分析再实现
 
 steps:
   - id: analyze
-    desc: Task analysis
-    do: Analyze the requirements and produce a design document.
-    input: User requirements
+    desc: 任务分析
+    do: 分析需求，产出设计文档。
+    input: 用户需求
     output: "design.md"
-    check: Open design.md; verify it is complete and technically sound.
+    check: 打开 design.md，核对是否完整、技术上合理。
     on_pass: execute
     on_fail: analyze
     max_fail_count: 3
 
   - id: execute
-    desc: Implementation
-    do: Implement the design. Run the tests until green.
+    desc: 实现
+    do: 按设计实现，跑测试直到全绿。
     input: design.md
-    output: Working code with passing tests
-    check: Run the test suite yourself and verify the implementation matches design.md.
+    output: 测试通过的可工作代码
+    check: 自己跑测试套件，核对实现与 design.md 一致。
     on_pass: done
     on_fail: execute
     max_fail_count: 5
 ```
 
-Execution starts at the **first** step. `on_pass: done` finishes the workflow.
+执行从**第一个**步骤开始。`on_pass: done` 结束工作流。
 
 ---
 
-## Step Fields Reference
+## 步骤字段参考
 
-### Normal Steps
+### 普通步骤
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `id` | ✅ | Unique step identifier |
-| `desc` | ✅ | Human-readable description (shown in status) |
-| `do` | ✅ | Task prompt — what the working session should do |
-| `input` | ✅ | What this step consumes |
-| `output` | ✅ | What this step must produce |
-| `check` | ✅ | Verification recipe run by the independent session |
-| `on_pass` | ✅ | Next step id on success, or `"done"` to finish |
-| `on_fail` | ✅ | Step id to retry/fall back to (`"done"` NOT allowed) |
-| `max_fail_count` | ✅ | Max CHECK failures before pausing (number ≥ 1, per step) |
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `id` | ✅ | 步骤唯一标识 |
+| `desc` | ✅ | 人类可读描述（状态里会显示） |
+| `do` | ✅ | 任务提示词 —— 工作会话要做什么 |
+| `input` | ✅ | 本步骤消费什么 |
+| `output` | ✅ | 本步骤必须产出什么 |
+| `check` | ✅ | 独立会话执行的验证配方 |
+| `on_pass` | ✅ | 通过后的下一步 id，或 `"done"` 表示完成 |
+| `on_fail` | ✅ | 失败后重试/回退到的步骤 id（不允许 `"done"`） |
+| `max_fail_count` | ✅ | 暂停前的最大 CHECK 失败次数（数字 ≥ 1，每步独立） |
 
-> ⚠️ **Every field above is required, per step.** A step missing any one of them is **silently dropped** while the rest of the workflow still runs. Never omit `input`/`output`. `/ralphflow-doctor` reports every dropped step.
+> ⚠️ **上面每个字段都是逐步骤必填的。** 缺任何一个的步骤会被**静默丢弃**，其余工作流照常运行。绝不要省略 `input`/`output`。`/ralphflow-doctor` 会报告每个被丢弃的步骤。
 
-### Sub-Workflow Steps
+### 子工作流步骤
 
-Instead of `do`/`check`, a step can call another workflow:
+步骤可以用 `workflow:` 代替 `do`/`check` 调用另一个工作流：
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `id` | ✅ | Unique step identifier |
-| `desc` | ✅ | Human-readable description |
-| `workflow` | ✅ | Name of the workflow to invoke |
-| `input` | ✅ | What this step consumes |
-| `output` | ✅ | What this step must produce |
-| `inputs` | ❌ | Key-value pairs merged into the sub-workflow's task |
-| `on_pass` | ✅ | Next step id on success, or `"done"` |
-| `on_fail` | ✅ | Step id to retry/fall back to |
-| `max_fail_count` | ✅ | Max failures before pausing |
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `id` | ✅ | 步骤唯一标识 |
+| `desc` | ✅ | 人类可读描述 |
+| `workflow` | ✅ | 要调用的工作流名称 |
+| `input` | ✅ | 本步骤消费什么 |
+| `output` | ✅ | 本步骤必须产出什么 |
+| `inputs` | ❌ | 合并进子工作流任务的键值对 |
+| `on_pass` | ✅ | 通过后的下一步 id，或 `"done"` |
+| `on_fail` | ✅ | 失败后重试/回退到的步骤 id |
+| `max_fail_count` | ✅ | 暂停前的最大失败次数 |
 
-See [Nested Workflows](#nested-workflows) for details.
-
----
-
-## Artifacts Directory & Template Variables
-
-Every workflow instance gets an isolated deliverables directory —
-`.opencode/ralph-flow/artifacts/<task>-<suffix>/` — that **survives** workflow completion. Every DO and CHECK prompt automatically carries a 产出目录 (artifacts directory) section pointing at it, so:
-
-- Write **bare filenames** in `output` (e.g. `"design.md"`, `"plan.json"`). Both the working session and the verifier know to put/find them in the artifacts dir.
-- You do **not** need template variables. The engine resolves exactly one token, `{{artifacts_dir}}` (byte-exact — no spaces inside the braces), and you rarely need even that.
-- Any other `{{...}}` token reaches the prompt unresolved. `/ralphflow-doctor` flags it.
+详见[工作流嵌套](#工作流嵌套)。
 
 ---
 
-## Workflow-Level Options
+## 产出目录与模板变量
+
+每个工作流实例有一个隔离的交付物目录 ——
+`.opencode/ralph-flow/artifacts/<任务摘要>-<后缀>/` —— 工作流结束后**保留**。每个 DO 和 CHECK 提示词都自动携带指向它的 产出目录 一节，所以：
+
+- 在 `output` 里写**裸文件名**（如 `"design.md"`、`"plan.json"`）。工作会话和验证者都知道往产出目录里放/找。
+- 你**不需要**模板变量。引擎只解析一个记号 `{{artifacts_dir}}`（字节精确 —— 花括号内不能有空格），而且你几乎用不到它。
+- 其他任何 `{{...}}` 记号会原样进入提示词。`/ralphflow-doctor` 会标记出来。
+
+---
+
+## 工作流级选项
 
 ### `description`
 
-A one-line description shown in `/ralphflow-list`. Optional (falls back to the first step's `desc`).
+`/ralphflow-list` 里显示的一句话描述。可选（不填则回退到第一个步骤的 `desc`）。
 
 ```yaml
-description: Build, test, and document a feature
+description: 实现、测试并文档化一个功能
 ```
 
 ### `manual_step`
 
-Step IDs that require **human review**. List form or comma-string, both work:
+需要**人工审查**的步骤 id。列表或逗号字符串两种写法都行：
 
 ```yaml
 manual_step: [design]
-# or
+# 或
 manual_step: design, review
 ```
 
-A manual step pauses **after its DO phase completes, but before verification**: the session stops with a 📋 message so you can review the work. The workflow does **not** advance until you run `/ralphflow-continue` — that command **is** the approval that starts the independent verification. If you ask for changes, the session makes them and re-emits `<promise>done</promise>`, re-arming the gate.
+手动步骤在 **DO 完成后、验证开始前**暂停：会话用 📋 消息停下，好让你审查工作成果。你运行 `/ralphflow-continue` 之前工作流**不会**推进 —— 这条命令**就是**启动独立验证的批准。你要改，会话就改并再次输出 `<promise>done</promise>`，审查门重新武装。
 
-> A `manual_step` entry that doesn't match a real step id is a **hard error** — the workflow won't load. A typo must never silently skip a review gate you're relying on.
+> `manual_step` 里对不上真实步骤 id 的条目是**硬错误** —— 工作流无法加载。打错字绝不能静默跳过你指望的审查门。
 
-**Complete example** — the id in `manual_step` must match a step in `steps`:
+**完整示例** —— `manual_step` 里的 id 必须对应 `steps` 里的某个步骤：
 
 ```yaml
-description: Design-gated feature development
+description: 带设计审查门的功能开发
 
-manual_step: [design]        # pause for review after the design step's DO
+manual_step: [design]        # design 步骤 DO 完成后停下审查
 
 steps:
   - id: design
-    desc: Technical design
-    do: Write design.md covering the data model, API surface, and error handling.
-    input: User requirements
+    desc: 技术设计
+    do: 写 design.md，覆盖数据模型、API 形态、错误处理。
+    input: 用户需求
     output: "design.md"
-    check: Open design.md; verify it covers the data model, API surface, and error handling.
+    check: 打开 design.md，核对是否覆盖数据模型、API 形态、错误处理。
     on_pass: implement
     on_fail: design
     max_fail_count: 3
 
   - id: implement
-    desc: Implementation
-    do: Implement the approved design. Run the tests until green.
+    desc: 实现
+    do: 按批准的设计实现，跑测试直到全绿。
     input: design.md
-    output: Working code with passing tests
-    check: Run the test suite yourself; verify the code matches design.md.
+    output: 测试通过的可工作代码
+    check: 自己跑测试套件，核对代码与 design.md 一致。
     on_pass: done
     on_fail: implement
     max_fail_count: 5
 ```
 
-What happens at runtime:
+运行时会发生什么：
 
-1. The **design** step runs its DO phase and ends with `<promise>done</promise>`.
-2. Because `design` is in `manual_step`, the session **stops** with a 📋 message instead of verifying — you read `design.md`.
-3. You run `/ralphflow-continue`. *Now* the independent verifier checks `design.md`; on pass the workflow advances to **implement**.
-4. **implement** is a normal step, so it verifies automatically without stopping for you.
+1. **design** 步骤跑 DO 阶段，最后输出 `<promise>done</promise>`。
+2. 因为 `design` 在 `manual_step` 里，会话**停下**并显示 📋 消息，而不是去验证 —— 你去读 `design.md`。
+3. 你运行 `/ralphflow-continue`。*这时*独立验证者才检查 `design.md`；通过后工作流推进到 **implement**。
+4. **implement** 是普通步骤，会自动验证，不会为你停下。
 
 ### `adversarial_check`
 
-Configure the independent verification session. By default the CHECK phase uses the read-only `ralph-check` agent with its default model. Customize any of:
+配置独立验证会话。默认 CHECK 阶段用只读的 `ralph-check` agent 和它的默认模型。可自定义其中任意项：
 
 ```yaml
 adversarial_check:
-  agent: build                      # a different agent (default: ralph-check, read-only)
-  model:                            # verifier model (object form)
+  agent: build                      # 换一个 agent（默认 ralph-check，只读）
+  model:                            # 验证模型（对象形式）
     providerID: anthropic
     modelID: claude-haiku-4-5
-  # model: anthropic/claude-haiku-4-5   # "provider/model" string form also works
-  system_prompt: |                  # extra system prompt for the checker
-    You are a strict code reviewer. Check that:
-    - all functions have error handling
-    - no hardcoded secrets
-    - tests cover edge cases
-  timeout_ms: 1800000               # check timeout in ms; default 900000 (15 min), capped at 3600000 (1 h)
+  # model: anthropic/claude-haiku-4-5   # "provider/model" 字符串形式也可以
+  system_prompt: |                  # 给检查者的额外 system prompt
+    你是一个严格的代码审查员。检查：
+    - 所有函数都有错误处理
+    - 没有硬编码密钥
+    - 测试覆盖边界情况
+  timeout_ms: 1800000               # 检查超时（毫秒）；默认 900000（15 分钟），上限 3600000（1 小时）
 ```
 
-| Field | Description | Default |
-|-------|-------------|---------|
-| `agent` | Which agent verifies | `ralph-check` (read-only) |
-| `model` | `{providerID, modelID}` object or `"provider/model"` string | Agent's default model |
-| `system_prompt` | Extra system prompt for the checker | Built-in verification prompt |
-| `timeout_ms` | Check timeout in ms (capped at `3600000`) | `900000` (15 min) |
+| 字段 | 说明 | 默认值 |
+|------|------|--------|
+| `agent` | 用哪个 agent 验证 | `ralph-check`（只读） |
+| `model` | `{providerID, modelID}` 对象或 `"provider/model"` 字符串 | agent 默认模型 |
+| `system_prompt` | 给检查者的额外 system prompt | 内置验证提示词 |
+| `timeout_ms` | 检查超时（毫秒，上限 `3600000`） | `900000`（15 分钟） |
 
-> A **bare** model name (e.g. `sonnet`, `Opus`) can't be resolved to a provider and silently falls back to the agent's default model — use the object form or a `"provider/model"` string. `/ralphflow-doctor` warns when it sees a bare name.
+> **裸**模型名（如 `sonnet`、`Opus`）无法解析到 provider，会静默回退到 agent 的默认模型 —— 请用对象形式或 `"provider/model"` 字符串。`/ralphflow-doctor` 看到裸名会警告。
 
-**Use cases:**
-- Use a **cheaper model** for verification (e.g. Haiku checking Sonnet's work)
-- Use a **stricter agent** that only reads, never writes
-- Customize the **system prompt** for domain-specific criteria
-- Increase the **timeout** for tasks that need longer verification
+**使用场景：**
+- 用**更便宜的模型**验证（如用 Haiku 检查 Sonnet 的工作）
+- 用**更严格、只读不写**的 agent
+- 为特定领域自定义 **system prompt**
+- 为需要更长验证的任务增大**超时**
 
 ---
 
-## Nested Workflows
+## 工作流嵌套
 
-Steps can invoke other workflows, enabling composition and reuse. A sub-workflow step still needs `input`/`output` (like every step).
+步骤可以调用其他工作流，实现组合与复用。子工作流步骤同样需要 `input`/`output`（和每个步骤一样）。
 
-### Basic Usage
+### 基本用法
 
 ```yaml
 # workflows/full-dev.yaml
 steps:
   - id: analyze
-    desc: Requirements analysis
-    workflow: analyze              # calls workflows/analyze.yaml
-    input: User requirements
-    output: analysis artifacts
+    desc: 需求分析
+    workflow: analyze              # 调用 workflows/analyze.yaml
+    input: 用户需求
+    output: 分析产物
     inputs:
-      task: "Analyze requirements"
+      task: "分析需求"
     on_pass: build
     on_fail: analyze
     max_fail_count: 3
 
   - id: build
-    desc: Implementation
-    workflow: build                # calls workflows/build.yaml
-    input: analysis artifacts
-    output: Working code
+    desc: 实现
+    workflow: build                # 调用 workflows/build.yaml
+    input: 分析产物
+    output: 可工作代码
     on_pass: done
     on_fail: build
     max_fail_count: 3
 ```
 
-### Passing Inputs
+### 传递输入
 
-Use `inputs` to pass parameters into the sub-workflow's task:
+用 `inputs` 向子工作流的任务传参：
 
 ```yaml
 steps:
   - id: analyze
-    desc: Analyze the feature
+    desc: 分析功能
     workflow: analyze
-    input: Feature request
-    output: design document
+    input: 功能请求
+    output: 设计文档
     inputs:
-      task: "Design the auth module"
-      context: "We use JWT with refresh tokens"
+      task: "设计认证模块"
+      context: "我们用带 refresh token 的 JWT"
     on_pass: done
     on_fail: analyze
     max_fail_count: 3
 ```
 
-The `inputs` are merged into the sub-workflow's `user_task`, so its sessions can read them.
+`inputs` 会合并进子工作流的 `user_task`，其会话可以读到。
 
-### Multi-Level Nesting
+### 多层嵌套
 
-Workflows can nest up to **5 levels deep**:
+工作流最多嵌套 **5 层**：
 
 ```
 full-dev.yaml
@@ -253,195 +252,195 @@ full-dev.yaml
             └── ...
 ```
 
-The engine keeps a per-instance state stack to preserve parent context during nesting; cycles are detected by `/ralphflow-doctor`.
+引擎为每个实例维护一个状态栈保存嵌套时的父级上下文；循环由 `/ralphflow-doctor` 检测。
 
-### How It Works
+### 工作原理
 
-1. The parent workflow reaches a sub-workflow step
-2. The parent state is pushed onto the stack
-3. The sub-workflow starts with combined context (inputs + original task)
-4. When the sub-workflow completes, the parent state is restored
-5. The parent continues based on the sub-workflow result (pass/fail)
-
----
-
-## Completion Tags
-
-Sessions signal completion with XML-like tags:
-
-| Phase | Tag | Meaning |
-|-------|-----|---------|
-| DO | `<promise>done</promise>` | Task finished |
-| CHECK | `<promise-check>true</promise-check>` | Passed |
-| CHECK | `<promise-check>false</promise-check>` | Failed |
-
-> Tags are case-insensitive and tolerate whitespace. The done tag must be on the last line (or within the last 100 chars); the check tag must occupy the verifier's last line. Tags inside code fences or inline code are ignored.
+1. 父工作流到达子工作流步骤
+2. 父状态被压入栈
+3. 子工作流以组合上下文（inputs + 原始任务）启动
+4. 子工作流完成后，父状态被恢复
+5. 父级根据子工作流结果（通过/失败）继续
 
 ---
 
-## Multi-Step Flow Design
+## 完成标记
 
-> Each example is a complete, valid workflow — every normal step includes `input` and `output`.
+会话用 XML 式标记表示完成：
 
-### Linear Flow
+| 阶段 | 标记 | 含义 |
+|------|------|------|
+| DO | `<promise>done</promise>` | 任务完成 |
+| CHECK | `<promise-check>true</promise-check>` | 通过 |
+| CHECK | `<promise-check>false</promise-check>` | 失败 |
 
-The simplest pattern — steps run in sequence:
+> 标记大小写不敏感、容忍空白。done 标记须在最后一行（或最后 100 字符内）；check 标记须独占验证者的最后一行。代码围栏或行内代码里的标记会被忽略。
+
+---
+
+## 多步骤流程设计
+
+> 下面每个示例都是完整、合法的工作流 —— 每个普通步骤都带 `input` 和 `output`。
+
+### 线性流程
+
+最简单的模式 —— 步骤顺序执行：
 
 ```yaml
 steps:
   - id: design
-    desc: Design phase
-    do: Create the technical design.
-    input: User requirements
+    desc: 设计阶段
+    do: 创建技术设计。
+    input: 用户需求
     output: "design.md"
-    check: Verify design.md is complete and sound.
+    check: 核对 design.md 是否完整、合理。
     on_pass: implement
     on_fail: design
     max_fail_count: 3
 
   - id: implement
-    desc: Implementation phase
-    do: Write code based on design.md.
+    desc: 实现阶段
+    do: 按 design.md 写代码。
     input: design.md
-    output: Working code
-    check: Run the tests and verify they pass.
+    output: 可工作代码
+    check: 跑测试并核对通过。
     on_pass: done
     on_fail: implement
     max_fail_count: 5
 ```
 
-### Branching Flow
+### 分支流程
 
-Steps jump to different steps based on the check result:
+根据检查结果跳到不同步骤：
 
 ```yaml
 steps:
   - id: analyze
-    desc: Analyze the problem
-    do: Determine whether this is a bug fix or a feature.
-    input: User report
-    output: "analysis.md classifying the task"
-    check: Is the classification in analysis.md justified by the report?
+    desc: 分析问题
+    do: 判断这是 bug 修复还是新功能。
+    input: 用户报告
+    output: "analysis.md（对任务的分类）"
+    check: analysis.md 的分类是否有报告依据支撑？
     on_pass: implement
     on_fail: clarify
     max_fail_count: 2
 
   - id: clarify
-    desc: Ask for clarification
-    do: Ask the user for the missing details and record their answers.
+    desc: 请求澄清
+    do: 向用户询问缺失细节并记录回答。
     input: analysis.md
-    output: "clarification.md with the answers"
-    check: Does clarification.md contain enough detail to proceed?
+    output: "clarification.md（含回答）"
+    check: clarification.md 是否含有足以推进的细节？
     on_pass: analyze
     on_fail: clarify
     max_fail_count: 3
 
   - id: implement
-    desc: Implement the fix
-    do: Write the code.
+    desc: 实现修复
+    do: 写代码。
     input: analysis.md
-    output: Working code
-    check: Does it build and pass the tests?
+    output: 可工作代码
+    check: 是否能构建并通过测试？
     on_pass: done
     on_fail: implement
     max_fail_count: 5
 ```
 
-### Recovery Flow
+### 恢复流程
 
-Use `on_fail` to route to a dedicated recovery step:
+用 `on_fail` 路由到专门的恢复步骤：
 
 ```yaml
 steps:
   - id: build
-    desc: Build the project
-    do: Run the build.
-    input: Source tree
-    output: Build artifacts
-    check: Did the build succeed?
+    desc: 构建项目
+    do: 运行构建。
+    input: 源码树
+    output: 构建产物
+    check: 构建成功了吗？
     on_pass: test
     on_fail: fix-build
     max_fail_count: 2
 
   - id: fix-build
-    desc: Fix build errors
-    do: Read the error output and fix the issues.
-    input: Build error output
-    output: A building source tree
-    check: Does the build pass now?
+    desc: 修复构建错误
+    do: 阅读错误输出并修复问题。
+    input: 构建错误输出
+    output: 能构建的源码树
+    check: 现在构建能过吗？
     on_pass: test
     on_fail: fix-build
     max_fail_count: 5
 
   - id: test
-    desc: Run tests
-    do: Execute the test suite.
-    input: Build artifacts
-    output: Test results
-    check: Do all tests pass?
+    desc: 跑测试
+    do: 执行测试套件。
+    input: 构建产物
+    output: 测试结果
+    check: 所有测试都通过吗？
     on_pass: done
     on_fail: fix-tests
     max_fail_count: 3
 
   - id: fix-tests
-    desc: Fix failing tests
-    do: Analyze the failures and fix them.
-    input: Test failure output
-    output: A passing test suite
-    check: Do the tests pass now?
+    desc: 修复失败的测试
+    do: 分析失败并修复。
+    input: 测试失败输出
+    output: 通过的测试套件
+    check: 现在测试通过吗？
     on_pass: done
     on_fail: fix-tests
     max_fail_count: 5
 ```
 
-### Circular Flow (Loop Back)
+### 循环流程（回环）
 
-Point `on_fail` at an earlier step to create a cycle:
+把 `on_fail` 指向更早的步骤形成环：
 
 ```yaml
 steps:
   - id: design
-    desc: Design
-    do: Create the technical design.
-    input: Requirements
+    desc: 设计
+    do: 创建技术设计。
+    input: 需求
     output: "design.md"
-    check: Is the design complete and sound?
+    check: 设计是否完整、合理？
     on_pass: implement
     on_fail: design
     max_fail_count: 3
 
   - id: implement
-    desc: Implementation
-    do: Write code based on design.md.
+    desc: 实现
+    do: 按 design.md 写代码。
     input: design.md
-    output: Compiling, lint-clean code
-    check: Does the code compile and pass linting?
+    output: 能编译、lint 干净的代码
+    check: 代码能编译并通过 lint 吗？
     on_pass: test
-    on_fail: design          # loop back to design if implementation reveals a flaw
+    on_fail: design          # 实现暴露出设计缺陷则回到 design
     max_fail_count: 3
 
   - id: test
-    desc: Testing
-    do: Run the full test suite.
-    input: Implementation
-    output: Test results
-    check: Do all tests pass?
+    desc: 测试
+    do: 跑全量测试套件。
+    input: 实现
+    output: 测试结果
+    check: 所有测试都通过吗？
     on_pass: done
-    on_fail: implement       # loop back to implement if tests fail
+    on_fail: implement       # 测试失败则回到 implement
     max_fail_count: 5
 ```
 
-This creates the cycle `design → implement → test → implement → test → …`. If implementation reveals a design flaw, it loops back to `design`; if tests fail, it loops back to `implement`. The workflow converges on a working solution.
+形成环 `design → implement → test → implement → test → …`。实现暴露设计缺陷就回到 `design`；测试失败就回到 `implement`。工作流自然收敛到可工作的解。
 
 ---
 
-## Tips
+## 建议
 
-- **Keep steps focused** — each step should do one thing well.
-- **Write self-contained `check` recipes** — the verifier saw none of the DO conversation, so name the files to open, the commands to run, and concrete pass/fail criteria. Vague criteria ("code quality is good") make CHECK useless.
-- **A light persona sharpens verification** — opening `check` with e.g. 「你是一个挑剔的测试工程师：你的目标不是确认任务完成，而是想办法证明它没完成。」 helps. Keep it to one line.
-- **Set reasonable `max_fail_count`** — 3–5 for bounded steps, large (e.g. 100) for grind-until-green loops.
-- **Use `manual_step` where a wrong direction is expensive** — plans, designs, destructive actions.
-- **Use sub-workflows for reuse** — common patterns (analyze, build, test) can be shared.
-- **Use a cheaper model for verification** — `adversarial_check.model` can save cost while keeping quality.
-- **Write `do`/`check` prose in the user's language.**
+- **步骤要聚焦** —— 每个步骤把一件事做好。
+- **写自包含的 `check` 配方** —— 验证者完全没看过 DO 对话，所以要写明打开哪些文件、跑哪些命令、具体的通过/失败标准。模糊标准（"代码质量好"）让 CHECK 失效。
+- **轻量 persona 助推验证** —— `check` 开头加一句如「你是一个挑剔的测试工程师：你的目标不是确认任务完成，而是想办法证明它没完成。」很有用。保持一行，别搞重型角色设定。
+- **合理设 `max_fail_count`** —— 有界步骤 3–5，磨到全绿的循环设大（如 100）。
+- **在错误方向代价高的地方用 `manual_step`** —— 方案、设计、破坏性操作。
+- **用子工作流复用** —— 通用模式（分析、构建、测试）可以共享。
+- **验证用更便宜的模型** —— `adversarial_check.model` 能在保持质量的同时省钱。
+- **`do`/`check` 正文用用户的语言写。**

@@ -60,7 +60,7 @@ const MANAGED_MARKER = ".ralph-flow-managed";
 // (RALPH_CHECK_AGENT_PERMISSION) so the on-disk agent file and the in-memory
 // agent registered in index.ts can never drift apart.
 const AGENT_FRONTMATTER = yaml.dump(
-  { description: "Ralph Flow check phase agent - read-only verification", mode: "all", permission: RALPH_CHECK_AGENT_PERMISSION },
+  { description: "Ralph Flow 检查阶段 agent —— 只读验证", mode: "all", permission: RALPH_CHECK_AGENT_PERMISSION },
   { lineWidth: -1, quotingType: '"' }
 ).trimEnd();
 
@@ -109,7 +109,7 @@ function setupCheckAgent(): void {
   try {
     mkdirSync(dirname(agentFile), { recursive: true });
     writeFileSync(agentFile, AGENT_CONTENT, "utf-8");
-    writeFileSync(agentFile + MANAGED_MARKER, "managed by ralph-flow; delete to take ownership\n");
+    writeFileSync(agentFile + MANAGED_MARKER, "由 ralph-flow 托管；删除此文件即可自行接管\n");
   } catch (e) {
     diag("[ralph-flow] check agent setup failed:", e);
   }

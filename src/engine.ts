@@ -791,6 +791,18 @@ export function createEngine(projectDir: string, platform: Platform) {
         problem(`manual_step 引用了不存在的步骤：${unknownManual.map((s) => `"${s}"`).join("、")}`);
         return null;
       }
+      // The manual review gate is driven by a step's DO phase (the driver stops
+      // when DO completes and waits for approval). Sub-workflow (composite) steps
+      // have no DO phase — the idle driver skips them entirely — so marking one
+      // manual is silently inert: the gate the user is counting on never fires.
+      // Reject it so the mistake surfaces at load time instead of at runtime.
+      const compositeStepIds = new Set(validSteps.filter((s) => isSubWorkflowStep(s)).map((s) => s.id));
+      const compositeManual = manual_step.filter((id) => compositeStepIds.has(id));
+      if (compositeManual.length > 0) {
+        diag(`[ralph-flow] manual_step in ${workflowName} references composite/sub-workflow step(s): ${compositeManual.join(", ")}`);
+        problem(`manual_step 不能用于子工作流（复合）步骤：${compositeManual.map((s) => `"${s}"`).join("、")}。手动审查门只作用于带 do/check 的最小步骤——若要在子工作流后停下审查，请把 manual_step 标在该子工作流内部最后一个普通步骤上。`);
+        return null;
+      }
 
       const adv = parsed.adversarial_check;
       let adversarial_check: AdversarialCheckConfig | undefined = undefined;
@@ -1640,7 +1652,7 @@ ${renderStepText(instId, step.check)}
       const reportPath = destroyInstance(instId, "completed");
       logEvent(instId, "info", "workflow_end", { workflow: state.workflow_name });
       return {
-        text: `## 检查结果：通过 ✓\n\n${checkResult.reason || "检查通过。"}\n\n---\n\n## 工作流完成！\n\n所有步骤已验证通过。${reportPath ? `执行报告：${path.relative(projectDir, reportPath)}` : ""}`,
+        text: `## 检查结果：通过 ✓\n\n${checkResult.reason || "检查通过。"}\n\n---\n\n## 🎉 工作流完成！\n\n所有步骤已验证通过，无需再操作。${reportPath ? `\n\n执行报告：${path.relative(projectDir, reportPath)}` : ""}`,
         completed: true,
       };
     }
@@ -1750,7 +1762,7 @@ ${renderStepText(instId, step.check)}
       writeState(pausedState, instId);
       logEvent(instId, "warn", "workflow_paused", { workflow: state.workflow_name, step: state.current_step, fail_count: newFailCount });
       return {
-        text: `## 检查结果：失败 ✗ (${newFailCount}/${step.max_fail_count})\n\n${checkResult.reason || "检查失败。"}\n\n---\n\n## 工作流已暂停\n\n已达最大失败次数。请修复问题，然后调用 \`ralphflow_continue\` 恢复。`,
+        text: `## 检查结果：失败 ✗ (${newFailCount}/${step.max_fail_count})\n\n${checkResult.reason || "检查失败。"}\n\n---\n\n## ⏸ 工作流已暂停 · 🙋 轮到你了\n\n步骤 \`${state.current_step}\` 连续失败已达上限（${newFailCount}/${step.max_fail_count}），停下等你介入：\n\n- 🔧 看上面的失败原因，动手修一修，然后运行 \`/ralphflow-continue\` 重试（失败计数会清零）\n- 🗑️ 或运行 \`/ralphflow-cancel\` 放弃\n\n已完成的工作都保留，模型不会自动继续。`,
         paused: true,
       };
     }
