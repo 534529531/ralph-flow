@@ -293,7 +293,6 @@ export async function handleSessionIdle(
     const reinjectFile = path.join(instDir, ".do-reinject-count");
     const manualStepMarker = path.join(instDir, ".manual-step-active");
     const manualGateMarker = path.join(instDir, MANUAL_GATE_MARKER);
-    const doPromptCacheFile = path.join(instDir, ".do-prompt-cache");
     const doneTagDetectedFile = path.join(instDir, DONE_TAG_MARKER);
     const postToolMarker = path.join(instDir, ".post-tool-active");
 
@@ -443,31 +442,29 @@ export async function handleSessionIdle(
       }
 
       if (alreadyReported) {
-        // Check if a tool response just delivered the DO prompt this turn — if
-        // so, skip the keep-alive to avoid duplicate messages
+        // A tool response that just delivered the DO prompt sets .post-tool-active.
+        // This is a DEBOUNCE, not mere dedup: session.idle can fire in the window
+        // after delivery but before the model's tool calls register in its message
+        // (getLastAssistantMessage would then see hasToolUse=false even though the
+        // model is about to write). Nudging there interrupts the model mid-work.
+        // So stay silent for a short grace period after delivery; one idle is
+        // consumed, and if the model genuinely stopped, the user resumes it.
         if (fileExists(postToolMarker)) {
           const markerTime = parseInt(readTextFile(postToolMarker), 10);
           const age = Date.now() - (markerTime || 0);
           removeFile(postToolMarker);
-          if (age < 10000) return; // Within 10 seconds
+          if (age < 10000) return; // within the post-delivery grace window
         }
 
         // Already reported full phase info — send keep-alive with DO prompt to
         // keep the session working when the workflow expects more.
-        const cachedPromptForKeepalive = readTextFile(doPromptCacheFile);
-        const keepaliveTask = cachedPromptForKeepalive ? `\n\n${cachedPromptForKeepalive}` : "";
-        await injectPrompt(client, sessionId,
-          `继续执行步骤 \`${stateStep}\` 的任务。${keepaliveTask}\n\n当所有要求满足后，在单独一行输出 \`<promise>done</promise>\`。`);
+        await injectPrompt(client, sessionId, engine.buildDoNudge(mine.id, stateStep));
         return;
       }
 
-      // Include full context with cached do prompt (always available on first report)
-      const cachedPrompt = readTextFile(doPromptCacheFile);
-      if (cachedPrompt) {
-        phaseGuidance = `你正在步骤 \`${stateStep}\` 的 **DO 阶段**。以下是你的当前任务：\n\n${cachedPrompt}\n\n继续执行。当所有要求满足后，在单独一行输出 \`<promise>done</promise>\`。`;
-      } else {
-        phaseGuidance = `你正在步骤 \`${stateStep}\` 的 **DO 阶段**。继续执行任务。当所有要求满足后，在单独一行输出 \`<promise>done</promise>\`。任务完成前不要停止。`;
-      }
+      // First report of this phase: the header below already names the workflow,
+      // instance, step and phase, so the body is the same nudge as any other.
+      phaseGuidance = engine.buildDoNudge(mine.id, stateStep);
     }
 
     let stepInfo = "";

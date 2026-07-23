@@ -451,6 +451,25 @@ export function createEngine(projectDir: string, platform: Platform) {
     } catch {}
   }
 
+  function readDoPromptCache(instId: string): string {
+    try {
+      return stripBom(fs.readFileSync(instPath(".do-prompt-cache", reqInst(instId)), "utf-8")).trim();
+    } catch {
+      return "";
+    }
+  }
+
+  /**
+   * The canonical "you are still in DO, here is the task, here is how you finish"
+   * nudge. The driver injects it on an idle keep-alive; ralphflow_continue returns
+   * it when there is no gate/pause/attach to act on. Those are the same situation
+   * — the step isn't done — so they must say the same thing, from one place.
+   */
+  function buildDoNudge(instId: string, stepId: string): string {
+    const cached = readDoPromptCache(instId);
+    return `继续执行步骤 \`${stepId}\` 的任务。${cached ? `\n\n${cached}` : ""}\n\n当所有要求满足后，在单独一行输出 \`<promise>done</promise>\`。`;
+  }
+
   /**
    * Set the driver dedup markers after a tool response that already contains
    * the current DO prompt: .last-phase-report suppresses a duplicate full phase
@@ -1950,7 +1969,7 @@ ${renderStepText(instId, step.check)}
     writeMarker, clearMarker, markerExists,
     writeManualStepMarker, clearManualStepMarker, clearManualGate,
     clearReinjectCounter, clearDoPromptCache, clearDoneTagDetected,
-    writeDoPromptCache, markPromptDelivered,
+    writeDoPromptCache, readDoPromptCache, buildDoNudge, markPromptDelivered,
     writeAdversarialSession, clearAdversarialSession, readAdversarialSession,
     // workflows
     parseWorkflowFile, loadWorkflow, listWorkflows, lintWorkflow, buildDoctorReport,

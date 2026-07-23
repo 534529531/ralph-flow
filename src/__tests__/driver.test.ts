@@ -404,14 +404,18 @@ describe("handleSessionIdle", () => {
     expect(engine.readOwnerSession(instId)).toBe("sess-1");
   });
 
-  it("post-tool marker suppresses the immediate duplicate keep-alive", async () => {
+  it("post-tool marker debounces the keep-alive within the grace window", async () => {
+    // .post-tool-active is set when a tool just delivered the DO prompt. Within the
+    // grace window the driver stays silent so a session.idle that fires before the
+    // model's tool calls register does not interrupt it mid-work; the next idle
+    // (marker consumed) resumes the keep-alive.
     const instId = startInstance("build");
-    lastAssistantText = "thinking";
+    lastAssistantText = "working";
     await handleSessionIdle(makeClient(), engine, "sess-1"); // full report consumes first-report slot
     engine.markPromptDelivered("build", instId);
     injected = [];
     await handleSessionIdle(makeClient(), engine, "sess-1");
-    expect(injected.length).toBe(0); // suppressed
+    expect(injected.length).toBe(0); // suppressed within the grace window
     injected = [];
     await handleSessionIdle(makeClient(), engine, "sess-1");
     expect(injected.length).toBe(1); // marker consumed, keep-alive resumes

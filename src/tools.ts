@@ -308,9 +308,15 @@ export function createTools(engine: Engine, client: Client) {
         return `## 已接管工作流实例 \`${instId}\`\n\n该实例中断于 DO 阶段，继续执行当前步骤。\n\n---\n\n${prompt}`;
       }
 
-      // 6. In do, no gate, no pause, no attach. Nothing for this tool to do —
-      //    the check runs automatically when the session goes idle.
-      return "没有需要手动继续的操作。普通步骤的验证会在你空闲时自动运行。";
+      // 6. In do, no gate, no pause, no attach. Nothing for this tool to change
+      //    — but "nothing to continue" alone reads as a failed call, and the old
+      //    wording ("验证会在你空闲时自动运行") reads as "verification is already
+      //    underway", so the model waits for a verdict that will never come and
+      //    calls again. State the phase it is actually in, then hand back the
+      //    same DO nudge the driver injects on idle: the step isn't done, and
+      //    the done tag is the only thing that ends it — manual or not.
+      engine.markPromptDelivered(step.id, instId);
+      return `步骤 \`${state.current_step}\` 仍在 **DO 阶段**（没有待批准的审查、没有暂停、没有中断的实例），本工具无需操作。验证只在 DO 阶段结束后才开始。\n\n${engine.buildDoNudge(instId, state.current_step)}`;
     },
   });
 
