@@ -97,7 +97,11 @@ adversarial_check:
   timeout_ms: 3600000          # 上限 1 小时
 ```
 
-`model` 字段也接受 `"provider/model"` 字符串。裸模型名（如 `sonnet`）无法解析，会回退到 agent 的默认模型 —— `/ralphflow-doctor` 会警告。
+`model` 字段也接受 `"provider/model"` 字符串。裸模型名（如 `sonnet`）无法解析，会回退到 agent 的默认模型 —— `/ralphflow-doctor` 会警告。模型不存在/未授权时 CHECK 以基础设施故障暂停，失败信息带服务端返回的真实原因。
+
+不配 `model` 时验证模型的解析顺序：验证 agent 的显式配置（如 `agent.ralph-check.model`）→ **工作会话当前使用的模型**（新建验证会话没有历史，不读它会错误地落到 opencode 全局默认）→ 全局默认。
+
+`adversarial_check` 沿子工作流链**逐字段继承**：子工作流里每个填了且有效的字段覆盖父工作流，没填/无效的字段回退到父工作流（再向外直到内置默认）。详见[自定义工作流 · 子工作流里的继承](custom-workflows.md#子工作流里的继承)。
 
 ### 基础设施故障 vs 工作故障
 

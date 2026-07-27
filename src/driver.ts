@@ -34,9 +34,17 @@ const MAX_DO_REINJECT = 5;
 // on that session's markers.
 const drivingSessions = new Set<string>();
 
-/** Test-only: clear the in-flight guard between cases. */
+// Catch-up drives scheduled when the post-delivery grace window swallows an
+// idle that may have been the session's ONLY one (see the debounce below).
+// Held so tests can cancel them between cases; unref'd so they never keep a
+// process (or a test runner) alive for the grace window.
+const pendingRetries = new Set<ReturnType<typeof setTimeout>>();
+
+/** Test-only: clear the in-flight guard and pending catch-up drives between cases. */
 export function __resetDrivingSessions(): void {
   drivingSessions.clear();
+  for (const t of pendingRetries) clearTimeout(t);
+  pendingRetries.clear();
 }
 
 // ─── Helpers (mirror of the hook's file utils) ───────────────────────────────
@@ -147,14 +155,17 @@ export async function runCheckAndAdvance(
   // Report the CONFIGURED timeout ceiling, not a made-up "~1 minute". The
   // verifier independently explores the project and runs the check commands
   // (builds/tests can take minutes); its only hard bound is this timeout.
-  const timeoutMin = Math.max(1, Math.round((workflow.adversarial_check?.timeout_ms || DEFAULT_ADVERSARIAL_TIMEOUT_MS) / 60000));
+  // Field-level inheritance: a sub-workflow step checks with the nearest
+  // ancestor's value for every field it doesn't validly define itself.
+  const adversarialConfig = engine.getEffectiveAdversarialCheck(instId, workflow);
+  const timeoutMin = Math.max(1, Math.round((adversarialConfig?.timeout_ms || DEFAULT_ADVERSARIAL_TIMEOUT_MS) / 60000));
   await injectPrompt(client, sessionId,
     `## 🔍 CHECK 阶段 · 自动验证中\n\n正在用**独立只读会话**验证步骤 \`${step.id}\`（与本对话隔离运行，最长 ${timeoutMin} 分钟）。\n\n⏳ **现在无需你操作，请等待结果。** 这一步由独立会话完成，在这里发消息不会加快它、也不影响判定。\n> 迟迟没有结果时：\`/ralphflow-status\` 看进度，或 \`/ralphflow-cancel\` 取消。\n\n---\n\n以下是它正在核对的依据（供你了解，不用回复）：\n\n${visibleSections.join("\n\n")}`,
     true);
 
   let checkResult;
   try {
-    checkResult = await adversarialCheck(client, engine, instId, sessionId, step, checkPrompt, state.user_task, workflow.adversarial_check);
+    checkResult = await adversarialCheck(client, engine, instId, sessionId, step, checkPrompt, state.user_task, adversarialConfig);
   } catch (err: any) {
     engine.logEvent(instId, "error", "adversarial_check_uncaught", { stepId: step.id, error: err.message });
     const st = engine.readState(instId);
@@ -453,7 +464,25 @@ export async function handleSessionIdle(
           const markerTime = parseInt(readTextFile(postToolMarker), 10);
           const age = Date.now() - (markerTime || 0);
           removeFile(postToolMarker);
-          if (age < 10000) return; // within the post-delivery grace window
+          if (age < 10000) {
+            // The swallowed idle may be the session's ONLY one: a model that
+            // finished within the window has stopped emitting, so no further
+            // idle will fire — and if its done tag simply hadn't registered in
+            // the message list when we read it (the race the debounce guards),
+            // the workflow deadlocks here until the user notices. Schedule ONE
+            // catch-up drive for when the window closes; by then the done tag
+            // has registered (→ Case 1 advances), or tool calls show active
+            // work (→ stay silent), or the model genuinely stopped (→ the
+            // keep-alive nudge below finally fires). The marker is already
+            // consumed, so the retry takes the normal path.
+            const retry = setTimeout(() => {
+              pendingRetries.delete(retry);
+              handleSessionIdle(client, engine, sessionId).catch(() => {});
+            }, 10000 - age);
+            retry.unref();
+            pendingRetries.add(retry);
+            return;
+          }
         }
 
         // Already reported full phase info — send keep-alive with DO prompt to

@@ -88,6 +88,7 @@
 | `step_start` | 某步骤阶段开始 |
 | `done_detected` | 检测到 `<promise>done</promise>` |
 | `adversarial_check_start` / `_result` / `_timeout` | 独立验证生命周期 |
+| `adversarial_check_request_failed` | 验证请求被服务端拒绝（如模型不存在/未授权），`error` 字段带真实原因 |
 | `fail_count_increment` | 某步骤失败计数增加 |
 | `sub_workflow_end` | 子工作流完成 |
 | `crash_recovery` | 状态卡在 check 阶段，已重置到 DO |

@@ -2,6 +2,21 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 2.3.0
+
+### 新增
+- **`adversarial_check` 沿子工作流链逐字段继承**：子工作流里每个填了且有效的字段（`model`/`agent`/`system_prompt`/`timeout_ms`）覆盖父工作流；没填或填了但无效（裸模型名、缺 `providerID` 的对象）的字段回退到父工作流，逐层向外直到内置默认。以前子工作流内的 CHECK 完全忽略父工作流的验证配置，静默回退默认模型。
+- **工作流完成后归档执行日志**：实例完成或取消时，`execution.log` 随实例目录一并无从追溯；现在归档报告时把日志复制到 `reports/<实例id>-execution.log`，并在报告末尾注明路径——`model_source`、check 判决、infra 错误等关键事件事后仍可审计。
+
+### 修复
+- **未配置 `adversarial_check.model` 时，验证模型现在跟随工作会话当前使用的模型**：以前新建验证会话没有历史，服务端回退到 opencode **全局默认模型**——你在 TUI 里切换的模型对 CHECK 不生效。解析顺序：工作流 yaml 配置 → 验证 agent 的显式模型（如 `agent.ralph-check.model`）→ 工作会话当前模型 → 全局默认。日志 `adversarial_check_start` 新增 `model_source` 字段标明本次来源。
+- **模型配错时 CHECK 失败信息透出真实原因**：`adversarial_check.model` 配置了不存在/未授权的模型时，以前一律报「验证返回空响应」；现在直接带服务端返回的错误（如 `Model not found: ...`，日志事件 `adversarial_check_request_failed`），仍是基础设施故障、不消耗失败次数。
+- **对象形式的 `model` 缺 `providerID`/`modelID` 时被正确忽略并警告**：以前会原样传给 SDK 变成费解的请求失败；现在解析期丢弃、`/ralphflow-doctor` 明确警告（与裸模型名的处理一致）。
+- **DO 阶段 10 秒内完成不再死锁**：DO prompt 投递后的 10 秒防抖窗口会吞掉会话的 idle 事件，若模型在此期间完成并输出 done（但因消息注册竞态被误判为"未完成"），这是唯一一次 idle——工作流就此卡住，需手动 `ralphflow_continue` 才能推进。现在吞掉 idle 时按窗口剩余时间安排一次补刀驱动：done 已注册就推进、模型工作中的就静默、真停了才催，三种情况都正确不误伤。
+
+### 文档
+- 自定义工作流指南新增「子工作流里的继承」一节；补充 `manual_step` 不能标子工作流步骤的说明；日志事件表新增 `adversarial_check_request_failed`。
+
 ## 2.2.1
 
 ### 修复

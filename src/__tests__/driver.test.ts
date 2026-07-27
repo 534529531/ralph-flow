@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -419,6 +419,28 @@ describe("handleSessionIdle", () => {
     injected = [];
     await handleSessionIdle(makeClient(), engine, "sess-1");
     expect(injected.length).toBe(1); // marker consumed, keep-alive resumes
+  });
+
+  it("swallowed idle schedules a catch-up drive after the grace window", async () => {
+    // Regression: a model that finishes within the grace window emits its done
+    // tag but stops, so the swallowed idle may be the session's ONLY one. Without
+    // the scheduled catch-up, the workflow deadlocks until the user notices.
+    // Here the catch-up fires after the window, finds the marker already consumed,
+    // and sends the keep-alive the grace window had suppressed.
+    vi.useFakeTimers();
+    try {
+      const instId = startInstance("build");
+      lastAssistantText = "working";
+      await handleSessionIdle(makeClient(), engine, "sess-1"); // full report
+      engine.markPromptDelivered("build", instId);
+      injected = [];
+      await handleSessionIdle(makeClient(), engine, "sess-1"); // swallowed → schedules retry
+      expect(injected.length).toBe(0);
+      await vi.advanceTimersByTimeAsync(10001); // past the window → catch-up drive
+      expect(injected.length).toBe(1); // marker consumed, keep-alive fired
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("manual step: done → gate (silent to re-idle), no auto-check", async () => {

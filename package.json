@@ -1,6 +1,6 @@
 {
   "name": "@yibener/ralph-flow",
-  "version": "2.2.1",
+  "version": "2.3.0",
   "description": "opencode 工作流自动化插件 —— 让 AI 真正遵循复杂工作流：执行、独立验证、重试，直到完成",
   "type": "module",
   "main": "dist/index.js",
@@ -42,5 +42,8 @@
     "typescript": "^5.3.0",
     "vitest": "^4.1.7"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
 }

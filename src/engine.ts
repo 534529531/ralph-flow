@@ -654,7 +654,20 @@ export function createEngine(projectDir: string, platform: Platform) {
           artifactsNote = `\n\n产出目录：\`${getArtifactsRelDir(instId)}/\`\n`;
         }
       } catch {}
-      atomicWriteText(reportPath, buildReportText(workflowName, status, records || []) + artifactsNote);
+      // Archive the execution log alongside the report: destroyInstance removes
+      // the instance dir right after this returns, and without a copy the whole
+      // audit trail (model_source, check verdicts, infra errors) dies with it.
+      let logNote = "";
+      try {
+        const logFile = path.join(getLogDir(instId), "execution.log");
+        if (fs.existsSync(logFile)) {
+          fs.copyFileSync(logFile, path.join(reportsDir, `${instId}-execution.log`));
+          logNote = `\n\n执行日志：\`.opencode/${RALPH_FLOW_DIR}/${REPORTS_DIRNAME}/${instId}-execution.log\`\n`;
+        }
+      } catch (e: any) {
+        diag("[ralph-flow] Execution log archiving failed:", e.message);
+      }
+      atomicWriteText(reportPath, buildReportText(workflowName, status, records || []) + artifactsNote + logNote);
       return reportPath;
     } catch (e: any) {
       diag("[ralph-flow] Report generation failed:", e.message);
@@ -828,13 +841,19 @@ export function createEngine(projectDir: string, platform: Platform) {
       if (adv && typeof adv === "object") {
         // Both formats are native here: string model (Claude Code style) is
         // passed through and resolved by the host; object {providerID, modelID}
-        // is the opencode SDK's own shape.
+        // is the opencode SDK's own shape. The object form requires BOTH ids as
+        // non-empty strings — a half-specified object (e.g. modelID only, or a
+        // numeric providerID) would otherwise reach the SDK as garbage and
+        // surface as an opaque request failure; drop it here and let the
+        // linter warn (mirrors how the bare-string form is handled).
         let model: AdversarialCheckConfig["model"] = undefined;
         if (typeof adv.model === "string" && adv.model.trim()) {
           model = adv.model.trim();
         } else if (adv.model && typeof adv.model === "object") {
-          if (adv.model.modelID && typeof adv.model.modelID === "string") {
-            model = { providerID: adv.model.providerID, modelID: adv.model.modelID.trim() };
+          const pid = adv.model.providerID;
+          const mid = adv.model.modelID;
+          if (typeof pid === "string" && pid.trim() && typeof mid === "string" && mid.trim()) {
+            model = { providerID: pid.trim(), modelID: mid.trim() };
           }
         }
 
@@ -1027,6 +1046,14 @@ export function createEngine(projectDir: string, platform: Platform) {
       }
       if (typeof adv.model === "string" && adv.model.includes("/") === false && adv.model.trim()) {
         warnings.push(`adversarial_check.model 是字符串（"${adv.model}"）——opencode 需要能被解析的模型标识（如 "anthropic/claude-sonnet-4-5" 或对象 {providerID, modelID}），无法解析时将回退到 ralph-check agent 的默认模型`);
+      }
+      if (adv.model && typeof adv.model === "object") {
+        const pidOk = typeof adv.model.providerID === "string" && adv.model.providerID.trim();
+        const midOk = typeof adv.model.modelID === "string" && adv.model.modelID.trim();
+        if (!pidOk || !midOk) {
+          const missing = !pidOk && !midOk ? "providerID 和 modelID" : !pidOk ? "providerID" : "modelID";
+          warnings.push(`adversarial_check.model 是对象但缺少有效的 ${missing}（需要 {providerID, modelID} 两个非空字符串）——该配置被忽略，回退到 ralph-check agent 的默认模型`);
+        }
       }
     }
 
@@ -1478,6 +1505,55 @@ ${renderStepText(instId, step.check)}
       const stack = JSON.parse(stripBom(fs.readFileSync(stackFile, "utf-8")));
       return Array.isArray(stack) ? stack.length : 0;
     } catch { return 0; }
+  }
+
+  /** Read the whole ancestor-state stack without mutating it (index 0 = outermost parent). */
+  function readStateStack(instId: string): RalphFlowState[] {
+    try {
+      const stackFile = getStackFile(instId);
+      if (!fs.existsSync(stackFile)) return [];
+      const parsed = JSON.parse(stripBom(fs.readFileSync(stackFile, "utf-8")));
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter((s): s is RalphFlowState =>
+        !!s && typeof s === "object" && typeof (s as RalphFlowState).workflow_name === "string");
+    } catch { return []; }
+  }
+
+  /**
+   * Java-style field-level inheritance for the verifier config along the
+   * sub-workflow chain: the current workflow's own adversarial_check wins for
+   * every field that is present AND usable; each missing/unusable field falls
+   * back to the nearest ancestor that defines it, then to the built-in
+   * defaults in check.ts. A sub-workflow that only overrides `model` still
+   * inherits its parent's `timeout_ms`, and an unresolvable `model` (bare
+   * name, half-specified object) does NOT shadow the parent's valid one.
+   */
+  function getEffectiveAdversarialCheck(instId: string, workflow: WorkflowDef): AdversarialCheckConfig | undefined {
+    // Chain ordered nearest-first: current workflow, then parents innermost → outermost.
+    const chain: AdversarialCheckConfig[] = [];
+    if (workflow.adversarial_check) chain.push(workflow.adversarial_check);
+    const stack = readStateStack(instId);
+    for (let i = stack.length - 1; i >= 0; i--) {
+      const wf = loadWorkflow(stack[i].workflow_name);
+      if (wf?.adversarial_check) chain.push(wf.adversarial_check);
+    }
+    if (chain.length === 0) return undefined;
+
+    const pick = <T>(valid: (cfg: AdversarialCheckConfig) => T | undefined): T | undefined => {
+      for (const cfg of chain) {
+        const v = valid(cfg);
+        if (v !== undefined) return v;
+      }
+      return undefined;
+    };
+
+    const model = pick((c) => (resolveCheckModel(c.model) ? c.model : undefined));
+    const agent = pick((c) => (typeof c.agent === "string" && c.agent.trim() ? c.agent : undefined));
+    const system_prompt = pick((c) => (typeof c.system_prompt === "string" && c.system_prompt.trim() ? c.system_prompt : undefined));
+    const timeout_ms = pick((c) => (typeof c.timeout_ms === "number" && c.timeout_ms > 0 ? c.timeout_ms : undefined));
+
+    if (model === undefined && agent === undefined && system_prompt === undefined && timeout_ms === undefined) return undefined;
+    return { model, agent, system_prompt, timeout_ms };
   }
 
   // ─── Log Helpers ────────────────────────────────────────────────────────────
@@ -1977,7 +2053,8 @@ ${renderStepText(instId, step.check)}
     getStep, buildDoPrompt, buildCheckPrompt, buildSubWorkflowUserTask,
     resolveSubWorkflowEntry, renderStepText,
     // stack
-    pushState, popState, getStackDepth,
+    pushState, popState, getStackDepth, readStateStack,
+    getEffectiveAdversarialCheck,
     // logs + records
     logEvent, recordStepStart, addStepRecord, loadStepRecords,
     // reports
@@ -1993,6 +2070,28 @@ ${renderStepText(instId, step.check)}
 
 export function isSubWorkflowStep(step: StepDef): step is SubWorkflowStepDef {
   return "workflow" in step && typeof (step as SubWorkflowStepDef).workflow === "string";
+}
+
+/**
+ * Resolve the yaml adversarial_check.model field into the SDK's
+ * {providerID, modelID} shape. Shared by the engine's inheritance walk
+ * (usability test) and check.ts (actual SDK call) so the two can never
+ * drift: a model this cannot resolve is treated as absent.
+ */
+export function resolveCheckModel(model: AdversarialCheckConfig["model"]): { providerID: string; modelID: string } | undefined {
+  if (!model) return undefined;
+  if (typeof model === "object") {
+    if (typeof model.providerID === "string" && model.providerID.trim()
+        && typeof model.modelID === "string" && model.modelID.trim()) {
+      return { providerID: model.providerID.trim(), modelID: model.modelID.trim() };
+    }
+    return undefined;
+  }
+  // String form "provider/model" (Claude Code yaml compatibility); a bare name
+  // without provider cannot be resolved here — fall back to the agent default.
+  const idx = model.indexOf("/");
+  if (idx > 0) return { providerID: model.slice(0, idx), modelID: model.slice(idx + 1) };
+  return undefined;
 }
 
 // ─── Adversarial check defaults (shared with check.ts) ──────────────────────

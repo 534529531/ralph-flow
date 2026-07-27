@@ -463,6 +463,178 @@ steps:
     const report = engine.buildDoctorReport();
     expect(report).toContain("启动的不是你这份");
   });
+
+  it("drops an object model missing providerID and the linter warns", () => {
+    writeProjectWorkflow("adv-badobj", `
+adversarial_check:
+  model:
+    modelID: claude-sonnet-4-5
+steps:
+  - id: a
+    desc: d
+    do: x
+    check: y
+    input: i
+    output: o
+    on_pass: done
+    on_fail: a
+    max_fail_count: 1
+`);
+    const wf = engine.loadWorkflow("adv-badobj")!;
+    // Half-specified object: unusable → dropped at parse time (agent default).
+    expect(wf.adversarial_check!.model).toBeUndefined();
+    const warnings = engine.lintWorkflow(wf, { adversarial_check: { model: { modelID: "claude-sonnet-4-5" } } });
+    expect(warnings.some((w) => w.includes("providerID"))).toBe(true);
+  });
+
+  it("keeps a fully-specified object model, trimming both ids", () => {
+    writeProjectWorkflow("adv-goodobj", `
+adversarial_check:
+  model:
+    providerID: " anthropic "
+    modelID: claude-sonnet-4-5
+steps:
+  - id: a
+    desc: d
+    do: x
+    check: y
+    input: i
+    output: o
+    on_pass: done
+    on_fail: a
+    max_fail_count: 1
+`);
+    const wf = engine.loadWorkflow("adv-goodobj")!;
+    expect(wf.adversarial_check!.model).toEqual({ providerID: "anthropic", modelID: "claude-sonnet-4-5" });
+  });
+});
+
+// ─── adversarial_check inheritance (Java-style field-level) ─────────────────
+
+describe("adversarial_check field-level inheritance", () => {
+  const PARENT_CFG_WF = `
+adversarial_check:
+  model: anthropic/claude-haiku-4-5
+  timeout_ms: 1200000
+steps:
+  - id: p
+    desc: d
+    do: x
+    check: y
+    input: i
+    output: o
+    on_pass: done
+    on_fail: p
+    max_fail_count: 1
+`;
+  const CHILD_NO_CFG = `
+steps:
+  - id: c
+    desc: d
+    do: x
+    check: y
+    input: i
+    output: o
+    on_pass: done
+    on_fail: c
+    max_fail_count: 1
+`;
+  const pushParent = (instId: string, wfName = "parent") =>
+    engine.pushState({ active: true, workflow_name: wfName, current_step: "p", current_phase: "do", fail_count: 0, user_task: "t", paused: false }, instId);
+
+  beforeEach(() => {
+    writeProjectWorkflow("parent", PARENT_CFG_WF);
+    writeProjectWorkflow("child", CHILD_NO_CFG);
+  });
+
+  it("returns undefined when nobody configures anything", () => {
+    const instId = startInstance("child");
+    expect(engine.getEffectiveAdversarialCheck(instId, engine.loadWorkflow("child")!)).toBeUndefined();
+  });
+
+  it("top-level workflow (empty stack) uses its own config as-is", () => {
+    const instId = startInstance("parent");
+    const eff = engine.getEffectiveAdversarialCheck(instId, engine.loadWorkflow("parent")!)!;
+    expect(eff.model).toBe("anthropic/claude-haiku-4-5");
+    expect(eff.timeout_ms).toBe(1200000);
+  });
+
+  it("child without config inherits every parent field", () => {
+    const instId = startInstance("child");
+    pushParent(instId);
+    const eff = engine.getEffectiveAdversarialCheck(instId, engine.loadWorkflow("child")!)!;
+    expect(eff.model).toBe("anthropic/claude-haiku-4-5");
+    expect(eff.timeout_ms).toBe(1200000);
+  });
+
+  it("child's valid model wins; fields it doesn't set still inherit", () => {
+    writeProjectWorkflow("child-model", `
+adversarial_check:
+  model: openai/gpt-5
+steps:
+  - id: c
+    desc: d
+    do: x
+    check: y
+    input: i
+    output: o
+    on_pass: done
+    on_fail: c
+    max_fail_count: 1
+`);
+    const instId = startInstance("child-model");
+    pushParent(instId);
+    const eff = engine.getEffectiveAdversarialCheck(instId, engine.loadWorkflow("child-model")!)!;
+    expect(eff.model).toBe("openai/gpt-5");        // child's own
+    expect(eff.timeout_ms).toBe(1200000);          // inherited from parent
+  });
+
+  it("child's UNRESOLVABLE model does not shadow the parent's valid one", () => {
+    writeProjectWorkflow("child-bare", `
+adversarial_check:
+  model: sonnet
+steps:
+  - id: c
+    desc: d
+    do: x
+    check: y
+    input: i
+    output: o
+    on_pass: done
+    on_fail: c
+    max_fail_count: 1
+`);
+    const instId = startInstance("child-bare");
+    pushParent(instId);
+    const eff = engine.getEffectiveAdversarialCheck(instId, engine.loadWorkflow("child-bare")!)!;
+    // "有自定义且有效才用子类"：裸名无法解析 → 回退父工作流的有效 model
+    expect(eff.model).toBe("anthropic/claude-haiku-4-5");
+    expect(eff.timeout_ms).toBe(1200000);
+  });
+
+  it("nearest ancestor wins when the chain is deeper", () => {
+    writeProjectWorkflow("grandparent", `
+adversarial_check:
+  model: google/gemini-3-pro
+  agent: some-other-agent
+steps:
+  - id: g
+    desc: d
+    do: x
+    check: y
+    input: i
+    output: o
+    on_pass: done
+    on_fail: g
+    max_fail_count: 1
+`);
+    const instId = startInstance("child");
+    pushParent(instId, "grandparent"); // outermost first
+    pushParent(instId);                // then the nearer parent
+    const eff = engine.getEffectiveAdversarialCheck(instId, engine.loadWorkflow("child")!)!;
+    expect(eff.model).toBe("anthropic/claude-haiku-4-5"); // parent beats grandparent
+    expect(eff.agent).toBe("some-other-agent");           // only grandparent defines it
+  });
 });
 
 // ─── Instance infrastructure ─────────────────────────────────────────────────
@@ -652,6 +824,18 @@ describe("transitions", () => {
     expect(fs.existsSync(engine.getInstanceDir(instId))).toBe(false);
     const reports = fs.readdirSync(engine.getReportsDir());
     expect(reports.some((f) => f.startsWith(instId))).toBe(true);
+  });
+
+  it("completion archives the execution log next to the final report", () => {
+    const instId = startInstance();
+    engine.logEvent(INST, "info", "adversarial_check_start", { stepId: "two", model_source: "workflow" });
+    const wf = engine.loadWorkflow("test-wf")!;
+    engine.writeState({ ...engine.readState(INST)!, current_step: "two", current_phase: "check" }, INST);
+    engine.handleCheckPassed(INST, engine.readState(INST)!, wf, wf.steps[1], { reason: "done" });
+    const archivedLog = path.join(engine.getReportsDir(), `${instId}-execution.log`);
+    expect(fs.existsSync(archivedLog)).toBe(true);
+    expect(fs.readFileSync(archivedLog, "utf-8")).toContain("adversarial_check_start");
+    expect(fs.readFileSync(archivedLog, "utf-8")).toContain("workflow");
   });
 
   it("check failed retries with reason; max failures pause", () => {

@@ -118,6 +118,8 @@ manual_step: design, review
 
 > `manual_step` 里对不上真实步骤 id 的条目是**硬错误** —— 工作流无法加载。打错字绝不能静默跳过你指望的审查门。
 
+> `manual_step` **不能标子工作流步骤**（`workflow:` 形式的复合步骤）——它们没有 DO 阶段，审查门永远不会触发。标了也是硬错误。要在子工作流之后停下审查，把 `manual_step` 标在**那个子工作流内部**的最后一个普通步骤上。
+
 **完整示例** —— `manual_step` 里的 id 必须对应 `steps` 里的某个步骤：
 
 ```yaml
@@ -176,17 +178,44 @@ adversarial_check:
 | 字段 | 说明 | 默认值 |
 |------|------|--------|
 | `agent` | 用哪个 agent 验证 | `ralph-check`（只读） |
-| `model` | `{providerID, modelID}` 对象或 `"provider/model"` 字符串 | agent 默认模型 |
+| `model` | `{providerID, modelID}` 对象或 `"provider/model"` 字符串 | 见下方「默认模型解析顺序」 |
 | `system_prompt` | 给检查者的额外 system prompt | 内置验证提示词 |
 | `timeout_ms` | 检查超时（毫秒，上限 `3600000`） | `900000`（15 分钟） |
 
-> **裸**模型名（如 `sonnet`、`Opus`）无法解析到 provider，会静默回退到 agent 的默认模型 —— 请用对象形式或 `"provider/model"` 字符串。`/ralphflow-doctor` 看到裸名会警告。
+> **不配 `model` 时验证用哪个模型？** 按顺序取第一个命中的：
+> 1. 你在 opencode 配置里给验证 agent 显式指定的模型（如 `agent.ralph-check.model`）
+> 2. **工作会话当前正在使用的模型** —— 你在 TUI 里切到什么，验证就跟着用什么
+> 3. opencode 全局默认模型
+>
+> 所以多数情况无需配置：验证自动跟你当前会话同一个模型。想省钱（Haiku 查 Sonnet 的活）或换更强的验证模型时再显式配。
+
+> **裸**模型名（如 `sonnet`、`Opus`）无法解析到 provider，会静默回退到 agent 的默认模型 —— 请用对象形式或 `"provider/model"` 字符串。对象形式则必须 **`providerID` 和 `modelID` 都填**（缺一个整个 `model` 被忽略）。`/ralphflow-doctor` 对这两种情况都会警告。
+
+> **模型配错不会静默失败**：模型不存在或未授权时，CHECK 会以基础设施故障暂停，失败信息里带服务端返回的真实原因（如 `Model not found: ...`）——修好配置后 `/ralphflow-continue` 重新验证即可，不消耗失败次数。
 
 **使用场景：**
 - 用**更便宜的模型**验证（如用 Haiku 检查 Sonnet 的工作）
 - 用**更严格、只读不写**的 agent
 - 为特定领域自定义 **system prompt**
 - 为需要更长验证的任务增大**超时**
+
+### 子工作流里的继承
+
+`adversarial_check` 沿子工作流调用链**逐字段继承**（类似 Java 的字段覆写）：子工作流里每个**填了且有效**的字段覆盖父工作流；没填或填了但无效（裸模型名、缺 `providerID` 的对象）的字段回退到父工作流，逐层向外直到内置默认。
+
+```yaml
+# 父工作流
+adversarial_check:
+  model: anthropic/claude-haiku-4-5
+  timeout_ms: 1800000
+
+# 子工作流（只覆盖 model）
+adversarial_check:
+  model: openai/gpt-5
+# → 子工作流内的 CHECK：model 用 gpt-5，timeout_ms 继承父的 1800000
+```
+
+所以常见做法是在**最外层**工作流统一配置验证模型/超时，子工作流只在确有必要时覆盖个别字段。
 
 ---
 

@@ -233,6 +233,7 @@ adversarial_check:      # 可选：独立 CHECK 会话的配置
     modelID: claude-sonnet-4-5
   timeout_ms: 3600000   # 上限 3600000（1 小时）
   # system_prompt: ...  # 可选：给验证器的额外 system 提示
+  # 嵌套时逐字段继承：子工作流只覆盖它填了且有效的字段，其余回退父工作流
 \`\`\`
 
 \`\`\`yaml

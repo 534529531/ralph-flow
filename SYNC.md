@@ -52,8 +52,10 @@ opencode 版和内部的 Claude Code 版 ralph-flow **功能一致**，但**只�
 | CHECK agent | CLI `--allowedTools` 只读白名单，无 agent 概念 | `config` hook 内存注册 + 全局 `~/.config/opencode/agent/ralph-check.md` 文件（双保险，不碰项目） |
 | CHECK 执行 | spawn `claude -p` 子进程 | SDK 独立 session + `ralph-check` agent（`edit: deny`） |
 | CHECK 取消 | `.adversarial-pid` 跨进程 kill 进程树 | `.adversarial-session` + 内存 `activeChecks`，`session.abort`；跨进程触达不到，结果由 phase-3 状态校验丢弃 |
-| adversarial_check.model | 字符串（CLI `--model`） | `{providerID, modelID}` 或 `"provider/model"`；裸名（如 `sonnet`）无法解析→回退 agent 默认（doctor 警告） |
+| adversarial_check.model | 字符串（CLI `--model`） | `{providerID, modelID}` 或 `"provider/model"`；裸名（如 `sonnet`）无法解析→回退 agent 默认（doctor 警告）；对象形式缺 `providerID`/`modelID` 同样被忽略并警告。未配置时默认跟随**属主会话当前模型**（新验证会话无历史，服务端只会回退全局默认，故由插件读属主会话最近 user 消息补位；验证 agent 显式 model 优先于它） |
 | adversarial_check.agent | 不支持（doctor 警告） | 支持（默认 `ralph-check`） |
+| adversarial_check 继承 | （待确认 Claude 版行为） | 沿子工作流链**逐字段**继承（`getEffectiveAdversarialCheck`）：子工作流填了且有效的字段覆盖父，无效/缺失字段回退父链 |
+| CHECK 请求失败 | 子进程非零退出→stderr 进 reason | SDK `throwOnError=false`，`{error}` 体由 `extractRequestError` 透传（如 `Model not found`），事件 `adversarial_check_request_failed` |
 | extra_dirs | 传子进程 `--add-dir` | 仅校验存在 + 写入提示词（ralph-check agent 有 `external_directory: allow`） |
 | ESC/中断 | 无法感知 | `session.error(MessageAborted)` / `session.deleted` → 暂停实例（`pause_reason: session_aborted/deleted`） |
 | compaction | 无对应事件 | `session.compacted` → 按 idle 处理，用缓存 DO 提示词重新驱动 |
