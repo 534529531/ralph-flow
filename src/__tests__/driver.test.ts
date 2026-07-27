@@ -2,29 +2,24 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { createEngine, type Platform, type Engine, RALPH_CHECK_AGENT_PERMISSION, RALPH_CHECK_BASH_PERMISSION } from "../engine.js";
+import { createEngine, type Platform, type Engine, RALPH_CHECK_AGENT_PERMISSION } from "../engine.js";
 import { detectDoneTag, stripCodeBlocks, handleSessionIdle, __resetDrivingSessions } from "../driver.js";
 import { createTools } from "../tools.js";
 
-// ─── Read-only verifier permissions (Claude --allowedTools parity) ───────────
+// ─── Verifier permissions: edit hard-deny + bash open + prompt discipline ─────
 
 describe("ralph-check verifier permissions", () => {
-  it("denies edits and denies bash by default (allow-list, not blind allow)", () => {
+  it("hard-denies edit (the one real mutation gate)", () => {
     expect(RALPH_CHECK_AGENT_PERMISSION.edit).toBe("deny");
-    expect(typeof RALPH_CHECK_AGENT_PERMISSION.bash).toBe("object");
-    expect(RALPH_CHECK_BASH_PERMISSION["*"]).toBe("deny");
   });
 
-  it("allows read-only inspection + test/build commands", () => {
-    for (const cmd of ["cat *", "grep *", "git status *", "npm test *", "pytest *", "cargo test *", "cargo clippy *"]) {
-      expect(RALPH_CHECK_BASH_PERMISSION[cmd]).toBe("allow");
-    }
+  it("leaves bash fully open — no allow-list, matches opencode's own plan/explore agents", () => {
+    expect(RALPH_CHECK_AGENT_PERMISSION.bash).toBe("allow");
   });
 
-  it("does NOT allow-list mutating shell (they fall through to the deny default)", () => {
-    for (const cmd of ["rm *", "mv *", "cp *", "cargo fix *", "cargo fmt", "git commit *", "git push *", "git checkout *", "chmod *"]) {
-      expect(RALPH_CHECK_BASH_PERMISSION[cmd]).toBeUndefined();
-    }
+  it("keeps webfetch + extra_dirs open so the verifier can read out-of-tree material", () => {
+    expect(RALPH_CHECK_AGENT_PERMISSION.webfetch).toBe("allow");
+    expect(RALPH_CHECK_AGENT_PERMISSION.external_directory).toBe("allow");
   });
 });
 

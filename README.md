@@ -38,7 +38,7 @@ ralph-flow 强制 AI 遵循结构化工作流，**每一步都有独立验证**�
 每个步骤分两个阶段：
 
 - **DO** —— 工作会话执行任务，最后一行输出 `<promise>done</promise>` 标记
-- **CHECK** —— 一个**独立会话**（只读验证者，完全没看过 DO 阶段的对话）按步骤的检查依据重新验证
+- **CHECK** —— 一个**独立会话**（独立验证者，完全没看过 DO 阶段的对话）按步骤的检查依据重新验证
 
 通过 → 下一步。失败 → 带着失败原因重试。失败太多次 → 暂停等你介入。
 
@@ -119,7 +119,7 @@ flowchart TD
     Manual -->|"是"| Review["📋 停下 —— 用户审查，<br/>然后 /ralphflow-continue"]
     Manual -->|"否"| Continue["调用 ralphflow_continue"]
     Review --> CHECK
-    Continue --> CHECK["CHECK 阶段:<br/>独立只读会话验证"]
+    Continue --> CHECK["CHECK 阶段:<br/>独立会话验证"]
     CHECK --> Pass{"通过？"}
     Pass -->|"是"| Next{"on_pass"}
     Pass -->|"否"| Fail["失败计数 + 1"]
@@ -138,7 +138,7 @@ CHECK 阶段使用一个对实现过程毫无记忆的**独立会话** —— �
 ## ✨ 特性
 
 - 🔄 **带失败上下文的自动循环** —— 重试携带验证者给出的具体失败原因，让 AI 去修真正的问题而不是重复它
-- 🔍 **独立验证** —— 独立的只读会话杜绝自我审查偏差；通过 `adversarial_check` 配置 agent、模型、超时
+- 🔍 **独立验证** —— 独立验证会话杜绝自我审查偏差（`edit: deny` 硬约束不修改 + 系统提示词约束只判断）；通过 `adversarial_check` 配置 agent、模型、超时
 - 🧩 **多实例并行** —— 同一项目里每个会话跑自己的工作流实例，并行、完全隔离
 - 📋 **人工审查门** —— `manual_step` 在 DO 完成后、验证前停下会话，让你先审查
 - 📦 **自然语言 YAML** —— `do`、`check`、`input`、`output` 都是白话描述，没有 DSL 要学
@@ -167,7 +167,7 @@ cd ~/.config/opencode/plugins/ralph-flow
 npm install && npm run build
 ```
 
-> 首次加载时，插件会注册命令、只读的 `ralph-check` agent，并把自带 skills 同步到全局 `~/.config/opencode/skills/`（不是你的项目）。
+> 首次加载时，插件会注册命令、把 `ralph-check` 验证者 agent（`edit: deny` + `bash: allow`，靠系统提示词约束不修改）写入全局 `~/.config/opencode/agent/`，并把自带 skills 同步到全局 `~/.config/opencode/skills/`（不是你的项目）。
 
 ### 从 1.x 升级
 

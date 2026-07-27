@@ -40,7 +40,7 @@ flowchart TD
 4. 驱动器通过 `session.idle` 事件检测标记
 
 **CHECK 阶段**（独立会话）：
-1. `ralphflow_continue` 构建步骤的检查提示词，拉起一个全新的验证会话（只读 `ralph-check` agent）
+1. `ralphflow_continue` 构建步骤的检查提示词，拉起一个全新的验证会话（`ralph-check` agent：`edit: deny` + `bash: allow`）
 2. 验证者自主探索项目，按检查依据评估工作成果 —— 它完全没看过 DO 阶段的对话
 3. 在最后一行返回 `<promise-check>true</promise-check>` 或 `<promise-check>false</promise-check>`
 4. 引擎处理结果，要么推进（`on_pass`），要么带失败原因重试（`on_fail`）
@@ -60,7 +60,7 @@ sequenceDiagram
 
     Main->>Tool: DO 完成（done 标记）→ 调用 ralphflow_continue
     Tool->>Check: 用检查提示词创建全新会话
-    Check->>Check: 独立验证（只读）
+    Check->>Check: 独立验证
     Check->>Tool: 返回 通过/失败 + 原因
     Tool->>Main: 返回下一步提示词（或带原因重试）
     Tool->>Check: 自动删除会话
@@ -78,9 +78,11 @@ CHECK 阶段默认用 `ralph-check` agent：
 
 | 权限 | 配置 | 说明 |
 |------|------|------|
-| `edit` | `deny` | 检查者不能改代码 —— 只读、只验证 |
-| `bash` | `allow` | 可运行验证命令（测试、构建、文件检查） |
+| `edit` | `deny` | **唯一的硬约束**。验证者不能改代码/测试/配置——这条挡住"善意帮修"主路径 |
+| `bash` | `allow` | **全开**。测试、构建、lint、查看历史……用什么工具链都行（pnpm/bun/mvn/mix 不会被白名单挡），与 opencode 内置 `plan`/`explore` agent 同形 |
 | `external_directory` | `allow` | 可读取启动时声明的 `extra_dirs`（项目外的源材料） |
+
+**为什么不靠 bash 白名单**：白名单覆盖不全生态（pnpm/bun/mvn/mix…），而且它根本防不住篡改——`npm test` 这种必然放行的命令里跑的脚本想改什么就改什么。真正能挡住篡改的是 `edit: deny`（直接编辑路径）+ 系统提示词（行为约束）。改 bash 子进程的副作用（缓存、构建产物）不算"验证者修改了文件"，不影响判定。
 
 插件用两种方式注册 `ralph-check` agent —— 通过 `config` hook 在内存里注册，以及在全局 `~/.config/opencode/agent/` 写一份文件（不碰你的项目）—— 无需手动配置。
 
@@ -234,7 +236,7 @@ flowchart LR
 
 ~/.config/opencode/                 # 用户全局 —— 不在你的项目目录里
 ├── agent/
-│   └── ralph-check.md              # 只读验证 agent（自动写入，带 managed 标记）
+│   └── ralph-check.md              # 验证者 agent（edit: deny + bash 开放，自动写入，带 managed 标记）
 ├── skills/                         # 自带 skill 同步到这里（自动，带 managed 标记）
 └── ralph-flow/
     └── workflows/                  # 全局自定义工作流（所有项目）

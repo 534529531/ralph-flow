@@ -160,7 +160,7 @@ export async function runCheckAndAdvance(
   const adversarialConfig = engine.getEffectiveAdversarialCheck(instId, workflow);
   const timeoutMin = Math.max(1, Math.round((adversarialConfig?.timeout_ms || DEFAULT_ADVERSARIAL_TIMEOUT_MS) / 60000));
   await injectPrompt(client, sessionId,
-    `## 🔍 CHECK 阶段 · 自动验证中\n\n正在用**独立只读会话**验证步骤 \`${step.id}\`（与本对话隔离运行，最长 ${timeoutMin} 分钟）。\n\n⏳ **现在无需你操作，请等待结果。** 这一步由独立会话完成，在这里发消息不会加快它、也不影响判定。\n> 迟迟没有结果时：\`/ralphflow-status\` 看进度，或 \`/ralphflow-cancel\` 取消。\n\n---\n\n以下是它正在核对的依据（供你了解，不用回复）：\n\n${visibleSections.join("\n\n")}`,
+    `## 🔍 CHECK 阶段 · 自动验证中\n\n正在用**独立验证会话**验证步骤 \`${step.id}\`（与本对话隔离运行，最长 ${timeoutMin} 分钟）。\n\n⏳ **现在无需你操作，请等待结果。** 这一步由独立会话完成，在这里发消息不会加快它、也不影响判定。\n> 迟迟没有结果时：\`/ralphflow-status\` 看进度，或 \`/ralphflow-cancel\` 取消。\n\n---\n\n以下是它正在核对的依据（供你了解，不用回复）：\n\n${visibleSections.join("\n\n")}`,
     true);
 
   let checkResult;

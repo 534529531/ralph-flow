@@ -1,10 +1,11 @@
 /**
  * Project setup — opencode adapter.
  *
- * - Writes the read-only ralph-check agent into the GLOBAL
+ * - Writes the ralph-check verifier agent into the GLOBAL
  *   ~/.config/opencode/agent/ (the plugin also registers it in-memory via the
  *   config hook, so the file is only a belt-and-suspenders discovery path) —
- *   never the project.
+ *   never the project. "Verifier" here means: `edit` hard-denied and bash open,
+ *   with non-mutation enforced by the system prompt — not by a bash allow-list.
  * - Syncs the plugin's skills into the GLOBAL ~/.config/opencode/skills/
  *   (opencode discovers skills from fixed filesystem locations only; the
  *   global one keeps the user's project tree clean). A managed marker keeps
@@ -60,40 +61,23 @@ const MANAGED_MARKER = ".ralph-flow-managed";
 // (RALPH_CHECK_AGENT_PERMISSION) so the on-disk agent file and the in-memory
 // agent registered in index.ts can never drift apart.
 const AGENT_FRONTMATTER = yaml.dump(
-  { description: "Ralph Flow 检查阶段 agent —— 只读验证", mode: "all", permission: RALPH_CHECK_AGENT_PERMISSION },
+  { description: "Ralph Flow 检查阶段 agent —— 验证者", mode: "all", permission: RALPH_CHECK_AGENT_PERMISSION },
   { lineWidth: -1, quotingType: '"' }
 ).trimEnd();
 
 const AGENT_CONTENT = `---
 ${AGENT_FRONTMATTER}
 ---
-你是 Ralph Flow 检查阶段的专用 agent。
+你是 Ralph Flow 检查阶段的验证者 agent。
 
-## 核心原则
-
-1. **只检查，不修改** - 你只能读取和验证，不能修改任何文件
-2. **执行验证命令** - 可以运行测试、检查文件、查看状态
-3. **输出结论** - 根据检查结果输出通过或不通过
-
-## 可用操作
-
-- 运行测试/构建命令（npm test、pytest、cargo test/build/clippy 等）
-- 查看文件内容（cat、head、tail）
-- 搜索代码（grep、find）
-- 检查 git 状态（git status、git diff）
-- 其他只读验证命令
-
-## 输出格式
-
-检查完成后输出：
-- 通过：先说明通过原因，最后一行输出 \`<promise-check>true</promise-check>\`
-- 不通过：先说明失败原因，最后一行输出 \`<promise-check>false</promise-check>\`
-
-标签必须独占最后一行。
+- \`edit\` 权限硬性拒绝：你不能修改任何文件。无例外。违规即本次验证作废。
+- \`bash\` 权限全开：测试/构建/lint/查看历史……用什么工具链都行（pnpm/bun/mvn/mix/...），命令的常规副作用（缓存、构建产物）不算"修改了文件"。
+- 不信 DO 报告，独立读代码、跑命令、看输出来判断。任何无法独立验证的依据项 → 不通过。
+- 通过 → 最后一行 \`<promise-check>true</promise-check>\`；不通过 → 最后一行 \`<promise-check>false</promise-check>\`。标签独占最后一行，证据为准。
 `;
 
 /**
- * Write the read-only ralph-check agent into opencode's GLOBAL agent dir
+ * Write the ralph-check verifier agent into opencode's GLOBAL agent dir
  * (~/.config/opencode/agent/, which opencode discovers), NOT the project — the
  * plugin also registers this agent in-memory via the `config` hook (see
  * index.ts), so this file is a belt-and-suspenders discovery path that keeps

@@ -234,7 +234,7 @@ manual_step:            # 可选：在 DO 之后、验证之前暂停以供人�
   - design
 
 adversarial_check:      # 可选：独立 CHECK 会话的配置
-  agent: ralph-check    # 可选：验证器使用的 opencode agent（默认 ralph-check，只读）
+  agent: ralph-check    # 可选：验证器使用的 opencode agent（默认 ralph-check，edit: deny + bash 全开）
   model:                # 可选：验证器模型；对象形式或 "provider/model" 字符串
     providerID: anthropic
     modelID: claude-sonnet-4-5

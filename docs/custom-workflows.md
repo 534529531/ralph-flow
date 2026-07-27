@@ -158,11 +158,11 @@ steps:
 
 ### `adversarial_check`
 
-配置独立验证会话。默认 CHECK 阶段用只读的 `ralph-check` agent 和它的默认模型。可自定义其中任意项：
+配置独立验证会话。默认 CHECK 阶段用 `ralph-check` agent（`edit: deny` 硬约束不修改 + `bash` 全开可执行任何验证命令）和它的默认模型。可自定义其中任意项：
 
 ```yaml
 adversarial_check:
-  agent: build                      # 换一个 agent（默认 ralph-check，只读）
+  agent: build                      # 换一个 agent（默认 ralph-check，edit 被硬拒绝）
   model:                            # 验证模型（对象形式）
     providerID: anthropic
     modelID: claude-haiku-4-5
@@ -177,7 +177,7 @@ adversarial_check:
 
 | 字段 | 说明 | 默认值 |
 |------|------|--------|
-| `agent` | 用哪个 agent 验证 | `ralph-check`（只读） |
+| `agent` | 用哪个 agent 验证 | `ralph-check`（`edit: deny` + `bash: allow`） |
 | `model` | `{providerID, modelID}` 对象或 `"provider/model"` 字符串 | 见下方「默认模型解析顺序」 |
 | `system_prompt` | 给检查者的额外 system prompt | 内置验证提示词 |
 | `timeout_ms` | 检查超时（毫秒，上限 `3600000`） | `900000`（15 分钟） |
@@ -195,7 +195,7 @@ adversarial_check:
 
 **使用场景：**
 - 用**更便宜的模型**验证（如用 Haiku 检查 Sonnet 的工作）
-- 用**更严格、只读不写**的 agent
+- 用**更严格、`edit` 被硬拒**的 agent
 - 为特定领域自定义 **system prompt**
 - 为需要更长验证的任务增大**超时**
 

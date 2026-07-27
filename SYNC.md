@@ -50,6 +50,7 @@ opencode 版和内部的 Claude Code 版 ralph-flow **功能一致**，但**只�
 | 全局工作流目录 | `~/.claude/ralph-flow/workflows/` | `~/.config/opencode/ralph-flow/workflows/`（项目>全局>内置三层解析一致） |
 | skill 发现 | `plugin.json` 的 `"skills":["./skills"]` 原生加载，零拷贝、不碰项目 | 无原生机制，`setup.ts` 同步到全局 `~/.config/opencode/skills/`（`.ralph-flow-managed` 标记，不覆盖用户同名，清理旧版误拷进项目的副本） |
 | CHECK agent | CLI `--allowedTools` 只读白名单，无 agent 概念 | `config` hook 内存注册 + 全局 `~/.config/opencode/agent/ralph-check.md` 文件（双保险，不碰项目） |
+| CHECK 权限 | CLI `--allowedTools` 白名单（Read/Glob/Grep + 一批非变更 bash 命令） | `ralph-check` agent：`edit: deny`（硬约束）+ `bash: allow`（全开），不靠 bash 白名单——与 opencode 内置的 `plan`/`explore` agent 同形；防篡改落在 `edit: deny` + 系统提示词（Authority + 反理性化表 + "别信报告"，参考 superpowers 方法论） |
 | CHECK 执行 | spawn `claude -p` 子进程 | SDK 独立 session + `ralph-check` agent（`edit: deny`） |
 | CHECK 取消 | `.adversarial-pid` 跨进程 kill 进程树 | `.adversarial-session` + 内存 `activeChecks`，`session.abort`；跨进程触达不到，结果由 phase-3 状态校验丢弃 |
 | adversarial_check.model | 字符串（CLI `--model`） | `{providerID, modelID}` 或 `"provider/model"`；裸名（如 `sonnet`）无法解析→回退 agent 默认（doctor 警告）；对象形式缺 `providerID`/`modelID` 同样被忽略并警告。未配置时默认跟随**属主会话当前模型**（新验证会话无历史，服务端只会回退全局默认，故由插件读属主会话最近 user 消息补位；验证 agent 显式 model 优先于它） |

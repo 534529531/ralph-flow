@@ -5,8 +5,8 @@
  * `claude -p` subprocess): same inputs, same { passed, infra?, reason } result,
  * same infra-vs-work-failure classification. The execution vehicle differs by
  * platform: here the verifier runs as an independent SDK session using the
- * read-only `ralph-check` agent (edit: deny), which is opencode's native
- * equivalent of the Claude version's --allowedTools whitelist.
+ * `ralph-check` agent (edit hard-denied, bash open), with mutation safety
+ * anchored on `edit: deny` + the system prompt rather than a bash allow-list.
  *
  * Cancellation: the check session id is written to the instance dir
  * (.adversarial-session — the counterpart of the Claude version's

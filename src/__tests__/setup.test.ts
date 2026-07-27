@@ -45,7 +45,7 @@ describe("setup — skills go to the global dir, not the project", () => {
     expect(fs.existsSync(path.join(projectDir, ".opencode", "skills"))).toBe(false);
   });
 
-  it("writes the read-only ralph-check agent into the GLOBAL dir, not the project", () => {
+  it("writes the ralph-check verifier agent into the GLOBAL dir, not the project", () => {
     setup(projectDir);
     const globalAgent = path.join(globalHome, "opencode", "agent", "ralph-check.md");
     expect(fs.existsSync(globalAgent)).toBe(true);
@@ -54,18 +54,15 @@ describe("setup — skills go to the global dir, not the project", () => {
     expect(fs.existsSync(path.join(projectDir, ".opencode", "agents"))).toBe(false);
   });
 
-  it("the generated agent frontmatter is valid YAML and encodes a read-only bash allow-list", () => {
+  it("the generated agent frontmatter is valid YAML and encodes edit-deny + bash-open", () => {
     setup(projectDir);
     const raw = fs.readFileSync(path.join(globalHome, "opencode", "agent", "ralph-check.md"), "utf-8");
     const fm = raw.match(/^---\n([\s\S]*?)\n---/);
     expect(fm).not.toBeNull();
     const meta = yaml.load(fm![1]) as any;
-    expect(meta.permission.edit).toBe("deny");
-    expect(meta.permission.external_directory).toBe("allow"); // extra_dirs must stay readable
-    expect(meta.permission.bash["*"]).toBe("deny");           // deny by default
-    expect(meta.permission.bash["cat *"]).toBe("allow");
-    expect(meta.permission.bash["cargo test *"]).toBe("allow");
-    expect(meta.permission.bash["rm *"]).toBeUndefined();      // mutating → not allow-listed
+    expect(meta.permission.edit).toBe("deny");                 // the one real mutation gate
+    expect(meta.permission.external_directory).toBe("allow");  // extra_dirs must stay readable
+    expect(meta.permission.bash).toBe("allow");                // open, no allow-list
   });
 
   it("does not clobber a user's own global ralph-check agent", () => {

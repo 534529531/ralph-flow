@@ -2096,86 +2096,72 @@ export function resolveCheckModel(model: AdversarialCheckConfig["model"]): { pro
 
 // ─── Adversarial check defaults (shared with check.ts) ──────────────────────
 
-export const DEFAULT_ADVERSARIAL_SYSTEM_PROMPT = `你是一个严格的检查者。你的职责是根据检查依据判断任务是否完成。
+export const DEFAULT_ADVERSARIAL_SYSTEM_PROMPT = `你是一个严格、独立的检查者。根据"检查依据"判断 DO 阶段声称完成的工作是否真的完成。
 
-## 核心原则
+## 铁律
 
-1. 只审查，不修改
-2. 严格按照"检查依据"判断，不要被其他因素干扰
-3. 如果有任何疑问，判定为不通过
+**你不能修改任何文件。无例外。** 你的 \`edit\` 权限已被硬性拒绝。bash 可以跑任意验证命令——命令产生的副作用（临时文件、缓存、构建产物）不算"你修改了文件"；但主动改源码/测试/配置都让本次验证作废。违规即失败，没有"仅此一次"。
 
-## 验证方法
+## 不要相信 DO 阶段的报告
 
-你必须**自主探索**项目来验证任务是否完成：
-- 根据任务类型，选择合适的验证方式
-- 基于检查依据中的要求，逐一验证每一项
-- 不要依赖任何外部提供的"实现总结"，只基于你自己的验证结果判断
+DO 的实现总结可能不完整、不准确、过于乐观。**你必须独立验证一切**：读真实代码、跑真实命令、看真实输出。无法独立验证的依据项 → 不通过。
 
-## 判断逻辑
+## 理性化——这些念头冒出来时
 
-**通过条件**：检查依据中的每一项都满足
-**不通过条件**：检查依据中任何一项不满足
+| 脑里冒出的想法 | 现实 |
+|---|---|
+| "测试挂了，顺手修一下再跑" | 污染证据，本次验证作废 |
+| "DO 报告说做完了" | 不信报告。看代码、跑测试，自己判断 |
+| "改的是无关文件" | 任何主动改动都让验证不可信 |
+| "看着对，应该通过" | 通过必须有执行证据，禁止"看着对" |
+| "对结论不确定" | 任何疑问 → 不通过，没有例外 |
 
 ## 输出格式
 
-- 通过：先说明通过原因，最后一行输出 <promise-check>true</promise-check>
-- 不通过：先说明失败原因，最后一行输出 <promise-check>false</promise-check>
+- 通过：每项依据的独立证据 → 最后一行 \`<promise-check>true</promise-check>\`
+- 不通过：每项依据的独立证据 + 失败原因 → 最后一行 \`<promise-check>false</promise-check>\`
 
-标签必须独占最后一行。`;
+标签独占最后一行。证据为准，不准只复述检查依据。`;
 
 export const DEFAULT_ADVERSARIAL_TIMEOUT_MS = 900_000;
 
-// ─── Read-only verifier permissions (parity with the Claude version) ─────────
+// ─── Verifier permissions: edit hard-deny + bash open + prompt discipline ────
 //
-// The Claude plugin runs the checker as `claude -p --allowedTools "…"` with an
-// explicit ALLOW-list: Read/Glob/Grep + a curated set of non-mutating Bash
-// subcommands (never rm/mv/cargo-fix/plain-fmt). opencode's agent permission
-// model is the native equivalent: `bash` accepts a `{ pattern: action }` map
-// where the command string is matched against glob patterns, the most-specific
-// match wins, and `"*"` is the fallback. We deny by default and allow the SAME
-// command set the Claude version does, so `bash: allow` no longer lets the
-// verifier mutate the very workspace it is judging.
+// Design choice: we don't gate the verifier's bash with an allow-list. Three
+// reasons grounded in how opencode's own built-in "don't touch code" agents are
+// configured (see `opencode agent list`):
 //
-// Patterns use the trailing-space form ("cat *") so short names can't overmatch
-// a mutating command (e.g. a bare "tr*" would also match "truncate"). Bare
-// forms are added only for the handful of commands checks commonly run without
-// arguments.
+//   1. The `plan` agent — whose job is also "read/think, don't ship code" — uses
+//      exactly `edit *: deny` (plus a narrow hole for its scratchpad) and leaves
+//      bash fully open. That's opencode's own canonical answer to the same
+//      dilemma.
+//   2. The `explore` agent doesn't even deny edit — it leans entirely on its
+//      system prompt. So "no mutation" doesn't require a bash allow-list to
+//      hold; it can be enforced by prompt alone.
+//   3. A bash allow-list can't actually prevent mutation anyway: `npm test`
+//      (which any sane allow-list must permit) can run arbitrary scripts that
+//      rewrite src/. The list gates what the model types directly, not what
+//      those commands do. So the "safety" it appears to provide is largely
+//      theatrical, while it very really blocks pnpm/bun/mvn/mix/... — the
+//      coverage gap that bit ralph-check users in practice.
+//
+// The hard constraint that actually holds is `edit: deny` — it blocks the
+// direct "open file and change it" path the model would take to "helpfully
+// fix" failing work. Bash side-effects (test writes, build artifacts) aren't
+// the verifier agreeing with itself, so they don't poison the verdict the way
+// a direct edit would. Behavioral fidelity we enforce via the system prompt
+// (see DEFAULT_ADVERSARIAL_SYSTEM_PROMPT), borrowing persuasion patterns
+// (authority / anti-rationalization table / "don't trust the report") from
+// superpowers' research — empirically a 33% → 72% compliance lift for
+// discipline prompts.
 export type PermissionAction = "allow" | "deny" | "ask";
 
-export const RALPH_CHECK_BASH_PERMISSION: Record<string, PermissionAction> = {
-  "*": "deny",
-  // Inspection / read-only file + text tools.
-  "cat *": "allow", "head *": "allow", "tail *": "allow", "ls *": "allow",
-  "find *": "allow", "grep *": "allow", "wc *": "allow", "file *": "allow", "stat *": "allow",
-  "awk *": "allow", "sed *": "allow", "cut *": "allow", "sort *": "allow", "uniq *": "allow",
-  "tr *": "allow", "cd *": "allow", "xargs *": "allow",
-  // Read-only text / arithmetic / structured-data helpers used by check scripts.
-  "jq *": "allow", "bc *": "allow", "echo *": "allow", "printf *": "allow",
-  "test *": "allow", "true": "allow", "true *": "allow",
-  "diff *": "allow", "cmp *": "allow", "comm *": "allow", "basename *": "allow",
-  "dirname *": "allow", "realpath *": "allow", "readlink *": "allow", "pwd": "allow", "pwd *": "allow",
-  "nm *": "allow",
-  // Git inspection (never mutating).
-  "git status": "allow", "git status *": "allow", "git diff": "allow", "git diff *": "allow",
-  "git log": "allow", "git log *": "allow", "git show *": "allow",
-  // Test runners.
-  "npm test": "allow", "npm test *": "allow", "npm run test *": "allow",
-  "pytest": "allow", "pytest *": "allow", "go test *": "allow", "make test": "allow", "make test *": "allow",
-  // Cargo verification — build/test/run only touch target/, never source.
-  // `cargo fmt` is allowed ONLY with --check (plain fmt rewrites source).
-  "cargo build": "allow", "cargo build *": "allow", "cargo test": "allow", "cargo test *": "allow",
-  "cargo run *": "allow", "cargo nextest *": "allow", "cargo clippy": "allow", "cargo clippy *": "allow",
-  "cargo llvm-cov *": "allow", "cargo geiger *": "allow", "cargo clean *": "allow",
-  "cargo fmt --check*": "allow", "cargo metadata *": "allow", "cargo tree *": "allow",
-  "cargo audit *": "allow", "cargo deny *": "allow",
-};
-
-/** The full permission block for the read-only ralph-check verifier agent. */
+/** The full permission block for the adversarial-check verifier agent. */
 export const RALPH_CHECK_AGENT_PERMISSION = {
   edit: "deny" as PermissionAction,
   webfetch: "allow" as PermissionAction,
   external_directory: "allow" as PermissionAction,
-  bash: RALPH_CHECK_BASH_PERMISSION,
+  bash: "allow" as PermissionAction,
 };
 
 
