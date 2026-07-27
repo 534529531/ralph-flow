@@ -74,7 +74,7 @@ ralph-flow 强制 AI 遵循结构化工作流，**每一步都有独立验证**�
 先把你的需求拆解成可验证的检查点清单，再持续执行直到每个检查点通过。每轮执行 DO → CHECK 循环，满足审查标准才算通过。
 
 ```
-/ralphflow-start loop "用 JWT 和 refresh token 实现用户认证模块"
+/loop "用 JWT 和 refresh token 实现用户认证模块"
 ```
 
 ```mermaid
@@ -92,7 +92,7 @@ flowchart LR
 七步流水线，从提议到归档。每一步产出构件后流入下一步，并在每个关口独立验证。
 
 ```
-/ralphflow-start spec "添加 OAuth2 用户认证功能"
+/spec "添加 OAuth2 用户认证功能"
 ```
 
 ```mermaid
@@ -177,12 +177,17 @@ npm install && npm run build
 
 ## 🚀 快速开始
 
+每个工作流都自动注册成 slash 命令——打开 opencode 输入 `/` 就能看到 `loop`、`spec` 和你的自定义工作流（描述以 `(ralph-flow)` 标注），直接补全启动：
+
 ```
-/ralphflow-start loop "用 JWT 和 refresh token 实现用户认证模块"
+/loop "用 JWT 和 refresh token 实现用户认证模块"
 ```
+
+> 快捷命令是启动时的快照：新建的工作流在下个会话才有命令，此前用 `/ralphflow-start <工作流名> "任务"`。与你自己命令撞名的工作流不会覆盖你，同样走 `/ralphflow-start`。
 
 | 命令 | 作用 |
 |------|------|
+| `/ralphflow-start` | 通用启动入口（工作流名 + 任务描述） |
 | `/ralphflow-status` | 显示当前步骤、阶段、失败计数（或全部实例） |
 | `/ralphflow-continue` | 批准手动审查 · 恢复暂停的工作流 · 接管中断的实例 |
 | `/ralphflow-cancel` | 取消并归档最终报告 |

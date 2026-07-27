@@ -15,26 +15,12 @@ export interface RalphCommandDef {
   template: string;
 }
 
-export const RALPH_COMMANDS: Record<string, RalphCommandDef> = {
-  "ralphflow-start": {
-    description: "启动一个 ralph-flow 工作流",
-    template: `启动一次 Ralph Flow 工作流执行。
-
-用户输入：$ARGUMENTS
-
-用户需要同时指定工作流名称和任务描述。如果信息不完整，向用户询问：
-
-- 只有任务、没有工作流 → 询问用哪个工作流
-- 只有工作流、没有任务 → 询问要做什么
-- 两者都没有 → 两者都问
-
-不要猜测该用哪个工作流——让用户来选。
-
-可用工作流：用 \`ralphflow_list\` 工具查看。
-
-信息齐全后，调用 \`ralphflow_start\` 工具启动工作流。
-
-**extra_dirs**：如果任务的源材料位于当前项目目录之外（例如把 \`~/some-c-lib\` 迁移进本项目），把这些目录通过可选的 \`extra_dirs\` 参数传入——独立的 CHECK 验证器从项目目录运行，必须能读取它要对照验证的源材料。每个目录在启动时都会校验；不存在的路径会立即拒绝启动。不要猜测：只传用户确实提到的路径。
+/**
+ * 由 \`ralphflow_start\` 启动工作流之后，模型需要知道的全部机制说明。
+ * /ralphflow-start 和每个工作流的动态快捷命令（/loop、/spec……）共享这份文本，
+ * 保证两条入口的行为指引永远一致。
+ */
+const SHARED_MECHANISM = `**extra_dirs**：如果任务的源材料位于当前项目目录之外（例如把 \`~/some-c-lib\` 迁移进本项目），把这些目录通过可选的 \`extra_dirs\` 参数传入——独立的 CHECK 验证器从项目目录运行，必须能读取它要对照验证的源材料。每个目录在启动时都会校验；不存在的路径会立即拒绝启动。不要猜测：只传用户确实提到的路径。
 
 每次启动都会创建一个新的**工作流实例**（响应里带有它的实例 id）。一个会话最多运行一个实例；同一项目下的多个会话可以各自并行运行自己的实例。如果工具提示本会话已有活跃实例，请先完成或取消它。
 
@@ -77,7 +63,28 @@ export const RALPH_COMMANDS: Record<string, RalphCommandDef> = {
 - **CHECK 阶段**：告知用户验证正在进行（例如「CHECK 阶段已开始，等待验证」）
 - **步骤完成**：检测到 done 标记时确认（例如「步骤完成，进入 CHECK」）
 
-这能帮助用户跟踪工作流进度，无需手动查看状态。`,
+这能帮助用户跟踪工作流进度，无需手动查看状态。`;
+
+export const RALPH_COMMANDS: Record<string, RalphCommandDef> = {
+  "ralphflow-start": {
+    description: "启动一个 ralph-flow 工作流",
+    template: `启动一次 Ralph Flow 工作流执行。
+
+用户输入：$ARGUMENTS
+
+用户需要同时指定工作流名称和任务描述。如果信息不完整，向用户询问：
+
+- 只有任务、没有工作流 → 询问用哪个工作流
+- 只有工作流、没有任务 → 询问要做什么
+- 两者都没有 → 两者都问
+
+不要猜测该用哪个工作流——让用户来选。
+
+可用工作流：用 \`ralphflow_list\` 工具查看。
+
+信息齐全后，调用 \`ralphflow_start\` 工具启动工作流。
+
+${SHARED_MECHANISM}`,
   },
 
   "ralphflow-continue": {
@@ -216,7 +223,7 @@ export const RALPH_COMMANDS: Record<string, RalphCommandDef> = {
 
 4. **校验**：调用 \`ralphflow_doctor\` 工具，检查新工作流那一节。修复它为该工作流报出的每一个问题和警告，重新运行 doctor，重复直到它的结论是「可启动」且没有警告。
 
-5. **交接**：把最终的步骤概览展示给用户，并告诉他们怎么运行：用 \`/ralphflow-start\`，工作流填 \`<name>\`，再加上他们的任务描述。
+5. **交接**：把最终的步骤概览展示给用户，并告诉他们怎么运行：本会话里用 \`/ralphflow-start\`，工作流填 \`<name>\`，再加上他们的任务描述；从**下个会话**起，还可以直接用自动注册的 \`/<name>\` 快捷命令（补全列表里以 \`(ralph-flow)\` 标注）。
 
 ## YAML 结构（精确——引擎会校验以下全部内容）
 
@@ -279,3 +286,68 @@ steps:                  # 必填，非空；执行从**第一个**元素开始
 - **语言**：\`do\`/\`check\` 的正文用用户的语言书写。`,
   },
 };
+
+// ─── 动态工作流命令（/loop、/spec……）──────────────────────────────────────────
+
+/**
+ * 把工作流名规范化为 slash 命令名：小写、非法字符折成连字符。
+ * 返回 null 表示这个名字无法构成命令（例如全是中文/符号），该工作流只能走
+ * /ralphflow-start。规范化只是命令名——模板里给 ralphflow_start 的 workflow
+ * 参数始终是原始工作流名。
+ */
+export function workflowCommandName(workflowName: string): string | null {
+  const slug = String(workflowName)
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || null;
+}
+
+/**
+ * 为单个工作流生成它的快捷命令定义（/loop、/spec……）。description 以
+ * (ralph-flow) 前缀标注来源，对应补全列表里 "loop (ralph-flow) …" 的观感。
+ * 模板与 /ralphflow-start 共享 SHARED_MECHANISM，唯一区别是工作流名已固定、
+ * 只需要任务描述。
+ */
+export function buildWorkflowCommand(workflowName: string, desc: string): RalphCommandDef {
+  return {
+    description: `(ralph-flow) ${desc || `启动 ${workflowName} 工作流`}`,
+    template: `启动 Ralph Flow 的 \`${workflowName}\` 工作流。
+
+用户输入（任务描述）：$ARGUMENTS
+
+调用 \`ralphflow_start\` 工具启动：
+- \`workflow\` 参数固定填 \`"${workflowName}"\`——不要改成别的工作流名
+- \`task\` 参数填用户输入的任务描述
+- 如果用户没有给出任务描述（输入为空），先询问要做什么，再调用
+
+${SHARED_MECHANISM}`,
+  };
+}
+
+/**
+ * 把每个可启动的工作流注册成一个快捷 slash 命令（直接改传入的 commands 表）。
+ *
+ * 这是启动时的快照：此后新建的工作流要到下个会话（或重启）才有命令，
+ * 在此之前走 /ralphflow-start。
+ *
+ * 冲突策略：绝不覆盖——用户自己的命令、其他插件的命令、静态管理命令
+ * （ralphflow-*，调用方先注册）都优先，撞名的工作流静默跳过，仍可用
+ * /ralphflow-start <name> 启动。定义无效（invalid）的工作流不注册：
+ * 启动必然失败，留给 /ralphflow-doctor 暴露。
+ */
+export function registerWorkflowCommands(
+  commands: Record<string, { template: string; description?: string } | undefined>,
+  workflows: Array<{ name: string; desc: string; invalid?: boolean }>,
+): void {
+  const taken = new Set<string>();
+  for (const wf of workflows) {
+    if (wf.invalid) continue;
+    const cmdName = workflowCommandName(wf.name);
+    if (!cmdName || taken.has(cmdName)) continue; // 规范化后撞名（如 My_Flow 与 my-flow）
+    taken.add(cmdName);
+    if (!commands[cmdName]) {
+      commands[cmdName] = buildWorkflowCommand(wf.name, wf.desc);
+    }
+  }
+}

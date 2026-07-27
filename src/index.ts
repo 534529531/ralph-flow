@@ -5,7 +5,9 @@
  *   MCP server (tools)   → Hooks.tool (src/tools.ts)
  *   Stop hook             → session.idle event (src/driver.ts)
  *   PostToolUse hook      → not needed (tool context carries sessionID)
- *   skills/ (commands)    → Hooks.config command registration (src/commands.ts)
+ *   skills/ (commands)    → Hooks.config command registration (src/commands.ts);
+ *                           every launchable workflow ALSO gets its own slash
+ *                           command there (/loop, /spec, …) — see the config hook
  *   spawned `claude -p`   → independent SDK session (src/check.ts)
  *
  * Ownership is just the session_id in each instance's state.json — no session
@@ -15,7 +17,7 @@
  */
 
 import type { Plugin, PluginModule, Config } from "@opencode-ai/plugin";
-import { RALPH_COMMANDS } from "./commands.js";
+import { RALPH_COMMANDS, registerWorkflowCommands } from "./commands.js";
 import { createEngine, type Platform, RALPH_CHECK_AGENT_PERMISSION } from "./engine.js";
 import { createTools } from "./tools.js";
 import { handleSessionIdle, handleSessionGone } from "./driver.js";
@@ -50,6 +52,11 @@ const RalphFlowPlugin: Plugin = async ({ client, directory }) => {
           input.command[name] = def;
         }
       }
+
+      // 动态注册：每个可启动的工作流各得到一个快捷 slash 命令（/loop、
+      // /spec……），补全列表里显示为 "loop (ralph-flow) <描述>"。省去
+      // list → start 的两步旅程。静态管理命令先注册，撞名一律不覆盖。
+      registerWorkflowCommands(input.command, engine.listWorkflows());
 
       // Register the ralph-check agent dynamically as well, so the very first
       // session works even before setup() has written the agent file.
