@@ -1076,7 +1076,7 @@ export function createEngine(projectDir: string, platform: Platform) {
 
     // reset / auto_reset 提示
     if (wf.steps.length > 0 && wf.steps[0].reset === true) {
-      warnings.push(`首步 "${wf.steps[0].id}" 标了 reset，但启动时本身就是新会话，reset 不生效`);
+      warnings.push(`首步 "${wf.steps[0].id}" 标了 reset：启动时已是新会话不触发，但后续步骤失败 on_fail 回到首步时仍会触发（此时上下文可能已膨胀，reset 有意义）`);
     }
     if (wf.auto_reset === true) {
       const allOnFailSelf = wf.steps.every((s) => s.on_fail === s.id);
