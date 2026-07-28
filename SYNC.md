@@ -18,7 +18,7 @@ opencode 版和内部的 Claude Code 版 ralph-flow **功能一致**，但**只�
 | parseWorkflowFile / loadWorkflow / listWorkflows | `engine.ts` 同名 | 校验规则、错误文案、三层解析（项目>全局>内置）逐一一致 |
 | lintWorkflow / diagnoseWorkflowFiles / buildDoctorReport | `engine.ts` 同名 | doctor 全部诊断逻辑一致 |
 | buildDoPrompt / buildCheckPrompt / buildSubWorkflowUserTask | `engine.ts` 同名 | 提示词模板逐字一致（仅路径 `.claude/`→`.opencode/`） |
-| handleCheckPassed / handleCheckFailed / resolveSubWorkflowEntry | `engine.ts` 同名 | 检查结果状态机、子工作流栈、暂停/重试路由一致 |
+| handleCheckPassed / handleCheckFailed / resolveSubWorkflowEntry | `engine.ts` 同名 | 检查结果状态机、子工作流栈、暂停/重试路由一致。`TransitionResult` 增加 opencode 原生可选字段 `enteredCompositeStepId`（仅元数据，行为不变）：reset 门需要知道"本次转换进入了哪个 composite 步骤"——进入子工作流后 state 已推进到子工作流内部，(source→current) 无法回指 composite 步骤上的 `reset`/`auto_reset` 标记 |
 | buildReportText / migrateLegacyInstance | `engine.ts` 同名 | 报告格式一致；迁移源不同（旧 opencode 是 `ralph-flow.local.md`） |
 | adversarialCheck 的**结果契约** `{passed, infra?, reason}` + infra/工作失败分类 | `check.ts` | 契约一致；执行载体从 spawn `claude -p` 换为 SDK 独立 session |
 | 六个工具的**行为与文案** | `tools.ts` | 同名（ralphflow_start/continue/…），continue 同样三阶段；文案一致 |

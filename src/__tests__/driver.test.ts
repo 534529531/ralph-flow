@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { createEngine, type Platform, type Engine, RALPH_CHECK_AGENT_PERMISSION } from "../engine.js";
+import { createEngine, type Platform, type Engine, RALPH_CHECK_AGENT_PERMISSION, shouldResetOnTransition } from "../engine.js";
 import { detectDoneTag, stripCodeBlocks, handleSessionIdle, __resetDrivingSessions } from "../driver.js";
 import { createTools } from "../tools.js";
 
@@ -65,6 +65,9 @@ describe("stripCodeBlocks", () => {
 let tmpDir: string;
 let engine: Engine;
 let injected: Array<{ sessionId: string; text: string; noReply: boolean }>;
+let createdSessions: any[];
+let tuiPublished: any[];
+let abortedSessions: Array<{ id: string; ownersAtAbort: string[] }>;
 let lastAssistantText: string;
 let lastHasToolUse: boolean;
 
@@ -452,5 +455,451 @@ describe("handleSessionIdle", () => {
     lastAssistantText = "let me explain";
     await handleSessionIdle(makeClient(), engine, "sess-1");
     expect(injected.length).toBe(0);
+  });
+});
+
+// ─── Reset Gate (context reset on cross-step transitions) ────────────────────
+
+// Shared by both reset-gate describe blocks. Creates a client whose session.create
+// returns a fresh top-level session for 🔄-titled resets, a chk-* session otherwise.
+function makeClientWithSessionCreate() {
+  const newSessionId = "new-" + Math.random().toString(36).slice(2, 8);
+  const record = (args: any) => {
+    injected.push({
+      sessionId: args.path.id,
+      text: args.body.parts[0].text,
+      noReply: !!args.body.noReply,
+    });
+    return { data: {} };
+  };
+  return {
+    session: {
+      messages: async () => ({
+        data: [
+          {
+            info: { role: "assistant" },
+            parts: [
+              ...(lastHasToolUse ? [{ type: "tool" }] : []),
+              { type: "text", text: lastAssistantText },
+            ],
+          },
+        ],
+      }),
+      create: async (args: any) => {
+        createdSessions.push(args);
+        const title = args.body?.title || "";
+        if (title.startsWith("🔄")) {
+          return { data: { id: newSessionId } };
+        }
+        return { data: { id: "chk-" + Math.random().toString(36).slice(2) } };
+      },
+      delete: async () => ({}),
+      abort: async (args: any) => {
+        // Snapshot ownership at abort time so tests can prove the abort ran
+        // AFTER claimOwnership (an abort before it would make session.error
+        // → handleSessionGone pause the very instance being reset).
+        abortedSessions.push({
+          id: args.path.id,
+          ownersAtAbort: engine.listInstances().map((i) => `${i.id}:${i.owner}`),
+        });
+        return {};
+      },
+      promptAsync: async (args: any) => record(args),
+      prompt: async (args: any) => {
+        if (String(args.path.id).startsWith("chk-")) {
+          return { data: { parts: [{ type: "text", text: `check reason\n<promise-check>${checkVerdict}</promise-check>` }] } };
+        }
+        return record(args);
+      },
+    },
+    tui: {
+      publish: async (args: any) => {
+        tuiPublished.push(args);
+        return { data: true };
+      },
+      showToast: async () => ({ data: true }),
+    },
+  };
+}
+
+describe("reset gate", () => {
+  const WF_RESET = `
+steps:
+  - id: build
+    desc: build it
+    do: build the thing
+    check: verify the thing
+    input: user input
+    output: "thing.md"
+    on_pass: review
+    on_fail: build
+    max_fail_count: 3
+  - id: review
+    desc: review step
+    do: review work
+    check: verify review
+    input: thing.md
+    output: "result.md"
+    reset: true
+    on_pass: deploy
+    on_fail: review
+    max_fail_count: 2
+  - id: deploy
+    desc: deploy step
+    do: deploy
+    check: verify deploy
+    input: result.md
+    output: "deployed.md"
+    on_pass: done
+    on_fail: deploy
+    max_fail_count: 1
+`;
+
+  function startInstanceInStep(step = "build", sessionId = "sess-1"): string {
+    const instId = engine.generateInstanceId("wf");
+    fs.mkdirSync(engine.getInstanceDir(instId), { recursive: true });
+    engine.writeArtifactsDirName(instId, "task");
+    engine.writeState({ active: true, workflow_name: "wf", current_step: step, current_phase: "do", fail_count: 0, user_task: "task", paused: false, session_id: sessionId }, instId);
+    const wf = engine.loadWorkflow("wf")!;
+    engine.buildDoPrompt(instId, wf.steps.find((s) => s.id === step) as any, "task");
+    return instId;
+  }
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ralph-flow-driver-"));
+    const platform: Platform = {};
+    engine = createEngine(tmpDir, platform) as Engine;
+    const wfDir = path.join(tmpDir, ".opencode", "ralph-flow", "workflows");
+    fs.mkdirSync(wfDir, { recursive: true });
+    fs.writeFileSync(path.join(wfDir, "wf.yaml"), WF_RESET);
+    injected = [];
+    createdSessions = [];
+    tuiPublished = [];
+    abortedSessions = [];
+    lastAssistantText = "";
+    lastHasToolUse = false;
+    checkVerdict = "true";
+  });
+
+  afterEach(() => {
+    __resetDrivingSessions();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("check pass → target step with reset: true creates new session and sends farewell to old", async () => {
+    checkVerdict = "true";
+    const instId = startInstanceInStep("build");
+    lastAssistantText = "did the work\n<promise>done</promise>";
+    const client = makeClientWithSessionCreate();
+    await handleSessionIdle(client, engine, "sess-1");
+
+    // Old session should get farewell message
+    const oldMsgs = injected.filter((i) => i.sessionId === "sess-1");
+    expect(oldMsgs.some((m) => m.text.includes("上下文已重置") && m.noReply)).toBe(true);
+
+    // New session should get the transition text with next step
+    const newMsgs = injected.filter((i) => i.sessionId !== "sess-1" && i.sessionId !== "chk-"
+      && !String(i.sessionId).startsWith("chk-"));
+    expect(newMsgs.length).toBeGreaterThan(0);
+    expect(newMsgs.some((m) => m.text.includes("检查结果：通过") && m.text.includes("review"))).toBe(true);
+
+    // Instance is now owned by the new session
+    const st = engine.readState(instId)!;
+    expect(st.session_id).not.toBe("sess-1");
+
+    // The reset session is created pinned to THIS project directory
+    // (multi-project TUI would otherwise land it under the wrong project)
+    const resetCreate = createdSessions.find((a) => String(a.body?.title || "").startsWith("🔄"));
+    expect(resetCreate?.query?.directory).toBe(tmpDir);
+
+    // CRITICAL: the reset session must be a TOP-LEVEL session. With a parentID
+    // it becomes a child session, and the TUI's /session list (dialog-session-list)
+    // and home index both filter child sessions out — the workflow then runs in
+    // a session the user can never find ("reset said it happened but nothing did").
+    expect(resetCreate?.body?.parentID).toBeUndefined();
+
+    // The TUI is asked to follow the workflow into the new session.
+    const nav = tuiPublished.find((p) => p.body?.type === "tui.session.select");
+    expect(nav?.body?.properties?.sessionID).toBe(st.session_id);
+    expect(nav?.query?.directory).toBe(tmpDir);
+
+    // The old session's in-flight turn is aborted — otherwise it keeps running
+    // to completion while the new session redoes the same step (two sessions
+    // editing one workspace concurrently).
+    const abortRec = abortedSessions.find((a) => a.id === "sess-1");
+    expect(abortRec).toBeTruthy();
+    // …and the abort must run AFTER ownership moved, or session.error
+    // (MessageAbortedError) → handleSessionGone would pause this instance.
+    expect(abortRec?.ownersAtAbort.every((o) => !o.endsWith(":sess-1"))).toBe(true);
+    // Instance stays active and unpaused after the whole reset.
+    expect(engine.readState(instId)!.paused ?? false).toBe(false);
+    expect(engine.readState(instId)!.active).toBe(true);
+
+    // The new session's first message opens with a handoff briefing: why it
+    // exists, where the workflow stands, where the artifacts live — so a cold
+    // model isn't greeted by a bare "检查结果：通过" with zero context.
+    const handoff = newMsgs.find((m) => m.text.includes("会话交接说明"));
+    expect(handoff).toBeTruthy();
+    expect(handoff?.text).toContain("`wf`");                 // workflow name
+    expect(handoff?.text).toContain("第 2/3 步");            // progress: now on step 2 of 3
+    expect(handoff?.text).toContain("build ✓");              // completed step marked from step records
+    expect(handoff?.text).toContain("review 👈");            // current step highlighted
+    expect(handoff?.text).toContain("ralph-flow/artifacts"); // artifacts dir pointer
+    expect(handoff?.text).toContain("<promise>done</promise>"); // interaction contract
+    expect(handoff?.text).toContain("检查结果：通过");        // original transition text preserved below
+  });
+
+  it("check fail → on_fail to self (same step, step marked reset) → no new session", async () => {
+    checkVerdict = "false";
+    startInstanceInStep("review");
+    lastAssistantText = "did the work\n<promise>done</promise>";
+    await handleSessionIdle(makeClientWithSessionCreate(), engine, "sess-1");
+
+    // No farewell message, no new session — just a retry
+    expect(injected.some((m) => m.text.includes("上下文已重置"))).toBe(false);
+    expect(injected.some((m) => m.text.includes("失败 ✗") && m.text.includes("review"))).toBe(true);
+  });
+
+  it("check pass → normal step (no reset) → no new session (injected normally)", async () => {
+    checkVerdict = "true";
+    startInstanceInStep("review");
+    lastAssistantText = "did the work\n<promise>done</promise>";
+    await handleSessionIdle(makeClientWithSessionCreate(), engine, "sess-1");
+
+    // No farewell — normal injection into old session
+    expect(injected.some((m) => m.text.includes("上下文已重置"))).toBe(false);
+    // Should find deploy step in transition (review on_pass = deploy)
+    expect(injected.some((m) => m.text.includes("deploy"))).toBe(true);
+  });
+
+  it("manual gate stacks with reset: review in old session, reset fires after approval + check pass", async () => {
+    // Three-party timing: the human reviews in the OLD session, the verifier runs
+    // in its OWN session, and the context reset must fire only after the approved
+    // step's check passes (on the transition build → review, which is marked reset).
+    const wfDir = path.join(tmpDir, ".opencode", "ralph-flow", "workflows");
+    fs.writeFileSync(path.join(wfDir, "wf.yaml"), "manual_step: [build]\n" + WF_RESET);
+
+    checkVerdict = "true";
+    const instId = startInstanceInStep("build");
+    engine.writeManualStepMarker(instId);
+    lastAssistantText = "did the work\n<promise>done</promise>";
+    const client = makeClientWithSessionCreate();
+
+    // 1. Done on a manual step → review gate arms; no reset, no check yet.
+    await handleSessionIdle(client, engine, "sess-1");
+    expect(injected.some((m) => m.sessionId === "sess-1" && m.text.includes("轮到你审查"))).toBe(true);
+    expect(injected.some((m) => m.text.includes("上下文已重置"))).toBe(false);
+    expect(engine.readState(instId)!.session_id).toBe("sess-1");
+
+    // 2. User approves → gate cleared (done-tag marker deliberately kept).
+    const tools = createTools(engine, client);
+    await tools.ralphflow_continue.execute({}, { sessionID: "sess-1" } as any);
+
+    // 3. Next idle → check runs (pass) → transition to review (reset) → new session.
+    await handleSessionIdle(client, engine, "sess-1");
+    const st = engine.readState(instId)!;
+    expect(st.current_step).toBe("review");
+    expect(st.session_id).not.toBe("sess-1");
+    expect(injected.some((m) => m.sessionId === "sess-1" && m.text.includes("上下文已重置") && m.noReply)).toBe(true);
+    const newMsgs = injected.filter((m) => m.sessionId === st.session_id);
+    expect(newMsgs.some((m) => m.text.includes("检查结果：通过") && m.text.includes("review"))).toBe(true);
+  });
+
+  it("ralphflow_reset swaps the context container but keeps fail_count (no amnesty)", async () => {
+    const instId = startInstanceInStep("build");
+    engine.writeState({ ...engine.readState(instId)!, fail_count: 2, last_failure_reason: "broke twice" }, instId);
+    const client = makeClientWithSessionCreate();
+    const tools = createTools(engine, client);
+
+    await tools.ralphflow_reset.execute({}, { sessionID: "sess-1" } as any);
+
+    const st = engine.readState(instId)!;
+    expect(st.fail_count).toBe(2);                      // budget NOT reset — max_fail_count brake stays real
+    expect(st.last_failure_reason).toBe("broke twice"); // failure context carried into the new session
+    expect(st.session_id).not.toBe("sess-1");           // ownership moved
+    // The DO prompt cache is refreshed so idle nudges in the new session match the first injection
+    expect(engine.readDoPromptCache(instId)).toContain("broke twice");
+    const newMsgs = injected.filter((m) => m.sessionId === st.session_id);
+    expect(newMsgs.some((m) => m.text.includes("上下文已手动重置"))).toBe(true);
+    // Manual reset also creates a TOP-LEVEL session (child sessions are hidden
+    // from /session) and asks the TUI to navigate there
+    expect(createdSessions.find((a) => String(a.body?.title || "").startsWith("🔄"))?.body?.parentID).toBeUndefined();
+    expect(tuiPublished.some((p) => p.body?.type === "tui.session.select" && p.body?.properties?.sessionID === st.session_id)).toBe(true);
+    // Manual reset runs INSIDE the old session's active turn (the model called
+    // the tool mid-turn) — that turn must be aborted so it can't keep editing
+    // the workspace in parallel with the new session. Abort after ownership move.
+    const abortRec = abortedSessions.find((a) => a.id === "sess-1");
+    expect(abortRec).toBeTruthy();
+    expect(abortRec?.ownersAtAbort.every((o) => !o.endsWith(":sess-1"))).toBe(true);
+    // Handoff briefing also wraps the manual reset text
+    const handoff = newMsgs.find((m) => m.text.includes("会话交接说明"));
+    expect(handoff?.text).toContain("上下文已手动重置");
+    expect(handoff?.text).toContain("build 👈"); // still on build, redoing it
+  });
+
+  it("ralphflow_reset refuses when the caller is not the owner", async () => {
+    const instId = startInstanceInStep("build", "sess-owner");
+    const client = makeClientWithSessionCreate();
+    const tools = createTools(engine, client);
+    const res = await tools.ralphflow_reset.execute({}, { sessionID: "sess-1" } as any);
+    // sess-1 owns nothing; single instance → resolves with attach semantics → refused
+    expect(String(res)).toContain("属主");
+    expect(engine.readState(instId)!.session_id).toBe("sess-owner"); // untouched
+  });
+});
+
+// ─── Reset Gate on sub-workflow entry (nested workflows) ─────────────────────
+// handleCheckPassed pushes the parent frame and advances the state to the
+// child's first step BEFORE the driver's reset gate runs, so the gate must look
+// at the composite step on top of the state stack — not at the raw
+// (sourceStep → childFirstStep) pair, which lives in different workflows.
+
+describe("reset gate on sub-workflow entry", () => {
+  const PARENT_WF = `
+steps:
+  - id: a
+    desc: first
+    do: do a
+    check: check a
+    input: i
+    output: o
+    on_pass: nest
+    on_fail: a
+    max_fail_count: 2
+  - id: nest
+    desc: nested block
+    workflow: child
+    input: i
+    output: o
+    on_pass: done
+    on_fail: nest
+    max_fail_count: 1
+`;
+  const CHILD_WF = `
+steps:
+  - id: sub1
+    desc: child step
+    do: do sub1
+    check: check sub1
+    input: i
+    output: o
+    on_pass: done
+    on_fail: sub1
+    max_fail_count: 1
+`;
+
+  function writeNestedWorkflows(parentYaml: string) {
+    const wfDir = path.join(tmpDir, ".opencode", "ralph-flow", "workflows");
+    fs.writeFileSync(path.join(wfDir, "wf.yaml"), parentYaml);
+    fs.writeFileSync(path.join(wfDir, "child.yaml"), CHILD_WF);
+  }
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ralph-flow-driver-"));
+    const platform: Platform = {};
+    engine = createEngine(tmpDir, platform) as Engine;
+    const wfDir = path.join(tmpDir, ".opencode", "ralph-flow", "workflows");
+    fs.mkdirSync(wfDir, { recursive: true });
+    injected = [];
+    createdSessions = [];
+    tuiPublished = [];
+    abortedSessions = [];
+    lastAssistantText = "";
+    lastHasToolUse = false;
+    checkVerdict = "true";
+  });
+
+  afterEach(() => {
+    __resetDrivingSessions();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function startAtA(): string {
+    const instId = engine.generateInstanceId("wf");
+    fs.mkdirSync(engine.getInstanceDir(instId), { recursive: true });
+    engine.writeArtifactsDirName(instId, "task");
+    engine.writeState({ active: true, workflow_name: "wf", current_step: "a", current_phase: "do", fail_count: 0, user_task: "task", paused: false, session_id: "sess-1" }, instId);
+    const wf = engine.loadWorkflow("wf")!;
+    engine.buildDoPrompt(instId, wf.steps.find((s) => s.id === "a") as any, "task");
+    return instId;
+  }
+
+  it("composite step marked reset: true → reset fires on sub-workflow entry", async () => {
+    writeNestedWorkflows(PARENT_WF.replace("workflow: child", "workflow: child\n    reset: true"));
+    checkVerdict = "true";
+    const instId = startAtA();
+    lastAssistantText = "did a\n<promise>done</promise>";
+    const client = makeClientWithSessionCreate();
+    await handleSessionIdle(client, engine, "sess-1");
+
+    // We DID enter the sub-workflow…
+    const st = engine.readState(instId)!;
+    expect(st.workflow_name).toBe("child");
+    expect(st.current_step).toBe("sub1");
+    // …and the composite step's reset mark fired the gate
+    expect(st.session_id).not.toBe("sess-1");
+    expect(injected.some((m) => m.sessionId === "sess-1" && m.text.includes("上下文已重置") && m.noReply)).toBe(true);
+    const newMsgs = injected.filter((m) => m.sessionId === st.session_id);
+    expect(newMsgs.some((m) => m.text.includes("进入子工作流") && m.text.includes("会话交接说明"))).toBe(true);
+    expect(createdSessions.find((a) => String(a.body?.title || "").startsWith("🔄"))?.body?.parentID).toBeUndefined();
+    // briefing shows the CHILD workflow's progress (we're inside it now)
+    expect(newMsgs.find((m) => m.text.includes("会话交接说明"))?.text).toContain("sub1 👈");
+  });
+
+  it("composite step unmarked but parent workflow auto_reset: true → reset fires on entry", async () => {
+    writeNestedWorkflows(`auto_reset: true\n${PARENT_WF}`);
+    checkVerdict = "true";
+    const instId = startAtA();
+    lastAssistantText = "did a\n<promise>done</promise>";
+    const client = makeClientWithSessionCreate();
+    await handleSessionIdle(client, engine, "sess-1");
+
+    const st = engine.readState(instId)!;
+    expect(st.workflow_name).toBe("child");
+    expect(st.session_id).not.toBe("sess-1");
+    expect(injected.some((m) => m.sessionId === "sess-1" && m.text.includes("上下文已重置") && m.noReply)).toBe(true);
+  });
+
+  it("composite step unmarked, no auto_reset → normal injection, NO new session (regression)", async () => {
+    writeNestedWorkflows(PARENT_WF);
+    checkVerdict = "true";
+    const instId = startAtA();
+    lastAssistantText = "did a\n<promise>done</promise>";
+    const client = makeClientWithSessionCreate();
+    await handleSessionIdle(client, engine, "sess-1");
+
+    const st = engine.readState(instId)!;
+    expect(st.workflow_name).toBe("child");
+    expect(st.current_step).toBe("sub1");
+    expect(st.session_id).toBe("sess-1"); // ownership untouched
+    expect(injected.some((m) => m.text.includes("上下文已重置"))).toBe(false);
+    expect(injected.some((m) => m.sessionId === "sess-1" && m.text.includes("进入子工作流"))).toBe(true);
+  });
+
+  it("check fail → on_fail re-enters a composite step marked reset → reset fires", async () => {
+    // Parent: nest fails (child exhausted its budget) → parent on_fail: nest
+    // re-enters the composite step, which is marked reset → fresh session.
+    // (Parent budget must exceed 1 failure or the parent step pauses instead.)
+    writeNestedWorkflows(
+      PARENT_WF.replace("workflow: child", "workflow: child\n    reset: true").replace("on_fail: nest\n    max_fail_count: 1", "on_fail: nest\n    max_fail_count: 2"),
+    );
+    checkVerdict = "false"; // child's check fails; child max_fail_count: 1 → parent on_fail path
+    const instId = startAtA();
+    // Simulate: already inside the child workflow (parent frame on the stack)
+    const childWf = engine.loadWorkflow("child")!;
+    engine.pushState({ active: true, workflow_name: "wf", current_step: "nest", current_phase: "do", fail_count: 0, user_task: "task", paused: false }, instId);
+    engine.writeState({ active: true, workflow_name: "child", current_step: "sub1", current_phase: "do", fail_count: 0, user_task: "task", paused: false, session_id: "sess-1" }, instId);
+    engine.buildDoPrompt(instId, childWf.steps[0] as any, "task");
+    lastAssistantText = "tried sub1\n<promise>done</promise>";
+    const client = makeClientWithSessionCreate();
+    await handleSessionIdle(client, engine, "sess-1");
+
+    // Back in the child workflow for the retry (parent on_fail: nest re-entered)
+    const st = engine.readState(instId)!;
+    expect(st.workflow_name).toBe("child");
+    expect(st.current_step).toBe("sub1");
+    // …and the composite step's reset mark fired the gate on the re-entry
+    expect(st.session_id).not.toBe("sess-1");
+    expect(injected.some((m) => m.sessionId === "sess-1" && m.text.includes("上下文已重置") && m.noReply)).toBe(true);
   });
 });

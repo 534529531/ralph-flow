@@ -21,6 +21,7 @@ import { tool } from "@opencode-ai/plugin";
 import type { Engine } from "./engine.js";
 import { isSubWorkflowStep, MAX_NESTING_DEPTH, MANUAL_GATE_MARKER, DONE_TAG_MARKER } from "./engine.js";
 import { hasActiveCheck } from "./check.js";
+import { executeContextReset } from "./driver.js";
 
 type Client = any;
 
@@ -320,6 +321,57 @@ export function createTools(engine: Engine, client: Client) {
     },
   });
 
+  // ─── Tool: ralphflow_reset ───────────────────────────────────────────────────
+
+  const ralphflow_reset = tool({
+    description: "手动重置当前工作流上下文：创建新会话，在新会话中重新执行当前步骤的 DO 阶段。当前会话的上下文仍保留，但工作流驱动权转移到新会话。",
+    args: {
+      instance: tool.schema.string().optional().describe("实例 id（支持唯一前缀）。仅当本会话有多个实例时需指定。"),
+    },
+    async execute({ instance }, context) {
+      const sessionId = context.sessionID;
+      const resolution = engine.resolveInstance(instance, sessionId);
+      if (!resolution.ok) return resolution.text;
+      const instId = resolution.id;
+
+      const state = engine.readState(instId);
+      if (!state || !state.active) return "没有活跃的工作流。使用 ralphflow_start 启动一个。";
+      if (state.session_id !== sessionId) {
+        return "该实例的属主是另一个会话。只有属主会话可以重置。在当前会话调用 ralphflow_continue 接管该实例。";
+      }
+
+      if (state.current_phase !== "do") {
+        return `当前阶段是 "${state.current_phase}"，不是 "do"。\n\n重置只能在 DO 阶段进行——CHECK 阶段有独立验证在跑，请稍候。`;
+      }
+
+      const workflow = engine.loadWorkflow(state.workflow_name);
+      if (!workflow) return `工作流 "${state.workflow_name}" 未找到。`;
+
+      const step = engine.getStep(workflow, state.current_step);
+      if (!step) return `步骤 "${state.current_step}" 未找到。`;
+
+      const doPrompt = engine.buildDoPrompt(instId, step as any, state.user_task, state.last_failure_reason, state.fail_count || 0);
+      const transitionText = `## 🔄 上下文已手动重置\n\n步骤 \`${state.current_step}\` 将重新执行。\n\n---\n\n${doPrompt}`;
+
+      // fail_count / last_failure_reason 原样保留：reset 只是换一个干净的上下文
+      // 容器，不赦免失败——否则模型（或用户）反复 reset 就能无限续命，
+      // max_fail_count 这道自动刹车就失效了。想重算失败预算，走
+      // 「暂停 → ralphflow_continue」的显式赦免路径。
+      // 同时刷新 DO 提示缓存与投递标记，让新会话的 idle 重驱动与首条注入一致。
+      engine.writeDoPromptCache(doPrompt, instId);
+      engine.markPromptDelivered(step.id, instId);
+
+      const resetOk = await executeContextReset(
+        client, engine, instId, sessionId,
+        transitionText, state.workflow_name, state.current_step,
+      );
+      if (resetOk) {
+        return "已在新的干净会话中重新开始当前步骤。";
+      }
+      return "重置失败。请稍后重试，或使用 /ralphflow-cancel 取消后再重新启动。";
+    },
+  });
+
   // ─── Tool: ralphflow_cancel ─────────────────────────────────────────────────
 
   const ralphflow_cancel = tool({
@@ -469,6 +521,7 @@ export function createTools(engine: Engine, client: Client) {
   return {
     ralphflow_start,
     ralphflow_continue,
+    ralphflow_reset,
     ralphflow_cancel,
     ralphflow_status,
     ralphflow_list,

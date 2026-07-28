@@ -2,6 +2,18 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 2.6.0 (2026-07-28)
+
+### 新增
+- **重置门（Reset Gate）：跨步骤转换时可换入全新上下文会话**。步骤级 `reset: true` 或工作流级 `auto_reset: true` 标记后，CHECK 通过进入该步骤时不再往上下文已膨胀的旧会话里塞提示，而是创建新会话、转移实例属主、旧会话留告别消息、新会话直接开始 DO 阶段；同步骤重试（on_fail 回本步）不触发，保留现场记忆。新增 `/ralphflow-reset` 手动重置（DO 阶段随时换干净上下文，fail_count 不赦免）。验证器会话（CHECK）与模型延续（跟随旧会话当前模型）不受影响。设计见 `docs/reset-gate-design.md`。
+
+### 修复
+- **嵌套工作流里 composite 步骤的 `reset: true` 不生效**：进入子工作流时状态机已把实例状态推进到子工作流内部第一步，reset 门判定的 (source → target) 落在子工作流里，永远读不到标在父工作流 composite 步骤上的 `reset`（或父工作流的 `auto_reset`）——而嵌套恰恰意味着大任务、最需要重置。`TransitionResult` 新增可选元数据 `enteredCompositeStepId`（状态机行为不变），reset 门据此在 composite 步骤所属工作流上判定标记；fail 回炉重进同一子工作流（首尾状态完全相同）的场景同样覆盖。子工作流完成回到父级普通步骤、`auto_reset` 进子工作流均有回归测试。
+- **reset 新会话在 `/session` 列表不可见、看起来"什么也没发生"**：reset 会话最初以 `parentID` 创建为旧会话的子会话，而 opencode TUI 的会话列表（`/session` 对话框与首页索引）会过滤掉所有子会话——工作流其实在后台的隐藏会话里照常推进，用户却找不到也切不过去。现改为顶级会话（验证器的临时子会话不受影响），并在创建后直接通过 `tui.session.select` 事件让 TUI 自动跳转到新会话（server 端发布，不依赖任何插件加载形态）。TUI 插件入口的跳转作为冗余路径保留：npm 安装（`plugin: ["@yibener/ralph-flow"]`）经 `exports["./tui"]` 自动生效、开箱即用；本地克隆的 file 形态需多建一个入口文件（见 README 安装节）。
+- **reset 后旧会话的回合仍在继续跑**：转移 owner 只阻止了旧会话被再次驱动，但正在进行的回合（`/ralphflow-reset` 的工具调用本身就跑在旧会话的活跃回合里）会自然跑完——新会话重做同一步骤的同时旧回合还在写文件，两个会话并发改同一工作区。现在 reset 在 owner 转移后立即 abort 旧会话的回合（顺序严格：先转移后 abort，否则 `session.error` 会误暂停实例）；自动门路径旧会话通常无活跃回合，abort 为无害空操作。
+- **新会话冷启动缺少交接上下文**：以前新会话的第一条注入开门见山就是"检查结果：通过"——写给经历过全程的旧会话模型的口吻，冷启动模型容易困惑。现在注入前统一包一段「会话交接说明」：reset 门接手原因、工作流进度（步骤列表 + 当前位置 + 已完成标记，来自执行记录）、artifacts 产出目录（之前的产出直接读取、不要重做）、done 标记约定。详细任务内容仍在随后的 DO 提示中，不重复。
+- **reset 的 toast 通知从未弹出**：`client.tui.showToast` 调用少了 hey-api v1 的 `body` 包装层，请求体为空被服务端 400 拒绝（静默吞错）。修正为 `{ body: { variant, message } }`。
+
 ## 2.5.0
 
 ### 变更

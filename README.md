@@ -167,6 +167,20 @@ cd ~/.config/opencode/plugins/ralph-flow
 npm install && npm run build
 ```
 
+> 本地克隆是 **file 插件形态**：opencode 只自动发现 `plugins/*.ts` 文件（不会进入子目录），
+> 且一个入口文件不能同时导出 server 与 tui。需要在 `~/.config/opencode/plugins/` 下建两个
+> 入口文件（npm 安装形态无需此步骤，`exports["."]`/`exports["./tui"]` 自动生效）：
+>
+> ```ts
+> // ~/.config/opencode/plugins/ralph-flow.ts —— server 入口（必须）
+> export { default } from "./ralph-flow/dist/index.js";
+> ```
+> ```ts
+> // ~/.config/opencode/plugins/ralph-flow-tui.ts —— TUI 入口（可选，reset 自动跳转的冗余路径；
+> // 没有它 reset 仍会经 server 端事件跳转，仅少一层保险）
+> export { default } from "./ralph-flow/dist/tui.js";
+> ```
+
 > 首次加载时，插件会注册命令、把 `ralph-check` 验证者 agent（`edit: deny` + `bash: allow`，靠系统提示词约束不修改）写入全局 `~/.config/opencode/agent/`，并把自带 skills 同步到全局 `~/.config/opencode/skills/`（不是你的项目）。
 
 ### 从 1.x 升级
@@ -190,6 +204,7 @@ npm install && npm run build
 | `/ralphflow-start` | 通用启动入口（工作流名 + 任务描述） |
 | `/ralphflow-status` | 显示当前步骤、阶段、失败计数（或全部实例） |
 | `/ralphflow-continue` | 批准手动审查 · 恢复暂停的工作流 · 接管中断的实例 |
+| `/ralphflow-reset` | 上下文重置：换入干净新会话重做当前步骤（失败计数保留） |
 | `/ralphflow-cancel` | 取消并归档最终报告 |
 | `/ralphflow-list` | 列出可用工作流和活跃实例 |
 | `/ralphflow-doctor` | 诊断所有工作流定义 |
@@ -235,7 +250,9 @@ steps:
 
 **完成标记：** `<promise>done</promise>`、`<promise-check>true/false</promise-check>`
 
-分支、恢复、子工作流等高级模式见[自定义工作流指南](docs/custom-workflows.md)。
+**上下文重置门：** 长工作流后半段上下文膨胀时，在步骤上标 `reset: true`（或工作流级 `auto_reset: true`），进入该步骤前自动换入全新会话继续——旧会话历史保留，新会话带完整交接简报，`/session` 可见且自动跳转。随时也可手动 `/ralphflow-reset`。
+
+分支、恢复、子工作流、重置门等高级模式见[自定义工作流指南](docs/custom-workflows.md)。
 
 ---
 

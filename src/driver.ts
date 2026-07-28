@@ -20,8 +20,8 @@
 import fs from "fs";
 import path from "path";
 import type { Engine, WorkflowDef, NormalStepDef, RalphFlowState } from "./engine.js";
-import { isSubWorkflowStep, MANUAL_GATE_MARKER, DONE_TAG_MARKER, DEFAULT_ADVERSARIAL_TIMEOUT_MS } from "./engine.js";
-import { adversarialCheck } from "./check.js";
+import { isSubWorkflowStep, MANUAL_GATE_MARKER, DONE_TAG_MARKER, DEFAULT_ADVERSARIAL_TIMEOUT_MS, shouldResetOnTransition } from "./engine.js";
+import { adversarialCheck, readOwnerSessionModel } from "./check.js";
 
 type Client = any;
 
@@ -86,10 +86,12 @@ export async function injectPrompt(
   client: Client,
   sessionId: string,
   prompt: string,
-  noReply = false
+  noReply = false,
+  model?: { providerID: string; modelID: string }
 ): Promise<boolean> {
   try {
-    const body = { parts: [{ type: "text", text: prompt }], noReply };
+    const body: any = { parts: [{ type: "text", text: prompt }], noReply };
+    if (model) body.model = model;
     if (client.session.promptAsync) {
       await client.session.promptAsync({ path: { id: sessionId }, body });
     } else {
@@ -98,6 +100,147 @@ export async function injectPrompt(
     }
     return true;
   } catch {
+    return false;
+  }
+}
+
+// ─── Context Reset (Reset Gate) ───────────────────────────────────────────────
+
+/**
+ * 交接简报头：加在新会话第一条注入（transitionText）之前。
+ *
+ * 新会话是冷启动——它不知道工作流的存在，更不知道为什么第一条消息就是
+ * "检查结果：通过"。transitionText 的口吻是写给经历过全程的旧会话模型的，
+ * 直接注入会让新模型困惑（"我是不是漏看了上下文？"），甚至怀疑自己该重做
+ * 已完成的工作。简报给它三样东西：你为什么在这里（reset 门接手）、进度
+ * 全景（步骤列表 + 当前位置 + 已完成标记）、现场在哪（artifacts 目录）。
+ * 保持紧凑：详细任务内容在后面的 DO 提示里，不重复。
+ */
+function buildResetBriefing(engine: Engine, instId: string, workflowName: string, targetStepId: string): string {
+  const lines: string[] = [
+    `## 🔀 会话交接说明`,
+    ``,
+    `这是一个**上下文重置后的新工作会话**：上一个会话已由工作流的「重置门」替换，你从它接手。你没有漏看任何消息——所需背景都在下面，之前步骤的产出都已落盘。`,
+    ``,
+    `- **工作流**：\`${workflowName}\``,
+  ];
+
+  const wf = engine.loadWorkflow(workflowName);
+  if (wf && wf.steps.length > 0) {
+    const idx = wf.steps.findIndex((s) => s.id === targetStepId);
+    if (idx >= 0) {
+      const passed = new Set(
+        engine.loadStepRecords(instId)
+          .filter((r) => r.phase === "check" && r.status === "passed")
+          .map((r) => r.stepId)
+      );
+      const overview = wf.steps
+        .map((s, i) => (i === idx ? `**${s.id} 👈**` : passed.has(s.id) ? `${s.id} ✓` : s.id))
+        .join(" · ");
+      lines.push(`- **进度**：第 ${idx + 1}/${wf.steps.length} 步（${overview}）`);
+    }
+  }
+
+  lines.push(
+    `- **工作现场**：文档产出统一放在 \`${engine.getArtifactsRelDir(instId)}/\`；之前步骤的产出已在项目和该目录中，直接读取使用，**不要重做**`,
+    `- **交互约定**：完成当前步骤后，在回复最后一行单独输出 \`<promise>done</promise>\`，之后会有独立验证会话自动检查`,
+  );
+  return lines.join("\n");
+}
+
+/**
+ * 重置门执行：创建新会话、转移 owner、停掉旧会话回合、旧会话告别、
+ * 新会话注入交接简报 + DO 提示。
+ * 返回 true 表示已走重置路径（调用方不再向旧会话注入 transitionText）。
+ */
+export async function executeContextReset(
+  client: Client,
+  engine: Engine,
+  instId: string,
+  oldSessionId: string,
+  transitionText: string,
+  workflowName: string,
+  targetStepId: string,
+): Promise<boolean> {
+  try {
+    const model = await readOwnerSessionModel(client, oldSessionId);
+
+    const title = `🔄 ${workflowName} · ${targetStepId}`;
+    const newSession = await client.session.create({
+      // Deliberately NO parentID: a child session is filtered out of every
+      // session list in the TUI (dialog-session-list and the home session index
+      // both drop any session with a parentID), so a reset child session ran
+      // the workflow in a place the user could never find or open — the exact
+      // "reset said it happened but nothing did" bug. The reset session is the
+      // workflow's new long-term home, not a throwaway subagent session, so it
+      // must be a top-level session. (check.ts keeps parentID because its
+      // verifier sessions ARE throwaway and are deleted right after.)
+      body: { title },
+      // Pin the project: with multiple projects open in one TUI, an unqualified
+      // create can land the session under the wrong project (check.ts does the same).
+      query: { directory: engine.projectDir },
+    });
+    const newSessionId = (newSession as { data?: { id?: string } } | null)?.data?.id;
+    if (!newSessionId) {
+      engine.logEvent(instId, "error", "context_reset_session_create_failed", { workflow: workflowName, step: targetStepId });
+      return false;
+    }
+
+    engine.claimOwnership(instId, newSessionId);
+
+    // Stop the old session's in-flight turn. Ownership moved above, so the old
+    // session would no longer be DRIVEN on idle — but a turn already running
+    // keeps going to completion, and meanwhile the new session starts redoing
+    // the same step: two sessions editing one workspace concurrently. This is
+    // not hypothetical for /ralphflow-reset, whose very tool call runs INSIDE
+    // the old session's active turn.
+    //
+    // ORDER MATTERS: abort fires session.error (MessageAbortedError) →
+    // handleSessionGone pauses the instance owned by that session. Because
+    // claimOwnership already moved ownership to the new session, the old
+    // session's abort matches no instance and is harmless. Aborting BEFORE
+    // the ownership move would pause the very instance we are resetting.
+    // A no-op when the old session is idle (auto-gate path); failures are
+    // swallowed — a finished turn needs no abort and the reset must not fail
+    // over it.
+    try { await client.session?.abort?.({ path: { id: oldSessionId } }); } catch {}
+
+    // Drive the model in the new session FIRST, so when the TUI navigates below
+    // there is already work on screen — not an empty session.
+    const briefing = buildResetBriefing(engine, instId, workflowName, targetStepId);
+    const delivered = await injectPrompt(client, newSessionId, `${briefing}\n\n---\n\n${transitionText}`, false, model);
+    if (!delivered) {
+      // Ownership already moved: the new session will still be driven by its
+      // own idle handler (cached DO prompt), so the workflow is not lost — but
+      // log it, because a silent failure here reads as "nothing happened".
+      engine.logEvent(instId, "warn", "context_reset_first_inject_failed", { to: newSessionId.slice(0, 8), step: targetStepId });
+    }
+
+    await injectPrompt(client, oldSessionId,
+      `## 🔄 上下文已重置\n\n工作流 \`${workflowName}\` 已在新会话 **${title}** 中继续（正在自动跳转过去；若未跳转，用 \`/session\` 打开 🔄 开头的会话即可）。本会话正在进行的生成已停止；新会话已带完整交接简报，无需你重复背景。\n\n本会话的历史仍保留，你可以随时切回来查看；但工作流已不在本会话中执行。`,
+      true);
+
+    // Ask the TUI to follow the workflow into its new home. The v1 SDK client
+    // predates the /tui/select-session endpoint, but the server's publish
+    // handler already routes tui.session.select (and the TUI navigates on it);
+    // older servers reject or ignore the unknown event type, which is fine —
+    // the top-level session stays findable via /session either way.
+    try {
+      await client.tui?.publish?.({
+        body: { type: "tui.session.select", properties: { sessionID: newSessionId } },
+        query: { directory: engine.projectDir },
+      });
+    } catch {}
+
+    engine.logEvent(instId, "info", "context_reset", { from: oldSessionId.slice(0, 8), to: newSessionId.slice(0, 8), step: targetStepId });
+
+    // hey-api v1 wraps the request payload in `body` — a bare {variant, message}
+    // sends an empty payload, the server 400s, and the toast never shows.
+    try { await client.tui?.showToast?.({ body: { variant: "info", message: "工作流已在干净上下文中继续" } }); } catch {}
+
+    return true;
+  } catch (e: any) {
+    engine.logEvent(instId, "error", "context_reset_failed", { error: e.message });
     return false;
   }
 }
@@ -221,6 +364,42 @@ export async function runCheckAndAdvance(
   // the full context: check verdict + reason + transition (sub-workflow completion
   // notices, next-step info, DO prompt) in one coherent message. Completions and
   // pauses are noReply (workflow stopped); advances must drive the model.
+  //
+  // Reset Gate: if this is a cross-step transition to a step marked reset (or
+  // workflow auto_reset), spawn a fresh session instead of injecting into the
+  // old bloated one.
+  if (!result.completed && !result.paused) {
+    const freshState = engine.readState(instId);
+    if (freshState && freshState.active) {
+      let resetHit = false;
+      if (result.enteredCompositeStepId) {
+        // Sub-workflow entry: the state already advanced to the CHILD's first
+        // step, so a (source → current) check can never see the marks — they
+        // live on the composite step (or its parent workflow). Judge them
+        // there. The composite's parent workflow is the top stack frame.
+        // (Nested workflows are where big tasks live, so this gate matters
+        // most exactly here. Sub-workflow COMPLETION back to a plain parent
+        // step needs no such handling — the regular branch below finds it.)
+        const stack = engine.readStateStack(instId);
+        const top = stack.length > 0 ? stack[stack.length - 1] : null;
+        const parentWf = top ? engine.loadWorkflow(top.workflow_name) : null;
+        if (parentWf) {
+          resetHit = parentWf.auto_reset === true
+            || engine.getStep(parentWf, result.enteredCompositeStepId)?.reset === true;
+        }
+      } else if (freshState.current_step !== state.current_step || freshState.workflow_name !== state.workflow_name) {
+        // Regular transition (same workflow, or sub-workflow completion routing
+        // back into a plain parent step): the target is a real step of the
+        // workflow the state now points at.
+        const effectiveWf = freshState.workflow_name === workflow.name ? workflow : engine.loadWorkflow(freshState.workflow_name);
+        resetHit = !!effectiveWf && shouldResetOnTransition(effectiveWf, state.current_step, freshState.current_step);
+      }
+      if (resetHit) {
+        await executeContextReset(client, engine, instId, sessionId, result.text, freshState.workflow_name, freshState.current_step);
+        return;
+      }
+    }
+  }
   await injectPrompt(client, sessionId, result.text, result.completed || result.paused);
 }
 

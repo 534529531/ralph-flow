@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { createEngine, type Platform, type Engine } from "../engine.js";
+import { createEngine, type Platform, type Engine, shouldResetOnTransition } from "../engine.js";
 
 let tmpDir: string;
 let engine: Engine;
@@ -506,6 +506,140 @@ steps:
 `);
     const wf = engine.loadWorkflow("adv-goodobj")!;
     expect(wf.adversarial_check!.model).toEqual({ providerID: "anthropic", modelID: "claude-sonnet-4-5" });
+  });
+});
+
+// ─── Reset Gate (shouldResetOnTransition, YAML validation, lint) ─────────────
+
+describe("reset gate", () => {
+  it("same step → false (retry, don't reset)", () => {
+    writeProjectWorkflow("rwf", SIMPLE_WF);
+    const wf = engine.loadWorkflow("rwf")!;
+    expect(shouldResetOnTransition(wf, "one", "one")).toBe(false);
+  });
+
+  it("cross-step without reset or auto_reset → false", () => {
+    writeProjectWorkflow("rwf", SIMPLE_WF);
+    const wf = engine.loadWorkflow("rwf")!;
+    expect(shouldResetOnTransition(wf, "one", "two")).toBe(false);
+  });
+
+  it("cross-step with target step reset → true", () => {
+    writeProjectWorkflow("rwf", SIMPLE_WF.replace("desc: second step", "desc: second step\n    reset: true"));
+    const wf = engine.loadWorkflow("rwf")!;
+    expect(shouldResetOnTransition(wf, "one", "two")).toBe(true);
+  });
+
+  it("auto_reset: true → every cross-step transition triggers", () => {
+    writeProjectWorkflow("rwf", `auto_reset: true\n${SIMPLE_WF}`);
+    const wf = engine.loadWorkflow("rwf")!;
+    expect(shouldResetOnTransition(wf, "one", "two")).toBe(true);
+    expect(shouldResetOnTransition(wf, "one", "one")).toBe(false);
+  });
+
+  it("auto_reset false → behaves like not set", () => {
+    writeProjectWorkflow("rwf", `auto_reset: false\n${SIMPLE_WF}`);
+    const wf = engine.loadWorkflow("rwf")!;
+    expect(shouldResetOnTransition(wf, "one", "two")).toBe(false);
+  });
+
+  it("composite step with reset: true", () => {
+    writeProjectWorkflow("rwf", `
+auto_reset: false
+steps:
+  - id: a
+    desc: first
+    do: x
+    check: y
+    input: i
+    output: o
+    on_pass: nest
+    on_fail: a
+    max_fail_count: 1
+  - id: nest
+    desc: nested
+    workflow: child
+    reset: true
+    input: i
+    output: o
+    on_pass: done
+    on_fail: nest
+    max_fail_count: 1
+`);
+    const wf = engine.loadWorkflow("rwf")!;
+    expect(shouldResetOnTransition(wf, "a", "nest")).toBe(true);
+  });
+
+  it("parseWorkflowFile rejects non-boolean reset on step", () => {
+    writeProjectWorkflow("bad-reset", `
+steps:
+  - id: a
+    desc: d
+    do: x
+    check: y
+    input: i
+    output: o
+    on_pass: done
+    on_fail: a
+    max_fail_count: 1
+    reset: "yes"
+  - id: b
+    desc: d
+    do: x
+    check: y
+    input: i
+    output: o
+    on_pass: done
+    on_fail: b
+    max_fail_count: 1
+`);
+    const problems: string[] = [];
+    const wf = engine.parseWorkflowFile(
+      path.join(tmpDir, ".opencode", "ralph-flow", "workflows", "bad-reset.yaml"), "bad-reset", problems);
+    expect(wf).not.toBeNull();
+    expect(wf!.steps.length).toBe(1);
+    expect(problems.some((p) => p.includes("reset") && p.includes("boolean"))).toBe(true);
+  });
+
+  it("parseWorkflowFile rejects non-boolean auto_reset", () => {
+    writeProjectWorkflow("bad-auto", `auto_reset: 1\n${SIMPLE_WF}`);
+    const problems: string[] = [];
+    const wf = engine.loadWorkflow("bad-auto", problems);
+    expect(wf).not.toBeNull();
+    expect(wf!.auto_reset).toBe(false);
+    expect(problems.some((p) => p.includes("auto_reset") && p.includes("boolean"))).toBe(true);
+  });
+
+  it("parseWorkflowFile accepts boolean auto_reset and passthrough", () => {
+    writeProjectWorkflow("good-auto", `auto_reset: true\n${SIMPLE_WF}`);
+    const wf = engine.loadWorkflow("good-auto")!;
+    expect(wf.auto_reset).toBe(true);
+  });
+
+  it("lintWorkflow warns about reset on first step", () => {
+    writeProjectWorkflow("rwf", SIMPLE_WF.replace("desc: first step", "desc: first step\n    reset: true"));
+    const wf = engine.loadWorkflow("rwf")!;
+    const warnings = engine.lintWorkflow(wf, {});
+    expect(warnings.some((w) => w.includes("首步") && w.includes("one") && w.includes("reset"))).toBe(true);
+  });
+
+  it("lintWorkflow warns about auto_reset on linear-only flow", () => {
+    writeProjectWorkflow("lin", `
+auto_reset: true
+steps:
+  - id: a
+    desc: d
+    do: x
+    check: y
+    input: i
+    output: o
+    on_pass: done
+    on_fail: a
+    max_fail_count: 1
+`);
+    const wf = engine.loadWorkflow("lin")!;
+    const warnings = engine.lintWorkflow(wf, {});
+    expect(warnings.some((w) => w.includes("auto_reset") && w.includes("纯线性"))).toBe(true);
   });
 });
 

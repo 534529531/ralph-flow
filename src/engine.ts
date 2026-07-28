@@ -39,6 +39,7 @@ export interface NormalStepDef {
   on_pass: string;
   on_fail: string;
   max_fail_count: number;
+  reset?: boolean;
 }
 
 export interface SubWorkflowStepDef {
@@ -51,6 +52,7 @@ export interface SubWorkflowStepDef {
   on_pass: string;
   on_fail: string;
   max_fail_count: number;
+  reset?: boolean;
 }
 
 export type StepDef = NormalStepDef | SubWorkflowStepDef;
@@ -68,6 +70,7 @@ export interface WorkflowDef {
   manual_step: string[];
   steps: StepDef[];
   adversarial_check?: AdversarialCheckConfig;
+  auto_reset?: boolean;
 }
 
 export interface RalphFlowState {
@@ -114,6 +117,14 @@ export interface TransitionResult {
   text: string;
   paused?: boolean;
   completed?: boolean;
+  /**
+   * opencode 原生增量（Claude 版可忽略）：本次转换进入了哪个 composite 步骤的
+   * 子工作流。注入层的 reset 门需要它——进入子工作流后 state 已推进到子工作流
+   * 内部第一步，(sourceStep → currentStep) 再也回指不到 composite 步骤上标记的
+   * reset/auto_reset（同 id 重入时首尾状态甚至完全相同）。状态机行为不变，
+   * 仅多返回这一元数据。
+   */
+  enteredCompositeStepId?: string;
 }
 
 /**
@@ -761,6 +772,7 @@ export function createEngine(projectDir: string, platform: Platform) {
         if (!step.on_pass || typeof step.on_pass !== "string") { skipStep(`Step "${step.id}" in ${workflowName}: missing/invalid 'on_pass', skipped`); continue; }
         if (!step.on_fail || typeof step.on_fail !== "string") { skipStep(`Step "${step.id}" in ${workflowName}: missing/invalid 'on_fail', skipped`); continue; }
         if (typeof step.max_fail_count !== "number" || step.max_fail_count < 1) { skipStep(`Step "${step.id}" in ${workflowName}: missing/invalid 'max_fail_count', skipped`); continue; }
+        if (step.reset !== undefined && typeof step.reset !== "boolean") { skipStep(`Step "${step.id}" in ${workflowName}: 'reset' must be a boolean, skipped`); continue; }
 
         // Validate input/output fields (they become the 输入说明/输出要求 sections of the DO/CHECK prompts)
         if (!step.input || typeof step.input !== "string") {
@@ -808,6 +820,10 @@ export function createEngine(projectDir: string, platform: Platform) {
           return null;
         }
       }
+
+      const auto_reset: boolean = typeof parsed.auto_reset === "boolean" ? parsed.auto_reset : (
+        parsed.auto_reset !== undefined ? (problem("'auto_reset' 必须为 boolean（true/false）"), false) : false
+      );
 
       const manual_step: string[] = Array.isArray(parsed.manual_step)
         ? parsed.manual_step.filter((s: any) => typeof s === "string" && s.trim()).map((s: string) => s.trim())
@@ -873,6 +889,7 @@ export function createEngine(projectDir: string, platform: Platform) {
         manual_step,
         steps: validSteps,
         adversarial_check,
+        auto_reset,
       };
     } catch (e: any) {
       diag(`[ralph-flow] Error parsing workflow ${filePath}:`, e.message);
@@ -1054,6 +1071,17 @@ export function createEngine(projectDir: string, platform: Platform) {
           const missing = !pidOk && !midOk ? "providerID 和 modelID" : !pidOk ? "providerID" : "modelID";
           warnings.push(`adversarial_check.model 是对象但缺少有效的 ${missing}（需要 {providerID, modelID} 两个非空字符串）——该配置被忽略，回退到 ralph-check agent 的默认模型`);
         }
+      }
+    }
+
+    // reset / auto_reset 提示
+    if (wf.steps.length > 0 && wf.steps[0].reset === true) {
+      warnings.push(`首步 "${wf.steps[0].id}" 标了 reset，但启动时本身就是新会话，reset 不生效`);
+    }
+    if (wf.auto_reset === true) {
+      const allOnFailSelf = wf.steps.every((s) => s.on_fail === s.id);
+      if (allOnFailSelf) {
+        warnings.push(`auto_reset: true 且所有步骤的 on_fail 都指向自身（纯线性流）——每步都换新会话，token 成本较高`);
       }
     }
 
@@ -1730,6 +1758,10 @@ ${renderStepText(instId, step.check)}
               text: `## 检查结果：通过 ✓\n\n${checkResult.reason || "检查通过。"}\n\n---\n\n## 子工作流 "${state.workflow_name}" 已完成！\n\n---\n\n${grandparentResult.text}`,
               paused: grandparentResult.paused,
               completed: grandparentResult.completed,
+              // Propagate a sub-workflow entry from the recursive advance (e.g.
+              // this sub-workflow's completion routed the parent into ANOTHER
+              // composite step) so the driver's reset gate sees it.
+              enteredCompositeStepId: grandparentResult.enteredCompositeStepId,
             };
           }
         }
@@ -1775,6 +1807,7 @@ ${renderStepText(instId, step.check)}
       }
       return {
         text: `## 检查结果：通过 ✓\n\n${checkResult.reason || "检查通过。"}\n\n---\n\n## 进入子工作流：${nextStep.id}\n\n---\n\n${subResult.text}`,
+        enteredCompositeStepId: nextStep.id,
       };
     }
 
@@ -1834,6 +1867,7 @@ ${renderStepText(instId, step.check)}
             }
             return {
               text: `## 检查结果：失败 ✗ (${newFailCount}/${step.max_fail_count})\n\n${checkResult.reason || "检查失败。"}\n\n---\n\n子工作流失败。使用父步骤重试：**${failStep.id}**\n\n---\n\n${subResult.text}`,
+              enteredCompositeStepId: failStep.id,
             };
           }
           const retryState = { ...parentState, current_step: failStep.id, current_phase: "do", fail_count: parentFailCount, last_failure_reason: checkResult.reason };
@@ -1886,6 +1920,7 @@ ${renderStepText(instId, step.check)}
       }
       return {
         text: `## 检查结果：失败 ✗ (${newFailCount}/${step.max_fail_count})\n\n${checkResult.reason || "检查失败。"}\n\n---\n\n使用子工作流重试：**${failStep.id}**\n\n---\n\n${subResult.text}`,
+        enteredCompositeStepId: failStep.id,
       };
     }
 
@@ -2063,6 +2098,7 @@ ${renderStepText(instId, step.check)}
     matchCheckTag, parseCheckResult, getAdversarialCheckReason,
     // transitions
     handleCheckPassed, handleCheckFailed,
+    shouldResetOnTransition,
     // startup
     migrateLegacyInstance, ensureProjectWorkflows,
   };
@@ -2070,6 +2106,17 @@ ${renderStepText(instId, step.check)}
 
 export function isSubWorkflowStep(step: StepDef): step is SubWorkflowStepDef {
   return "workflow" in step && typeof (step as SubWorkflowStepDef).workflow === "string";
+}
+
+/**
+ * 判断从 sourceStepId 转换到 targetStepId 时是否应触发上下文重置。
+ * 同步骤转换（重试）不触发；跨步骤转换遇到目标标 reset 或工作流 auto_reset 时触发。
+ */
+export function shouldResetOnTransition(workflow: WorkflowDef, sourceStepId: string, targetStepId: string): boolean {
+  if (sourceStepId === targetStepId) return false;
+  if (workflow.auto_reset === true) return true;
+  const step = workflow.steps.find((s) => s.id === targetStepId);
+  return step?.reset === true;
 }
 
 /**

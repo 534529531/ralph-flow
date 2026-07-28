@@ -66,6 +66,26 @@ const SHARED_MECHANISM = `**extra_dirs**：如果任务的源材料位于当前�
 这能帮助用户跟踪工作流进度，无需手动查看状态。`;
 
 export const RALPH_COMMANDS: Record<string, RalphCommandDef> = {
+  "ralphflow-reset": {
+    description: "手动重置工作流上下文——换一个干净的会话继续执行当前步骤",
+    template: `调用 \`ralphflow_reset\` 工具在当前 DO 阶段创建一个全新的上下文。
+    
+用户输入：$ARGUMENTS
+
+**何时用它**：
+- 你觉得当前对话太长、模型开始跑偏或忘记需求
+- 上下文质量明显下降（模型反复犯错、丢细节、忽视用户指令）
+- 想换一个干净的会话，但保留已完成的工作产出
+
+**执行后会发生什么**：
+- 当前会话保留（聊天历史不丢，随时切回查看）
+- 新会话自动被创建，模型在那里用干净的上下文重新执行当前步骤
+- 产物目录和所有已完成的工作都保留，不受影响
+- 失败计数**保留**——重置只换干净的上下文，不会重置工作流状态（想重算失败预算，先等工作流暂停再用 \`/ralphflow-continue\` 显式恢复）
+
+调用 \`ralphflow_reset\`（不带参数对本会话的实例；本会话有多个实例时需指定 \`instance\` 参数，支持唯一前缀）。不要猜测——只在用户确实要求时调用。`,
+  },
+
   "ralphflow-start": {
     description: "启动一个 ralph-flow 工作流",
     template: `启动一次 Ralph Flow 工作流执行。

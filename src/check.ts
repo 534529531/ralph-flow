@@ -121,7 +121,7 @@ async function readAgentModel(client: Client, agentName: string): Promise<ModelR
  * their work session to. Reading it here makes the verifier follow the
  * user's live choice unless the workflow or the agent config says otherwise.
  */
-async function readOwnerSessionModel(client: Client, ownerSessionId: string | null): Promise<ModelRef | undefined> {
+export async function readOwnerSessionModel(client: Client, ownerSessionId: string | null): Promise<ModelRef | undefined> {
   if (!ownerSessionId) return undefined;
   try {
     const res = await client.session.messages({ path: { id: ownerSessionId } });
