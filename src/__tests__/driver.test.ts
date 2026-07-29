@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { createEngine, type Platform, type Engine, RALPH_CHECK_AGENT_PERMISSION, shouldResetOnTransition } from "../engine.js";
+import { createEngine, type Platform, type Engine, RALPH_CHECK_AGENT_PERMISSION, shouldResetOnTransition, MANUAL_STEP_MARKER } from "../engine.js";
 import { detectDoneTag, stripCodeBlocks, handleSessionIdle, __resetDrivingSessions } from "../driver.js";
 import { createTools } from "../tools.js";
 
@@ -746,6 +746,26 @@ steps:
     expect(String(res)).toContain("属主");
     expect(engine.readState(instId)!.session_id).toBe("sess-owner"); // untouched
   });
+
+  it("ralphflow_reset refuses on a paused instance and points to /ralphflow-continue", async () => {
+    const instId = startInstanceInStep("build");
+    engine.writeState({
+      ...engine.readState(instId)!,
+      paused: true, pause_reason: "max_failures", fail_count: 3,
+    }, instId);
+    const client = makeClientWithSessionCreate();
+    const tools = createTools(engine, client);
+    const res = await tools.ralphflow_reset.execute({}, { sessionID: "sess-1" } as any);
+
+    const text = String(res);
+    expect(text).toContain("暂停");
+    expect(text).toContain("/ralphflow-continue");
+    // 状态原样：没换会话、没创建新会话、暂停未清
+    const st = engine.readState(instId)!;
+    expect(st.paused).toBe(true);
+    expect(st.session_id).toBe("sess-1");
+    expect(createdSessions.length).toBe(0);
+  });
 });
 
 // ─── Reset Gate on sub-workflow entry (nested workflows) ─────────────────────
@@ -901,5 +921,518 @@ steps:
     // …and the composite step's reset mark fired the gate on the re-entry
     expect(st.session_id).not.toBe("sess-1");
     expect(injected.some((m) => m.sessionId === "sess-1" && m.text.includes("上下文已重置") && m.noReply)).toBe(true);
+  });
+});
+
+// ─── /ralphflow-rewind (回退到已通过 CHECK 的上游步骤) ──────────────────────
+
+describe("rewind", () => {
+  // 4-step 线性工作流：a → b(标 manual 且 reset) → c → d → done。
+  // b 同时是 manual_step 与 reset gate 的目标：测两个分支都覆盖到。
+  const WF_REWIND = `
+description: rewind flow
+manual_step: [b]
+steps:
+  - id: a
+    desc: first
+    do: do a
+    check: check a
+    input: i
+    output: "a.md"
+    on_pass: b
+    on_fail: a
+    max_fail_count: 3
+  - id: b
+    desc: mid (manual + reset)
+    do: do b
+    check: check b
+    input: a.md
+    output: "b.md"
+    reset: true
+    on_pass: c
+    on_fail: b
+    max_fail_count: 3
+  - id: c
+    desc: third
+    do: do c
+    check: check c
+    input: b.md
+    output: "c.md"
+    on_pass: d
+    on_fail: c
+    max_fail_count: 3
+  - id: d
+    desc: last
+    do: do d
+    check: check d
+    input: c.md
+    output: "d.md"
+    on_pass: done
+    on_fail: d
+    max_fail_count: 3
+`;
+
+  function makeRewindClient() {
+    const newSessionId = "new-" + Math.random().toString(36).slice(2, 8);
+    const record = (args: any) => {
+      injected.push({ sessionId: args.path.id, text: args.body.parts[0].text, noReply: !!args.body.noReply });
+      return { data: {} };
+    };
+    return {
+      session: {
+        messages: async () => ({
+          data: [{ info: { role: "assistant" }, parts: [{ type: "text", text: lastAssistantText }] }],
+        }),
+        create: async (args: any) => {
+          createdSessions.push(args);
+          const title = String(args.body?.title || "");
+          return title.startsWith("🔄") || title.startsWith("🔙")
+            ? { data: { id: newSessionId } }
+            : { data: { id: "chk-" + Math.random().toString(36).slice(2) } };
+        },
+        delete: async () => ({}),
+        abort: async (args: any) => {
+          abortedSessions.push({
+            id: args.path.id,
+            ownersAtAbort: engine.listInstances().map((i) => `${i.id}:${i.owner}`),
+          });
+          return {};
+        },
+        promptAsync: async (args: any) => record(args),
+        prompt: async (args: any) => record(args),
+      },
+      tui: {
+        publish: async (args: any) => { tuiPublished.push(args); return { data: true }; },
+        showToast: async () => ({ data: true }),
+      },
+    };
+  }
+
+  /**
+   * 启动一个实例并把状态机停在 step；同时模拟 withPassed 中列出的步骤
+   * "已经通过独立 CHECK"——直接 addStepRecord 植入历史记录。rewind 的可回退
+   * 目标集合 = passedStepIds 完全由这些记录决定。
+   */
+  function startAt(step = "c", sessionId = "sess-1", withPassed: string[] = ["a", "b"]): string {
+    const instId = engine.generateInstanceId("wf");
+    fs.mkdirSync(engine.getInstanceDir(instId), { recursive: true });
+    engine.writeArtifactsDirName(instId, "task");
+    engine.writeState({
+      active: true, workflow_name: "wf", current_step: step, current_phase: "do",
+      fail_count: 0, user_task: "task", paused: false, session_id: sessionId,
+    }, instId);
+    const wf = engine.loadWorkflow("wf")!;
+    engine.buildDoPrompt(instId, wf.steps.find((s) => s.id === step) as any, "task");
+    for (const sid of withPassed) {
+      engine.addStepRecord(instId, sid, "check", "passed", 0, "通过");
+    }
+    return instId;
+  }
+
+  beforeEach(() => {
+    __resetDrivingSessions();
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ralph-flow-rewind-"));
+    const platform: Platform = {};
+    engine = createEngine(tmpDir, platform) as Engine;
+    const wfDir = path.join(tmpDir, ".opencode", "ralph-flow", "workflows");
+    fs.mkdirSync(wfDir, { recursive: true });
+    fs.writeFileSync(path.join(wfDir, "wf.yaml"), WF_REWIND);
+    injected = [];
+    createdSessions = [];
+    tuiPublished = [];
+    abortedSessions = [];
+    lastAssistantText = "";
+    lastHasToolUse = false;
+    checkVerdict = "true";
+  });
+
+  it("rewinds to a passed step in a fresh session, advancing state machine + carrying reason", async () => {
+    const instId = startAt("c", "sess-1", ["a", "b"]);
+    const client = makeRewindClient();
+    const tools = createTools(engine, client);
+
+    const res = await tools.ralphflow_rewind.execute(
+      { step: "a", reason: "a 的 API 假设错了，得回头重做" } as any,
+      { sessionID: "sess-1" } as any,
+    );
+
+    const st = engine.readState(instId)!;
+    expect(st.current_step).toBe("a");
+    expect(st.current_phase).toBe("do");
+    expect(st.fail_count).toBe(0);          // rewind 显式赦免
+    expect(st.paused).toBe(false);
+    expect(st.session_id).not.toBe("sess-1"); // owner 转移到新会话
+
+    // 新会话是 top-level（不是隐藏子会话）+ rewind 命名带 🔙（与 reset 的 🔄 区分）
+    const resetReq = createdSessions.find((a) => String(a.body?.title || "").startsWith("🔙"));
+    expect(resetReq).toBeTruthy();
+    expect(resetReq?.body?.parentID).toBeUndefined();
+
+    // 新会话首条注入 = briefing + transitionText（含 reason 段 + DO prompt）
+    const newMsgs = injected.filter((m) => m.sessionId === st.session_id);
+    expect(newMsgs.some((m) => m.text.includes("会话交接说明"))).toBe(true);
+    expect(newMsgs.some((m) => m.text.includes("回退说明"))).toBe(true);
+    // 回退头：从 c 回退到 a——from-step 必须来自回退前的状态（回归：曾写成"从 a 回退到 a"）
+    expect(newMsgs.some((m) => m.text.includes("已从步骤 `c` 回退到 `a`"))).toBe(true);
+    expect(newMsgs.some((m) => m.text.includes("a 的 API 假设错了"))).toBe(true);
+    expect(newMsgs.some((m) => m.text.includes("当前任务"))).toBe(true);
+
+    // 旧会话保留告别消息（rewind 措辞，不说"上下文已重置"）+ 被 abort
+    expect(injected.some((m) => m.sessionId === "sess-1" && m.text.includes("已回退到步骤") && m.noReply)).toBe(true);
+    expect(abortedSessions.some((a) => a.id === "sess-1")).toBe(true);
+    // TUI 收到跳转事件
+    expect(tuiPublished.some((p) => p.body?.type === "tui.session.select" && p.body?.properties?.sessionID === st.session_id)).toBe(true);
+
+    // reason 入 .do-prompt-cache：idle keep-alive 重注入也带 reason（含正确的 from-step 头）
+    expect(engine.readDoPromptCache(instId)).toContain("回退说明");
+    expect(engine.readDoPromptCache(instId)).toContain("已从步骤 `c` 回退到 `a`");
+    expect(engine.readDoPromptCache(instId)).toContain("a 的 API 假设错了");
+    // 日志记了
+    expect(String(res)).toContain("新会话");
+  });
+
+  it("keep_session: true stays in current session, returns full text with reason", async () => {
+    const instId = startAt("c", "sess-1", ["a", "b"]);
+    const client = makeRewindClient();
+    const tools = createTools(engine, client);
+
+    const res = await tools.ralphflow_rewind.execute(
+      { step: "a", reason: "方向错了", keep_session: true } as any,
+      { sessionID: "sess-1" } as any,
+    );
+
+    const st = engine.readState(instId)!;
+    expect(st.current_step).toBe("a");
+    expect(st.session_id).toBe("sess-1");           // 没换会话
+    expect(createdSessions.length).toBe(0);          // 没创建新会话
+    expect(abortedSessions.length).toBe(0);
+    expect(tuiPublished.length).toBe(0);
+
+    const text = String(res);
+    expect(text).toContain("回退说明");
+    expect(text).toContain("已从步骤 `c` 回退到 `a`");   // from-step 头（回归）
+    expect(text).toContain("方向错了");
+    expect(text).toContain("当前任务");
+    // reason 仍写入 cache（重要：keep_session 时 idle 之后还会重注入）
+    expect(engine.readDoPromptCache(instId)).toContain("方向错了");
+  });
+
+  it("keep_session + wasPaused: 返回带「已从暂停恢复并回退」前缀", async () => {
+    const instId = startAt("d", "sess-1", ["a", "b", "c"]);
+    engine.writeState({
+      ...engine.readState(instId)!,
+      fail_count: 2, paused: true, pause_reason: "max_failures", last_failure_reason: "反复失败",
+    }, instId);
+    const tools = createTools(engine, makeRewindClient());
+    const res = await tools.ralphflow_rewind.execute(
+      { step: "b", reason: "换方向", keep_session: true } as any, { sessionID: "sess-1" } as any);
+
+    const text = String(res);
+    expect(text).toContain("已从暂停恢复并回退到步骤 `b`");
+    expect(text).toContain("已从步骤 `d` 回退到 `b`");   // from-step 头（回归）
+    const st = engine.readState(instId)!;
+    expect(st.paused).toBe(false);
+    expect(st.session_id).toBe("sess-1");                // keep_session 不换会话
+  });
+
+  it("新会话创建失败：状态机已倒退但给出明确下一步指引（不静默）", async () => {
+    const instId = startAt("c", "sess-1", ["a", "b"]);
+    const client = makeRewindClient();
+    // 让 session.create 对 🔙 标题返回无 id —— executeContextReset 走失败路径
+    client.session.create = async (args: any) => {
+      createdSessions.push(args);
+      return { data: {} };
+    };
+    const tools = createTools(engine, client);
+    const res = await tools.ralphflow_rewind.execute(
+      { step: "a", reason: "方向错了" } as any, { sessionID: "sess-1" } as any);
+
+    const text = String(res);
+    expect(text).toContain("状态机已倒退到步骤 `a`");
+    expect(text).toContain("开新会话失败");
+    expect(text).toContain("keep_session");
+    // 状态机确实已倒退、属主未转移
+    const st = engine.readState(instId)!;
+    expect(st.current_step).toBe("a");
+    expect(st.session_id).toBe("sess-1");
+  });
+
+  it("reason is required: missing reason → refuse, ask the user", async () => {
+    startAt("c", "sess-1", ["a", "b"]);
+    const tools = createTools(engine, makeRewindClient());
+    const res1 = await tools.ralphflow_rewind.execute(
+      { step: "a" } as any, { sessionID: "sess-1" } as any);
+    expect(String(res1)).toContain("原因");
+    // 全空白也算缺
+    const res2 = await tools.ralphflow_rewind.execute(
+      { step: "a", reason: "   " } as any, { sessionID: "sess-1" } as any);
+    expect(String(res2)).toContain("原因");
+  });
+
+  it("step must be specified: missing step → refuse", async () => {
+    startAt("c", "sess-1", ["a", "b"]);
+    const tools = createTools(engine, makeRewindClient());
+    const res = await tools.ralphflow_rewind.execute(
+      { reason: "x" } as any, { sessionID: "sess-1" } as any);
+    expect(String(res)).toContain("目标步骤");
+  });
+
+  it("refuses when target is not in passed records, lists available targets", async () => {
+    // a + b 通过过；state 在 d；rewind 到 c → c 没通过过 CHECK 且不是当前步，拒绝
+    startAt("d", "sess-1", ["a", "b"]);
+    const tools = createTools(engine, makeRewindClient());
+    const res = await tools.ralphflow_rewind.execute(
+      { step: "c", reason: "重做" } as any, { sessionID: "sess-1" } as any);
+    const text = String(res);
+    expect(text).toContain("只能回退到");
+    expect(text).toContain("已通过 CHECK");
+    // 列表里应含 a 和 b
+    expect(text).toContain("`a`");
+    expect(text).toContain("`b`");
+  });
+
+  it("refuses rewinding to the current step → directs to /ralphflow-reset", async () => {
+    // state 在 b + b 通过过 CHECK（罕见但合法：用户已批准但又开始改 b）
+    const instId = startAt("b", "sess-1", ["a", "b"]);
+    const tools = createTools(engine, makeRewindClient());
+    const res = await tools.ralphflow_rewind.execute(
+      { step: "b", reason: "想重来" } as any, { sessionID: "sess-1" } as any);
+    const text = String(res);
+    expect(text).toContain("当前步骤");
+    expect(text).toContain("/ralphflow-reset");
+    expect(engine.readState(instId)!.current_step).toBe("b"); // 状态没动
+  });
+
+  it("refuses during the active CHECK phase (not paused)", async () => {
+    const instId = startAt("c", "sess-1", ["a", "b"]);
+    engine.writeState({ ...engine.readState(instId)!, current_phase: "check", paused: false }, instId);
+    const tools = createTools(engine, makeRewindClient());
+    const res = await tools.ralphflow_rewind.execute(
+      { step: "a", reason: "x" } as any, { sessionID: "sess-1" } as any);
+    expect(String(res)).toMatch(/独立 CHECK 进行中|稍候/);
+    expect(engine.readState(instId)!.current_step).toBe("c");
+    expect(engine.readState(instId)!.current_phase).toBe("check");
+  });
+
+  it("refuses when the caller is not the owner (must /ralphflow-continue first)", async () => {
+    const instId = startAt("c", "sess-owner", ["a", "b"]);
+    const tools = createTools(engine, makeRewindClient());
+    const res = await tools.ralphflow_rewind.execute(
+      { step: "a", reason: "x" } as any, { sessionID: "sess-1" } as any);
+    expect(String(res)).toContain("属主");
+    expect(engine.readState(instId)!.session_id).toBe("sess-owner");
+  });
+
+  it("paused instance rewind: clears paused + zeroes fail_count + advances state", async () => {
+    const instId = startAt("d", "sess-1", ["a", "b", "c"]);
+    // 把实例挂起：达到 max_failures 后典型状态——phase=do + paused + 有 fail_count
+    engine.writeState({
+      ...engine.readState(instId)!,
+      current_phase: "do", fail_count: 3, paused: true,
+      pause_reason: "max_failures", last_failure_reason: "卡住了",
+    }, instId);
+    const before = engine.readState(instId)!;
+    expect(before.paused).toBe(true);
+
+    const client = makeRewindClient();
+    const tools = createTools(engine, client);
+    const res = await tools.ralphflow_rewind.execute(
+      { step: "b", reason: "换条路重试" } as any, { sessionID: "sess-1" } as any);
+
+    const st = engine.readState(instId)!;
+    expect(st.current_step).toBe("b");
+    expect(st.paused).toBe(false);
+    expect(st.pause_reason).toBeUndefined();
+    expect(st.fail_count).toBe(0);           // 暂停时的预算被均赦免
+    expect(st.last_failure_reason).toBeUndefined();
+    expect(st.session_id).not.toBe("sess-1"); // 默认换会话
+
+    // 响应里点出"从暂停恢复"
+    expect(String(res)).toMatch(/暂停|新会话/);
+  });
+
+  it("rewinding to a manual_step re-arms the manual review marker", async () => {
+    const instId = startAt("c", "sess-1", ["a", "b"]);
+    // 为保证测试的"从无到有"逻辑干净，先确认 manual_step 标记没预布防
+    expect(engine.markerExists(MANUAL_STEP_MARKER, instId)).toBe(false);
+    const tools = createTools(engine, makeRewindClient());
+    await tools.ralphflow_rewind.execute(
+      { step: "b", reason: "回头改 b 的产出方向", keep_session: true } as any,
+      { sessionID: "sess-1" } as any);
+    // b 在 workflow.manual_step 中——rewind 等价于 ralphflow_start 命中它：布防
+    // .manual-step-active，让 driver 在 b 的 DO 完成后停下来请用户审查（而非自动验证）。
+    expect(engine.markerExists(MANUAL_STEP_MARKER, instId)).toBe(true);
+    expect(engine.readState(instId)!.current_step).toBe("b");
+  });
+
+  it("refuses rewinding to a target that is not in the workflow", async () => {
+    startAt("c", "sess-1", ["a", "b"]);
+    const tools = createTools(engine, makeRewindClient());
+    const res = await tools.ralphflow_rewind.execute(
+      { step: "notexist", reason: "x" } as any, { sessionID: "sess-1" } as any);
+    expect(String(res)).toContain("不在工作流");
+  });
+
+  it("refuses cross-stack-frame rewind when inside a sub-workflow", async () => {
+    // WF_REWIND 是普通工作流；要测跨栈帧，必须进子工作流——push 一帧父状态
+    // 取巧：用户问"在子工作流里回到父工作流步骤"。这里用一个能 stack 非空的 trick：
+    // 直接 push 一个栈帧伪造子工作流环境（rewind 第一版一律拒掉这种场景）。
+    const instId = startAt("c", "sess-1", ["a", "b"]);
+    engine.pushState(
+      { active: true, workflow_name: "wf", current_step: "a", current_phase: "do",
+        fail_count: 0, user_task: "task", paused: false },
+      instId,
+    );
+    // 现在 stack 非空——rewind 拒绝
+    const tools = createTools(engine, makeRewindClient());
+    const res = await tools.ralphflow_rewind.execute(
+      { step: "a", reason: "x" } as any, { sessionID: "sess-1" } as any);
+    expect(String(res)).toContain("子工作流内");
+    expect(String(res)).toContain("不支持");
+    // 状态未动
+    const st = engine.readState(instId)!;
+    expect(st.current_step).toBe("c");
+    expect(st.paused).toBe(false);
+  });
+});
+
+// ─── /ralphflow-reset 顺手补的可选 reason 注入 ───────────────────────────────
+
+describe("reset with optional reason", () => {
+  // 复用 reset gate 描述块里 4-step 工作流：WF_RESET（build→review→deploy）。
+  const WF_RESET_4 = `
+steps:
+  - id: a
+    desc: first
+    do: do a
+    check: check a
+    input: i
+    output: "a.md"
+    on_pass: b
+    on_fail: a
+    max_fail_count: 3
+  - id: b
+    desc: mid (reset)
+    do: do b
+    check: check b
+    input: a.md
+    output: "b.md"
+    reset: true
+    on_pass: c
+    on_fail: b
+    max_fail_count: 2
+  - id: c
+    desc: last
+    do: do c
+    check: check c
+    input: b.md
+    output: "c.md"
+    on_pass: done
+    on_fail: c
+    max_fail_count: 1
+`;
+
+  function makeResetClient() {
+    const newSessionId = "new-" + Math.random().toString(36).slice(2, 8);
+    const record = (args: any) => {
+      injected.push({ sessionId: args.path.id, text: args.body.parts[0].text, noReply: !!args.body.noReply });
+      return { data: {} };
+    };
+    return {
+      session: {
+        messages: async () => ({ data: [{ info: { role: "assistant" }, parts: [{ type: "text", text: lastAssistantText }] }] }),
+        create: async (args: any) => {
+          createdSessions.push(args);
+          return String(args.body?.title || "").startsWith("🔄")
+            ? { data: { id: newSessionId } }
+            : { data: { id: "chk-" + Math.random().toString(36).slice(2) } };
+        },
+        delete: async () => ({}),
+        abort: async (args: any) => {
+          abortedSessions.push({
+            id: args.path.id,
+            ownersAtAbort: engine.listInstances().map((i) => `${i.id}:${i.owner}`),
+          });
+          return {};
+        },
+        promptAsync: async (args: any) => record(args),
+        prompt: async (args: any) => record(args),
+      },
+      tui: {
+        publish: async (args: any) => { tuiPublished.push(args); return { data: true }; },
+        showToast: async () => ({ data: true }),
+      },
+    };
+  }
+
+  function startInStep(step = "a", sessionId = "sess-1"): string {
+    const instId = engine.generateInstanceId("wf");
+    fs.mkdirSync(engine.getInstanceDir(instId), { recursive: true });
+    engine.writeArtifactsDirName(instId, "task");
+    engine.writeState({
+      active: true, workflow_name: "wf", current_step: step, current_phase: "do",
+      fail_count: 2, last_failure_reason: "broke twice", user_task: "task",
+      paused: false, session_id: sessionId,
+    }, instId);
+    const wf = engine.loadWorkflow("wf")!;
+    engine.buildDoPrompt(instId, wf.steps.find((s) => s.id === step) as any, "task");
+    return instId;
+  }
+
+  beforeEach(() => {
+    __resetDrivingSessions();
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ralph-flow-reset-reason-"));
+    const platform: Platform = {};
+    engine = createEngine(tmpDir, platform) as Engine;
+    const wfDir = path.join(tmpDir, ".opencode", "ralph-flow", "workflows");
+    fs.mkdirSync(wfDir, { recursive: true });
+    fs.writeFileSync(path.join(wfDir, "wf.yaml"), WF_RESET_4);
+    injected = [];
+    createdSessions = [];
+    tuiPublished = [];
+    abortedSessions = [];
+    lastAssistantText = "";
+    lastHasToolUse = false;
+    checkVerdict = "true";
+  });
+
+  it("without reason: byte-compatible with the old transition text (regression)", async () => {
+    const instId = startInStep("a", "sess-1");
+    const before = engine.readState(instId)!;
+    const client = makeResetClient();
+    const tools = createTools(engine, client);
+
+    await tools.ralphflow_reset.execute({} as any, { sessionID: "sess-1" } as any);
+
+    const st = engine.readState(instId)!;
+    // fail_count 与 last_failure_reason 保持不变（reset 不赦免）
+    expect(st.fail_count).toBe(before.fail_count);
+    expect(st.last_failure_reason).toBe(before.last_failure_reason);
+    const newMsgs = injected.filter((m) => m.sessionId === st.session_id && !m.noReply);
+    // 旧式 transitionText 的头部还在
+    expect(newMsgs.some((m) => m.text.includes("上下文已手动重置"))).toBe(true);
+    expect(newMsgs.some((m) => m.text.includes("步骤 `a` 将重新执行"))).toBe(true);
+    // 出现"上下文重置说明"或"重置原因"——只有传 reason 时才出现
+    expect(newMsgs.some((m) => m.text.includes("重置原因"))).toBe(false);
+  });
+
+  it("with reason: pulls reason into the new session + persists in cache", async () => {
+    const instId = startInStep("a", "sess-1");
+    const client = makeResetClient();
+    const tools = createTools(engine, client);
+
+    await tools.ralphflow_reset.execute(
+      { reason: "模型开始跑偏、把无关重构也夹带进来了" } as any,
+      { sessionID: "sess-1" } as any,
+    );
+
+    const st = engine.readState(instId)!;
+    expect(st.fail_count).toBe(2); // reset 仍不赦免
+    const newMsgs = injected.filter((m) => m.sessionId === st.session_id && !m.noReply);
+    expect(newMsgs.some((m) => m.text.includes("上下文已手动重置"))).toBe(true);
+    expect(newMsgs.some((m) => m.text.includes("重置原因"))).toBe(true);
+    expect(newMsgs.some((m) => m.text.includes("模型开始跑偏"))).toBe(true);
+    // cache 被覆盖成带 reason 的版本（idle keep-alive 仍保留）
+    expect(engine.readDoPromptCache(instId)).toContain("模型开始跑偏");
   });
 });

@@ -152,6 +152,10 @@ function buildResetBriefing(engine: Engine, instId: string, workflowName: string
  * 重置门执行：创建新会话、转移 owner、停掉旧会话回合、旧会话告别、
  * 新会话注入交接简报 + DO 提示。
  * 返回 true 表示已走重置路径（调用方不再向旧会话注入 transitionText）。
+ *
+ * opts.kind：reset（默认，🔄 标题 + "上下文已重置"告别）与 rewind（🔙 标题
+ * + "已回退"告别）共用同一条换会话路径——用户执行的是哪个命令，旧会话
+ * 看到的告别就该说哪个，避免"我明明回退，它却说重置"的心智错位。
  */
 export async function executeContextReset(
   client: Client,
@@ -161,11 +165,13 @@ export async function executeContextReset(
   transitionText: string,
   workflowName: string,
   targetStepId: string,
+  opts?: { kind?: "reset" | "rewind" },
 ): Promise<boolean> {
   try {
     const model = await readOwnerSessionModel(client, oldSessionId);
 
-    const title = `🔄 ${workflowName} · ${targetStepId}`;
+    const kind = opts?.kind ?? "reset";
+    const title = `${kind === "rewind" ? "🔙" : "🔄"} ${workflowName} · ${targetStepId}`;
     const newSession = await client.session.create({
       // Deliberately NO parentID: a child session is filtered out of every
       // session list in the TUI (dialog-session-list and the home session index
@@ -216,9 +222,10 @@ export async function executeContextReset(
       engine.logEvent(instId, "warn", "context_reset_first_inject_failed", { to: newSessionId.slice(0, 8), step: targetStepId });
     }
 
-    await injectPrompt(client, oldSessionId,
-      `## 🔄 上下文已重置\n\n工作流 \`${workflowName}\` 已在新会话 **${title}** 中继续（正在自动跳转过去；若未跳转，用 \`/session\` 打开 🔄 开头的会话即可）。本会话正在进行的生成已停止；新会话已带完整交接简报，无需你重复背景。\n\n本会话的历史仍保留，你可以随时切回来查看；但工作流已不在本会话中执行。`,
-      true);
+    const farewell = kind === "rewind"
+      ? `## 🔙 已回退到步骤 \`${targetStepId}\` 重做\n\n工作流 \`${workflowName}\` 已回退到步骤 \`${targetStepId}\`，并在新会话 **${title}** 中重做该步及后续（正在自动跳转过去；若未跳转，用 \`/session\` 打开 🔙 开头的会话即可）。本会话正在进行的生成已停止；新会话已带完整交接简报与回退原因，无需你重复背景。\n\n本会话的历史仍保留，你可以随时切回来查看；但工作流已不在本会话中执行。`
+      : `## 🔄 上下文已重置\n\n工作流 \`${workflowName}\` 已在新会话 **${title}** 中继续（正在自动跳转过去；若未跳转，用 \`/session\` 打开 🔄 开头的会话即可）。本会话正在进行的生成已停止；新会话已带完整交接简报，无需你重复背景。\n\n本会话的历史仍保留，你可以随时切回来查看；但工作流已不在本会话中执行。`;
+    await injectPrompt(client, oldSessionId, farewell, true);
 
     // Ask the TUI to follow the workflow into its new home. The v1 SDK client
     // predates the /tui/select-session endpoint, but the server's publish
@@ -272,7 +279,7 @@ export async function runCheckAndAdvance(
   // crashed-check anomaly path), where re-recording would double the report rows.
   if (state.current_phase === "do") {
     engine.logEvent(instId, "info", "done_detected", { step: state.current_step });
-    engine.addStepRecord(instId, state.current_step, "do", "passed", state.fail_count || 0);
+    engine.addStepRecord(instId, state.current_step, "do", "passed", state.fail_count || 0, undefined, state.workflow_name);
   }
   engine.clearManualStepMarker(instId);
   engine.clearManualGate(instId);
@@ -341,7 +348,7 @@ export async function runCheckAndAdvance(
     return;
   }
 
-  engine.addStepRecord(instId, cur.current_step, "check", checkResult.passed ? "passed" : "failed", cur.fail_count || 0, checkResult.reason);
+  engine.addStepRecord(instId, cur.current_step, "check", checkResult.passed ? "passed" : "failed", cur.fail_count || 0, checkResult.reason, cur.workflow_name);
   const result = checkResult.passed
     ? engine.handleCheckPassed(instId, cur, workflow, step, checkResult)
     : engine.handleCheckFailed(instId, cur, workflow, step, checkResult);

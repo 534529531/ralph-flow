@@ -96,6 +96,11 @@ export interface StepExecutionRecord {
   startTime: string;
   endTime?: string;
   reason?: string;
+  /**
+   * 该记录产生时所在的工作流（嵌套子工作流时是内层工作流名）。2.7.1 起写入；
+   * 旧实例的记录没有此字段——passedStepIds 对无字段记录回退到仅按 stepId 过滤。
+   */
+  workflowName?: string;
 }
 
 export interface CheckResult {
@@ -1751,7 +1756,7 @@ ${renderStepText(instId, step.check)}
             // Only record parent step's check as passed if transition succeeded and
             // the instance still exists (a completed workflow already destroyed it)
             if (!grandparentResult.paused && !grandparentResult.completed) {
-              addStepRecord(instId, parentState.current_step, "check", "passed", parentState.fail_count || 0, `子工作流 "${state.workflow_name}" 已完成。`);
+              addStepRecord(instId, parentState.current_step, "check", "passed", parentState.fail_count || 0, `子工作流 "${state.workflow_name}" 已完成。`, parentState.workflow_name);
             }
             logEvent(instId, "info", "sub_workflow_end", { workflow: state.workflow_name, parent_workflow: parentState.workflow_name, parent_step: parentState.current_step });
             return {
@@ -1945,14 +1950,39 @@ ${renderStepText(instId, step.check)}
     stepStartTimes.set(`${instId}:${stepId}:${phase}`, new Date().toISOString());
   }
 
-  function addStepRecord(instId: string, stepId: string, phase: string, status: "passed" | "failed", failCount: number, reason?: string): void {
+  function addStepRecord(instId: string, stepId: string, phase: string, status: "passed" | "failed", failCount: number, reason?: string, workflowName?: string): void {
     const now = new Date().toISOString();
     const key = `${instId}:${stepId}:${phase}`;
     const startTime = stepStartTimes.get(key) || now;
     stepStartTimes.delete(key);
     const records = loadStepRecords(instId);
-    records.push({ stepId, phase, status, failCount: failCount || 0, startTime, endTime: now, reason });
+    records.push({ stepId, phase, status, failCount: failCount || 0, startTime, endTime: now, reason, workflowName });
     saveStepRecords(instId, records.length > MAX_STEP_RECORDS ? records.slice(-MAX_STEP_RECORDS) : records);
+  }
+
+  /**
+   * 在 `workflowName` 指定的工作流里，返回历史执行记录中通过独立 CHECK 的
+   * 步骤 id 列表（去重、保留插入顺序）。用于 `/ralphflow-rewind`：只能回退
+   * 到这些已通过验证的步骤。仅统计 `phase==="check" && status==="passed"`，
+   * 且该步骤必须在目标工作流的 steps 中存在。
+   *
+   * 跨子工作流栈帧同名步骤的隔离：记录带 `workflowName`（2.7.1 起写入）时
+   * 要求与目标工作流同名——子工作流里 `build` 的 check-passed 不会让父工作流
+   * 从未执行过的同名 `build` 变成可回退目标。无该字段的旧记录回退到仅按
+   * stepId 过滤（升级前的历史不丢，代价是旧记录仍可能把同名子步骤算进来）。
+   */
+  function passedStepIds(instId: string, workflowName: string): string[] {
+    const wf = loadWorkflow(workflowName);
+    if (!wf) return [];
+    const stepIds = new Set(wf.steps.map((s) => s.id));
+    const records = loadStepRecords(instId);
+    const passed = new Set<string>();
+    for (const r of records) {
+      if (r.phase !== "check" || r.status !== "passed" || !stepIds.has(r.stepId)) continue;
+      if (r.workflowName && r.workflowName !== workflowName) continue;
+      passed.add(r.stepId);
+    }
+    return [...passed];
   }
 
   // ─── Legacy single-workflow layout migration ────────────────────────────────
@@ -2091,7 +2121,7 @@ ${renderStepText(instId, step.check)}
     pushState, popState, getStackDepth, readStateStack,
     getEffectiveAdversarialCheck,
     // logs + records
-    logEvent, recordStepStart, addStepRecord, loadStepRecords,
+    logEvent, recordStepStart, addStepRecord, loadStepRecords, passedStepIds,
     // reports
     buildReportText, archiveReport,
     // check parsing

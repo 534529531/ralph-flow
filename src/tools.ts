@@ -19,7 +19,7 @@ import path from "path";
 import os from "os";
 import { tool } from "@opencode-ai/plugin";
 import type { Engine } from "./engine.js";
-import { isSubWorkflowStep, MAX_NESTING_DEPTH, MANUAL_GATE_MARKER, DONE_TAG_MARKER } from "./engine.js";
+import { isSubWorkflowStep, MAX_NESTING_DEPTH, MANUAL_GATE_MARKER, DONE_TAG_MARKER, type NormalStepDef, type RalphFlowState } from "./engine.js";
 import { hasActiveCheck } from "./check.js";
 import { executeContextReset } from "./driver.js";
 
@@ -32,6 +32,53 @@ export function createTools(engine: Engine, client: Client) {
   // most of the run is autonomous (just wait); they are only pulled in at clearly
   // announced handoff points (manual review, or a pause on repeated failure).
   const ONBOARDING = `> 💡 **怎么配合它**：工作流会「自动执行 → 自动独立验证」一步步推进，**大多数时间你只需等待，不用管**。只有两类时刻会**明确提示「轮到你了」**：① 手动审查步骤，② 连续失败或异常导致的暂停。看到 🙋 就是需要你操作；看到 ⏳/🔍 就是自动进行中、静候即可。任何时候想调整方向，直接发消息就行。`;
+
+  /**
+   * 构造「回退/重置」的注入文本（transitionText）——把用户的"为什么回退/重置"
+   * 原因段拼到 DO 提示之前，让新会话冷启动第一眼就看到；同时把它覆盖进
+   * `.do-prompt-cache`，让 idle keep-alive 重注入时也保留这段原因（否则几轮
+   * 后会被 buildDoNudge 退化为裸 DO 提示，用户的"为什么"在最该被记住时丢失）。
+   *
+   * 不传 reason（或全空）：构造与历史行为字节级一致的 transitionText（reset
+   * 的回归测试依赖此路径），buildDoPrompt 自己写的 cache 不覆盖。
+   *
+   * kind="reset"：原「## 🔄 上下文已手动重置 / 步骤 X 将重新执行」头 +
+   * 可选的 reason 段；kind="rewind"：换 🔙 回退说明头，并显式点明"下游 ✓
+   * 仅为历史、本次重做、插件不删产物"。两个 kind 共用同一覆盖 cache 路径。
+   *
+   * fromStepId 仅 rewind 用：调用方传入的是**已倒退后**的 state（current_step
+   * 已是目标步），头里的"从哪回退"必须显式给出，不能从 state 读——否则
+   * 写出来就是"已从步骤 X 回退到 X"（本次修复的 bug）。reset 不传，from 即
+   * state.current_step。
+   */
+  function buildRewindOrResetTransitionText(
+    instId: string,
+    step: NormalStepDef,
+    state: RalphFlowState,
+    reason: string | undefined,
+    kind: "rewind" | "reset",
+    fromStepId?: string,
+  ): string {
+    const reasonText = reason && reason.trim() ? reason.trim() : null;
+    // buildDoPrompt 会自己 writeDoPromptCache(doPrompt)（engine.ts），下面的
+    // 覆盖在有 reason 时才覆盖；无 reason 时保持 buildDoPrompt 的版本，与历史
+    // 行为一致。
+    const doPrompt = engine.buildDoPrompt(
+      instId, step, state.user_task, state.last_failure_reason, state.fail_count || 0,
+    );
+    if (!reasonText) {
+      // 字节级兼容老 reset 的 transitionText（回归测试依赖）。
+      return `## 🔄 上下文已手动重置\n\n步骤 \`${state.current_step}\` 将重新执行。\n\n---\n\n${doPrompt}`;
+    }
+    const fromStep = fromStepId ?? state.current_step;
+    const header = kind === "rewind"
+      ? `## 🔙 回退说明\n\n已从步骤 \`${fromStep}\` 回退到 \`${step.id}\` 重做。会话交接说明里下游的 ✓ 仅为历史记录，本次将重做这些步骤。\n\n**用户回退原因**：\n\n${reasonText}\n\n> 已落盘的代码/文档保留。插件**不会自动删除**任何产物——按上面的原因，决定保留、调整还是让模型覆盖旧产出。`
+      : `## 🔄 上下文已手动重置\n\n步骤 \`${state.current_step}\` 将重新执行。\n\n**用户重置原因**：\n\n${reasonText}`;
+    const fullText = `${header}\n\n---\n\n${doPrompt}`;
+    // 让 idle keep-alive 重注入也带上 reason（buildDoPrompt 写的裸 cache 被覆盖）。
+    engine.writeDoPromptCache(fullText, instId);
+    return fullText;
+  }
 
   const ralphflow_start = tool({
     description: "启动一个工作流实例。需提供工作流名称和任务描述。同一项目下多个会话可各自运行自己的实例。",
@@ -326,9 +373,10 @@ export function createTools(engine: Engine, client: Client) {
   const ralphflow_reset = tool({
     description: "手动重置当前工作流上下文：创建新会话，在新会话中重新执行当前步骤的 DO 阶段。当前会话的上下文仍保留，但工作流驱动权转移到新会话。",
     args: {
+      reason: tool.schema.string().optional().describe("可选的重置原因——来自用户，说明为什么重置、重做时要注意什么。传入后会拼到新会话首条 DO 提示前，并随 idle keep-alive 保留；不传时行为旧版一致。"),
       instance: tool.schema.string().optional().describe("实例 id（支持唯一前缀）。仅当本会话有多个实例时需指定。"),
     },
-    async execute({ instance }, context) {
+    async execute({ reason, instance }, context) {
       const sessionId = context.sessionID;
       const resolution = engine.resolveInstance(instance, sessionId);
       if (!resolution.ok) return resolution.text;
@@ -338,6 +386,13 @@ export function createTools(engine: Engine, client: Client) {
       if (!state || !state.active) return "没有活跃的工作流。使用 ralphflow_start 启动一个。";
       if (state.session_id !== sessionId) {
         return "该实例的属主是另一个会话。只有属主会话可以重置。在当前会话调用 ralphflow_continue 接管该实例。";
+      }
+
+      // 暂停实例拒绝 reset：paused 会随状态原样带进新会话，而新会话的 idle
+      // 驱动对 paused 实例静默——用户看到"已在新会话继续"却永远不动，得自己
+      // 察觉后再 continue。暂停的解除必须走显式路径，所以在这里就拦下。
+      if (state.paused) {
+        return `实例当前处于暂停状态（${state.pause_reason || "未知原因"}）。重置不会解除暂停——换新会话后空闲驱动对暂停实例静默，看似"没反应"。\n\n请先运行 \`/ralphflow-continue\` 恢复（解除暂停并归零失败计数）；恢复后若仍想换干净上下文，再运行 \`/ralphflow-reset\`。想回退到上游已通过步骤改方向重做，用 \`/ralphflow-rewind\`（它会解除暂停）。`;
       }
 
       if (state.current_phase !== "do") {
@@ -350,15 +405,12 @@ export function createTools(engine: Engine, client: Client) {
       const step = engine.getStep(workflow, state.current_step);
       if (!step) return `步骤 "${state.current_step}" 未找到。`;
 
-      const doPrompt = engine.buildDoPrompt(instId, step as any, state.user_task, state.last_failure_reason, state.fail_count || 0);
-      const transitionText = `## 🔄 上下文已手动重置\n\n步骤 \`${state.current_step}\` 将重新执行。\n\n---\n\n${doPrompt}`;
-
       // fail_count / last_failure_reason 原样保留：reset 只是换一个干净的上下文
       // 容器，不赦免失败——否则模型（或用户）反复 reset 就能无限续命，
       // max_fail_count 这道自动刹车就失效了。想重算失败预算，走
       // 「暂停 → ralphflow_continue」的显式赦免路径。
-      // 同时刷新 DO 提示缓存与投递标记，让新会话的 idle 重驱动与首条注入一致。
-      engine.writeDoPromptCache(doPrompt, instId);
+      // reason 透传给注入函数；无 reason 时保持字节级旧 transitionText 与 cache。
+      const transitionText = buildRewindOrResetTransitionText(instId, step as NormalStepDef, state, reason, "reset");
       engine.markPromptDelivered(step.id, instId);
 
       const resetOk = await executeContextReset(
@@ -369,6 +421,184 @@ export function createTools(engine: Engine, client: Client) {
         return "已在新的干净会话中重新开始当前步骤。";
       }
       return "重置失败。请稍后重试，或使用 /ralphflow-cancel 取消后再重新启动。";
+    },
+  });
+
+  // ─── Tool: ralphflow_rewind ──────────────────────────────────────────────────
+  //
+  // 回退到本工作流里"已通过独立 CHECK"的某个上游步骤重做。与 reset 的区别：
+  // reset 重做当前步、状态机不动；rewind 倒退状态机到目标步的 DO 阶段。
+  // 如同 reset 一样默认换入干净会话；reason（必填）跨会话注入首条 DO 提示
+  // 前并随 idle keep-alive 保留，让新会话冷启动就带着用户给出的"为什么回退"。
+  // paused 实例允许 rewind（顺便清暂停 + 归零 fail_count）——这正对应"指示
+  // 改完暂停下来后，决定回退到前面更早的一步换个方向重做"的用户旅程。
+
+  const ralphflow_rewind = tool({
+    description: "回退到一个在本工作流里已通过独立 CHECK 的上游步骤，重做该步及后续。状态机倒退、fail_count 归零、清除暂停；下游已落盘产物保留（插件不删除）。reason（必填，来自用户）会跨会话注入新会话首条 DO 提示前，并随 idle keep-alive 保留。",
+    args: {
+      step: tool.schema.string().describe("目标步骤 id——必须是本工作流里已通过独立 CHECK 的上游步骤（用 ralphflow_status 查看）；不能是当前步骤、子工作流复合步骤或未来步骤"),
+      reason: tool.schema.string().describe("回退原因（必填，来自用户）：为什么回退、重做时要注意什么。会拼到新会话首条 DO 提示前，必要时会被模型据此决定保留还是覆盖旧产出。"),
+      keep_session: tool.schema.boolean().optional().describe("可选，默认 false=换入干净会话（与 /ralphflow-reset 一致）；传 true 时在当前会话继续，仅倒退状态机。"),
+      instance: tool.schema.string().optional().describe("实例 id（支持唯一前缀）。仅当本会话有多个实例时需指定。"),
+    },
+    async execute({ step, reason, keep_session, instance }, context) {
+      const sessionId = context.sessionID;
+
+      // ── reason 校验 ────────────────────────────────────────────────────────
+      // reason 必填且非空。这是用户旅程的关键：新会话冷启动时，"为什么回退"
+      // 是重做方向的唯一指引——空 reason 会让模型毫无方向地重做一遍，白重置。
+      if (!reason || !String(reason).trim()) {
+        return `回退需要一个原因：为什么回退、重做时要注意什么。请向用户询问（"为什么回退到这一步、这次重做希望注意什么？"），拿到后作为 \`reason\` 参数传入。新会话冷启动时只能靠它知道这次重做的方向。`;
+      }
+      const reasonStr = String(reason).trim();
+
+      // ── step 必传 ──────────────────────────────────────────────────────────
+      if (!step || !String(step).trim()) {
+        return "请指定要回退到的目标步骤 `step`。可用 `ralphflow_status` 查看当前进度，再调用本工具传入历史已通过步骤的 id。";
+      }
+      const targetStepId = String(step).trim();
+
+      const resolution = engine.resolveInstance(instance, sessionId);
+      if (!resolution.ok) return resolution.text;
+      const instId = resolution.id;
+      const attached = resolution.attached;
+
+      const state = engine.readState(instId);
+      if (!state || !state.active) return "没有活跃的工作流。使用 ralphflow_start 启动一个。";
+
+      // ── 跨子工作流栈帧回退：第一版不支持 ─────────────────────────────────────
+      // 当前若在子工作流里（state stack 非空），target 在哪一栈帧无关——本版本
+      // 一律拒绝跨栈帧回退。理由：(1) 跨栈帧回退需要决定弹栈到哪一层、如何
+      // 把中间栈帧的进度作废，状态变更面远大于本栈帧回退；(2) 子工作流里的
+      // "下游已落盘产物"跨多个栈帧，提示哪一层的产出失效对用户更难解读；
+      // (3) 想从子工作流里回到父工作流，更直接的路径是 /ralphflow-cancel +
+      // 重新 start。先留白，给清晰错误指向。
+      if (engine.readStateStack(instId).length > 0) {
+        return `当前实例在子工作流内运行（工作流 \`${state.workflow_name}\`，步骤 \`${state.current_step}\`）。本版本不支持跨子工作流栈帧回退——请先完成或取消该子工作流（\`/ralphflow-continue\` 或 \`/ralphflow-cancel\`），再回退到父工作流的步骤。`;
+      }
+
+      // ── CHECK 进行中：拒绝（稍候）──────────────────────────────────────────
+      // paused=true 时 current_phase 通常是 "do"（暂停由 max_failures 或
+      // check_error 引起，但 check_error 暂停时 phase=="check"——下面分支要补充）。
+      if (!state.paused && state.current_phase !== "do") {
+        return `当前阶段是 \`${state.current_phase}\`（独立 CHECK 进行中）。回退只能在 DO 阶段或暂停时操作——请稍候验证完成，或运行 \`/ralphflow-cancel\` 放弃。`;
+      }
+      // check_error 暂停时 phase=="check"，paused==true：此时没活跃验证器，
+      // 视作可回退（与 ralphflow_continue 把它视作"清暂停重试"一致）。
+      if (state.paused && state.current_phase === "check") {
+        // 多见于 verifier 崩溃后留下的 "check" 暂停。允许回退——先清掉所有
+        // 可能挂在 check 阶段的标记。下面的状态重写会一并解决。
+        if (hasActiveCheck(instId)) {
+          return `步骤 \`${state.current_step}\` 的独立验证仍在运行。请稍候完成，或运行 \`/ralphflow-cancel\` 放弃后再回退。`;
+        }
+      }
+
+      const workflow = engine.loadWorkflow(state.workflow_name);
+      if (!workflow) return `工作流 "${state.workflow_name}" 未找到。`;
+
+      // ── 接管/属主校验：拒绝非属主，要求先 /ralphflow-continue 接管 ──────────
+      // 与 ralphflow_reset 同构：rewind 同时换干净会话 + 倒退状态机，是两次远跨
+      // 的动作，"接管"应作为独立、显式的声明，避免静默侵占其他会话正在用的
+      // 实例。attached 即 resolveInstance 读到的 owner !== sessionId，与后面的
+      // session_id 比较语义相同——两个条件叠加是防御 resolveInstance 与
+      // readState 之间状态漂移的冗余，不是两种不同的校验。
+      if (attached || (state.session_id && state.session_id !== sessionId)) {
+        return "该实例的属主是另一个会话。只有属主会话可以回退。在当前会话调用 `ralphflow_continue` 接管该实例，再用 `/ralphflow-rewind`。";
+      }
+
+      // ── 目标步骤合法性 ──────────────────────────────────────────────────────────
+      const targetStep = engine.getStep(workflow, targetStepId);
+      if (!targetStep) {
+        return `步骤 \`${targetStepId}\` 不在工作流 "${state.workflow_name}" 中。`;
+      }
+      if (isSubWorkflowStep(targetStep)) {
+        return `步骤 \`${targetStepId}\` 是子工作流（复合）步骤，没有 DO/CHECK 阶段，不能回退到它。`;
+      }
+      if (targetStepId === state.current_step) {
+        return `\`${targetStepId}\` 就是当前步骤——重做当前步用 \`/ralphflow-reset\`（不倒退状态机）；rewind 是回退到**上游**已通过步骤。`;
+      }
+      const passed = engine.passedStepIds(instId, state.workflow_name);
+      if (!passed.includes(targetStepId)) {
+        const list = passed.length > 0
+          ? passed.map((s) => `\`${s}\``).join("、")
+          : "（暂无——本工作流还没有步骤通过独立 CHECK）";
+        return `只能回退到**本工作流里已通过独立 CHECK**的步骤，\`${targetStepId}\` 不在此列。\n\n本工作流已通过 CHECK 的步骤：${list}\n\n可用 \`/ralphflow-status\` 查看当前进度。`;
+      }
+
+      // ── 倒退状态机 ──────────────────────────────────────────────────────────
+      const fromStep = state.current_step;
+      const wasPaused = state.paused;
+
+      // fail_count 归零 + paused 清除：rewind 与 /ralphflow-continue 走"显式
+      // 赦免"的语义对齐——用户主动决定回到方向更早的一步重来，没有"上次没
+      // 干到这一步就气数已尽"的包袱。last_failure_reason 同步清：避免
+      // buildDoPrompt 把 build 步无关的"propose 失败原因"当成 retryContext，
+      // 误导模型以为是 CHECK 重试。
+      const newState: RalphFlowState = {
+        ...state,
+        current_step: targetStepId,
+        current_phase: "do",
+        fail_count: 0,
+        paused: false,
+        pause_reason: undefined,
+        last_failure_reason: undefined,
+      };
+      engine.writeState(newState, instId);
+
+      // 清标记：旧 manualGate / manualStep / done 标记在那个 step 的语境下
+      // 都和新位置无关；reinject 计数也要清（进入新 phase）。
+      engine.clearManualGate(instId);
+      engine.clearManualStepMarker(instId);
+      engine.clearDoneTagDetected(instId);
+      engine.clearReinjectCounter(instId);
+
+      engine.recordStepStart(instId, targetStepId, "do");
+      // 与其它所有 DO 阶段入口（start / check 转换 / continue 恢复）一致记
+      // step_start——按事件类型过滤日志时，rewind 进入的新 DO 阶段不该缺席。
+      engine.logEvent(instId, "info", "step_start", { step: targetStepId, phase: "do" });
+      engine.logEvent(instId, "info", "rewind", {
+        from: fromStep, to: targetStepId,
+        keep_session: !!keep_session, was_paused: !!wasPaused,
+      });
+
+      // 目标若是 manual_step：重新布防审查门（和首次进入它一致）。
+      if (workflow.manual_step && workflow.manual_step.includes(targetStepId)) {
+        engine.writeManualStepMarker(instId);
+      }
+
+      // ── 注入文本（含 reason 段）──────────────────────────────────────────────
+      // reason 段头里有"下游 ✓ 仅为历史、本次重做"的提示，配合新会话里
+      // buildResetBriefing 仍然会画的 ✓ 标记——briefing 显示的是真实历史，
+      // 头部点明本次重做，避免模型把下游当已完成不去重做。
+      // fromStep 显式传入：newState.current_step 已是目标步，头里的"从哪回退"
+      // 只能靠它（否则写成"已从步骤 X 回退到 X"）。
+      const transitionText = buildRewindOrResetTransitionText(instId, targetStep as NormalStepDef, newState, reasonStr, "rewind", fromStep);
+      engine.markPromptDelivered(targetStepId, instId);
+
+      // ── keep_session：不换会话，工具直接返回注入文本 ───────────────────────
+      if (keep_session) {
+        // 上层 slash 命令会把这段文本原样投回当前会话（驱动模型开始重做）。
+        return wasPaused
+          ? `## 已从暂停恢复并回退到步骤 \`${targetStepId}\`\n\n---\n\n${transitionText}`
+          : transitionText;
+      }
+
+      // ── 默认换会话：复用 reset 门注入路径（不加任何额外的 reason 包装）──
+      // kind="rewind"：新会话标题 🔙、旧会话告别语用"回退"措辞——用户执行的
+      // 是 rewind，看到的告别不该说"上下文已重置"（两个命令的心智模型不同）。
+      const resetOk = await executeContextReset(
+        client, engine, instId, sessionId,
+        transitionText, state.workflow_name, targetStepId,
+        { kind: "rewind" },
+      );
+      if (resetOk) {
+        return wasPaused
+          ? `已从暂停恢复，并在新会话回到步骤 \`${targetStepId}\` 重做（原因已随会话带入）。`
+          : `已在新会话回到步骤 \`${targetStepId}\` 重做（原因已随会话带入）。`;
+      }
+      // executeContextReset 失败时 owner 已被锁定为旧会话——状态机已倒退，
+      // 但会话没换。不让用户在旧会话空转：明确建议下一动作。
+      return `状态机已倒退到步骤 \`${targetStepId}\`，但开新会话失败。建议：稍后用 \`/ralphflow-status\` 确认进度后，在本会话直接重试 \`/ralphflow-rewind\` 并传 \`keep_session: true\`（用当前会话继续），或运行 \`/ralphflow-reset\` 仅重置当前步上下文。`;
     },
   });
 
@@ -522,6 +752,7 @@ export function createTools(engine: Engine, client: Client) {
     ralphflow_start,
     ralphflow_continue,
     ralphflow_reset,
+    ralphflow_rewind,
     ralphflow_cancel,
     ralphflow_status,
     ralphflow_list,

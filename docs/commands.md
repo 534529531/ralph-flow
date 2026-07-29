@@ -26,6 +26,8 @@
 |------|------|
 | `/ralphflow-start` | 启动工作流（需要工作流名和任务描述）——快捷命令不可用时的通用入口 |
 | `/ralphflow-continue` | 批准手动审查 · 发出 DO 完成信号 · 恢复暂停的工作流 · 接管中断的实例 |
+| `/ralphflow-reset` | 当前会话太长/跑偏时**只重置当前步**的上下文——换一个干净会话重做当前步（状态机不动，失败计数不赦免） |
+| `/ralphflow-rewind` | 回退到本工作流里**已通过 CHECK 的上游步骤**重做——状态机倒退、失败计数归零，下游产物保留；reason 必填，会跨会话注入新会话首条 DO 提示前 |
 | `/ralphflow-status` | 查看本会话的实例、指定实例，或全部实例 |
 | `/ralphflow-list` | 列出可用工作流和活跃实例 |
 | `/ralphflow-cancel` | 取消实例（先归档报告） |
@@ -54,6 +56,12 @@
 /ralphflow-continue
 /ralphflow-continue loop-260710-ab12     # 接管指定实例（支持唯一前缀）
 
+# 上下文脏了只想重做当前步：换干净会话重做同一格步
+/ralphflow-reset "模型一直把无关重构夹带进来，换干净上下文重来"
+
+# 后期才发现早期步骤方向错了：倒退状态机到某个已通过 CHECK 的上游步骤重做
+/ralphflow-rewind propose "第二步技术文档里 API 假设错了，得重设计"
+
 # 取消并归档报告
 /ralphflow-cancel
 
@@ -72,6 +80,8 @@
 |------|------|------|
 | `ralphflow_start` | `workflow`、`task`、`extra_dirs?` | 创建并绑定新实例 |
 | `ralphflow_continue` | `instance?` | DO 完成 → 跑 CHECK 并推进；也用于恢复/接管 |
+| `ralphflow_reset` | `reason?`、`instance?` | 换一个干净会话重做**当前步**；状态机不动、失败计数不赦免 |
+| `ralphflow_rewind` | `step`、`reason`、`keep_session?`、`instance?` | 倒退状态机到已通过 CHECK 的上游步骤重做；归零失败计数、清暂停、下游产物保留；reason 必填跨会话注入 |
 | `ralphflow_cancel` | `instance?` | 取消实例 |
 | `ralphflow_status` | `instance?` | 单实例详情或概览 |
 | `ralphflow_list` | — | 工作流 + 实例 |
@@ -101,6 +111,8 @@
 | `workflow_paused` | 暂停（最大失败 / 配置错误 / 验证基础设施故障） |
 | `workflow_resumed` | 用户恢复 |
 | `workflow_cancelled` | 用户取消 |
+| `rewind` | 用户用 `/ralphflow-rewind` 倒退状态机到上游已通过步骤（含 `from`/`to`/`keep_session`/`was_paused` 字段） |
+| `context_reset` | 重置门触发：跨步骤转换或手动 reset 换入全新会话（含 `from`/`to`/`step` 字段） |
 | `legacy_instance_migrated` | 1.x 工作流被迁移进实例布局 |
 
 ### 步骤事件

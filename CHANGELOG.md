@@ -2,6 +2,28 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 2.7.1 (2026-07-29)
+
+### 修复
+- **rewind 注入头的 from-step 写错（"已从步骤 X 回退到 X"）**：注入函数收到的是已倒退后的 state（`current_step` 已是目标步），头里的"从哪回退"却从 state 读——新会话冷启动第一条消息自相矛盾，且随 `.do-prompt-cache` 在每次 idle keep-alive 重注入。现由调用方显式传 `fromStepId`，并补 from-step 断言测试（该 bug 漏网的直接原因就是无此断言）。
+- **跨子工作流栈帧同名步骤会被误判为"已通过"**：`StepExecutionRecord` 没有工作流名字段，子工作流里 `build` 的 check-passed 会让父工作流从未执行过的同名 `build` 变成可回退目标。记录新增 `workflowName` 字段（写入时带当前/父工作流名），`passedStepIds` 据此隔离；旧记录无字段时回退为仅按 stepId 匹配（历史不丢）。
+- **`/ralphflow-reset` 在暂停实例上静默"没反应"（既有问题）**：paused 会随状态带进新会话，新会话的空闲驱动对暂停实例永远静默，告别语却说"已在新会话继续"。现在 reset 遇暂停直接拒绝，指向 `/ralphflow-continue`（显式解除暂停）或 `/ralphflow-rewind`（回退顺便清暂停）。
+- **`/ralphflow-rewind` 命令模板两处笔误**："fade 场景"（残留乱码，语义不明）改为"方向回退场景"；"rewrite 把这条原因跨会话带过去"的 rewrite 改为 rewind。
+- **rewind 换会话后旧会话告别语说"上下文已重置"**：`executeContextReset` 新增可选 `kind`，rewind 传 `🔙` 标题 + "已回退到步骤 X 重做"措辞，与 reset 的 🔄 区分——用户执行的是哪个命令，告别就该说哪个。
+- **rewind 缺 `step_start` 日志事件**：其它所有 DO 阶段入口（start / check 转换 / continue 恢复）都记，rewind 现在补齐——按事件类型过滤日志时不再缺席。
+
+### 文档
+- `docs/how-it-works.md`：rewind 边界补"回环流程里目标可能在数组顺序靠后（语义=跳到任何曾通过 CHECK 的步骤）"与同名步骤工作流名隔离说明；reset 暂停拒绝在 rewind 边界对照与 `docs/custom-workflows.md` 触发规则中说明。
+
+## 2.7.0 (2026-07-29)
+
+### 新增
+- **`/ralphflow-rewind`：运行时回退到已通过 CHECK 的上游步骤重做**。长流程中途用户主观判断前面某步方向错了（非 CHECK 自动失败），可以倒退状态机到那个**已通过独立 CHECK** 的步骤重做：状态机倒退、`fail_count` 归零、`paused` 清除，下游已落盘的代码/文档**保留**（插件不删任何产物）。`reason` 必填、来自用户（"为什么回退、重做时要注意什么"），跨会话注入新会话首条 DO 提示前并随 idle keep-alive 重注入保留——这是用户旅程的关键断点：旧的 reset 会把用户跟 AI 说的"为什么回退"丢在旧会话，新会话冷启动只收到一句"步骤 X 将重新执行"，毫无方向感；rewind 把这条原因跨会话带过去，让新会话模型一开局就知道这次重做要纠正什么。默认换干净会话（与 reset 一致），`keep_session: true` 复用当前会话。paused 实例允许 rewind（顺便清暂停）。边界：回退当前步 → 拒绝指向 `/ralphflow-reset`；目标不在本工作流、是子工作流（复合）步骤、未通过 CHECK → 拒绝并提示可选清单；当前在子工作流栈帧内 → 拒绝跨栈帧回退（第一版留白，指向 `/ralphflow-cancel` + 重新 `start`）。
+- **`/ralphflow-reset` 顺手补可选 `reason`**：同一旅程断点的修复——用户用 reset 时也会跟 AI 说"为什么重置"。`reason` 可选：不传时行为与旧版字节级一致（向后兼容）；传了则与 rewind 走同一条跨会话注入路径，新会话冷启动首条 DO 提示前含 reason 段，idle keep-alive 重注入也保留。
+
+### 文档
+- `docs/how-it-works.md` 新增「中途回退与上下文重置」一节，对照 reset/rewind/cancel 三种场景；`docs/commands.md` 工具表与日志事件补 `ralphflow_rewind`、`rewind`、`context_reset`；README 命令列表同步。
+
 ## 2.6.0 (2026-07-28)
 
 ### 新增

@@ -1164,3 +1164,126 @@ describe("state stack", () => {
     expect(engine.getStackDepth(INST)).toBe(1);
   });
 });
+
+// ─── passedStepIds（用于 /ralphflow-rewind 的"可回退目标"集合）─────────────
+
+describe("passedStepIds", () => {
+  const WF = `
+description: passed collectors
+steps:
+  - id: a
+    desc: a
+    do: do a
+    check: check a
+    input: i
+    output: "a.md"
+    on_pass: b
+    on_fail: a
+    max_fail_count: 3
+  - id: b
+    desc: b
+    do: do b
+    check: check b
+    input: a.md
+    output: "b.md"
+    on_pass: c
+    on_fail: b
+    max_fail_count: 3
+  - id: c
+    desc: c
+    do: do c
+    check: check c
+    input: b.md
+    output: "c.md"
+    on_pass: done
+    on_fail: c
+    max_fail_count: 3
+`;
+
+  beforeEach(() => {
+    writeProjectWorkflow("test-wf", SIMPLE_WF);
+    writeProjectWorkflow("collectors", WF);
+  });
+
+  it("returns steps that have a check-passed record within this workflow", () => {
+    const instId = engine.generateInstanceId("collectors");
+    fs.mkdirSync(engine.getInstanceDir(instId), { recursive: true });
+    engine.writeArtifactsDirName(instId, "task");
+    engine.addStepRecord(instId, "a", "check", "passed", 0, "ok");
+    engine.addStepRecord(instId, "b", "check", "passed", 0, "ok");
+    // do 阶段的记录不算（只看 check passed）
+    engine.addStepRecord(instId, "c", "do", "passed", 0, "ok");
+    expect(engine.passedStepIds(instId, "collectors").sort()).toEqual(["a", "b"]);
+  });
+
+  it("filters out check-failed records (only passed counts)", () => {
+    const instId = engine.generateInstanceId("collectors");
+    fs.mkdirSync(engine.getInstanceDir(instId), { recursive: true });
+    engine.writeArtifactsDirName(instId, "task");
+    engine.addStepRecord(instId, "a", "check", "passed", 0, "ok");
+    engine.addStepRecord(instId, "b", "check", "failed", 1, "nope");
+    expect(engine.passedStepIds(instId, "collectors")).toEqual(["a"]);
+  });
+
+  it("deduplicates (a step that passed twice is listed once)", () => {
+    const instId = engine.generateInstanceId("collectors");
+    fs.mkdirSync(engine.getInstanceDir(instId), { recursive: true });
+    engine.writeArtifactsDirName(instId, "task");
+    engine.addStepRecord(instId, "a", "check", "passed", 0, "ok");
+    engine.addStepRecord(instId, "a", "check", "passed", 1, "ok again");
+    expect(engine.passedStepIds(instId, "collectors")).toEqual(["a"]);
+  });
+
+  it("only counts steps that belong to the target workflow (cross-workflow isolation)", () => {
+    // 同一实例的 step records 可能混多工作流的记录（极少，但语义要稳）：
+    // 查 collectors 时，one（test-wf 的步骤）不应被算进来——passedStepIds
+    // 按目标 workflow.steps.id 集合过滤。
+    const instId = engine.generateInstanceId("collectors");
+    fs.mkdirSync(engine.getInstanceDir(instId), { recursive: true });
+    engine.writeArtifactsDirName(instId, "task");
+    engine.addStepRecord(instId, "a", "check", "passed", 0, "ok");
+    engine.addStepRecord(instId, "one", "check", "passed", 0, "ok");
+    expect(engine.passedStepIds(instId, "collectors")).toEqual(["a"]);
+    // 反过来查 test-wf（SIMPLE_WF 的 workflow 名）：one 在它的 steps 里 → 被算上
+    expect(engine.passedStepIds(instId, "test-wf")).toEqual(["one"]);
+  });
+
+  it("isolates same-named steps across stack frames via workflowName (nested workflows)", () => {
+    // 父子工作流有同名步骤 id（如都叫 a）：子工作流里 a 的 check-passed 记录
+    // 带 workflowName=child，查父工作流 collectors 时不应把父的 a 算作已通过。
+    const instId = engine.generateInstanceId("collectors");
+    fs.mkdirSync(engine.getInstanceDir(instId), { recursive: true });
+    engine.writeArtifactsDirName(instId, "task");
+    // 子工作流栈帧产生的记录（同名步骤 a、b，但属于 child-wf）
+    engine.addStepRecord(instId, "a", "check", "passed", 0, "ok", "child-wf");
+    engine.addStepRecord(instId, "b", "check", "passed", 0, "ok", "child-wf");
+    expect(engine.passedStepIds(instId, "collectors")).toEqual([]);
+    // 父工作流自己的记录（workflowName=collectors）正常计入
+    engine.addStepRecord(instId, "a", "check", "passed", 0, "ok", "collectors");
+    expect(engine.passedStepIds(instId, "collectors")).toEqual(["a"]);
+    // 查 child-wf 不存在 → []
+    expect(engine.passedStepIds(instId, "child-wf")).toEqual([]);
+  });
+
+  it("legacy records without workflowName fall back to stepId-only matching", () => {
+    // 2.7.1 之前的旧记录没有 workflowName：回退到仅按 stepId 过滤（历史不丢）。
+    const instId = engine.generateInstanceId("collectors");
+    fs.mkdirSync(engine.getInstanceDir(instId), { recursive: true });
+    engine.writeArtifactsDirName(instId, "task");
+    engine.addStepRecord(instId, "a", "check", "passed", 0, "ok"); // 无 workflowName
+    expect(engine.passedStepIds(instId, "collectors")).toEqual(["a"]);
+  });
+
+  it("returns [] when the workflow is not found", () => {
+    const instId = engine.generateInstanceId("nope");
+    fs.mkdirSync(engine.getInstanceDir(instId), { recursive: true });
+    engine.addStepRecord(instId, "a", "check", "passed", 0, "ok");
+    expect(engine.passedStepIds(instId, "nonexistent-workflow")).toEqual([]);
+  });
+
+  it("returns [] when no check records exist for the instance", () => {
+    const instId = engine.generateInstanceId("collectors");
+    fs.mkdirSync(engine.getInstanceDir(instId), { recursive: true });
+    expect(engine.passedStepIds(instId, "collectors")).toEqual([]);
+  });
+});
