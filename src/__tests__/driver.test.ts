@@ -345,20 +345,76 @@ describe("handleSessionIdle", () => {
     expect(injected[0].text).toContain("继续执行步骤");
   });
 
-  it("stops driving after MAX_DO_REINJECT idles without tool use", async () => {
+  it("stops driving after MAX_DO_REINJECT idles without tool use (warns once, then silent)", async () => {
     startInstance("build");
     lastAssistantText = "stuck";
+    let sawWarning = false;
     for (let i = 0; i < 6; i++) {
       injected = [];
       await handleSessionIdle(makeClient(), engine, "sess-1");
+      if (injected.length === 1 && injected[0].text.includes("已暂停自动驱动")) {
+        sawWarning = true;
+        expect(injected[0].noReply).toBe(true);
+      }
     }
-    injected = [];
-    await handleSessionIdle(makeClient(), engine, "sess-1");
-    expect(injected.length).toBe(1);
-    expect(injected[0].text).toContain("已暂停自动驱动");
-    expect(injected[0].noReply).toBe(true);
+    expect(sawWarning).toBe(true); // the exhausted alarm fired when the count crossed the limit
+    // Every idle afterwards is silent — no re-spamming the same warning
+    for (let i = 0; i < 3; i++) {
+      injected = [];
+      await handleSessionIdle(makeClient(), engine, "sess-1");
+      expect(injected.length).toBe(0);
+    }
     // Workflow itself is NOT paused
     expect(engine.readState(engine.listInstances()[0].id)!.paused).toBe(false);
+  });
+
+  it("reinject-exhausted → user /ralphflow-continue confirms done → next idle runs the check and advances", async () => {
+    // Regression: the exhausted alarm tells the user "run /ralphflow-continue to
+    // enter verification", but continue used to fall through to the "nothing to
+    // do" branch — the workflow could never advance. Now it must arm the done
+    // marker so the next idle's Case 2 auto-runs the independent check.
+    checkVerdict = "true";
+    const instId = startInstance("build");
+    lastAssistantText = "stuck";
+    for (let i = 0; i < 6; i++) await handleSessionIdle(makeClient(), engine, "sess-1");
+    injected = [];
+
+    const tools = createTools(engine, makeClient());
+    const res = await tools.ralphflow_continue.execute({}, { sessionID: "sess-1" } as any);
+    expect(String(res)).toContain("已确认完成");
+    // done marker armed, exhausted counter cleared, state untouched (still do)
+    expect(fs.existsSync(path.join(engine.getInstanceDir(instId), ".done-tag-detected"))).toBe(true);
+    expect(fs.existsSync(path.join(engine.getInstanceDir(instId), ".do-reinject-count"))).toBe(false);
+    expect(engine.readState(instId)!.current_phase).toBe("do");
+
+    // Next idle → Case 2 re-runs the check → passes → advances to the next step
+    await handleSessionIdle(makeClient(), engine, "sess-1");
+    const texts = injected.map((i) => i.text);
+    expect(texts.some((t) => t.includes("🔍 CHECK 阶段"))).toBe(true);
+    expect(texts.some((t) => t.includes("检查结果：通过 ✓"))).toBe(true);
+    expect(engine.readState(instId)!.current_step).toBe("review");
+  });
+
+  it("continue in a mid-DO step WITHOUT exhausted counter still says nothing to do (no false confirm)", async () => {
+    // The confirm-done path must only arm when the reinject counter is actually
+    // exhausted — a random continue call mid-DO must not fake a done tag.
+    const instId = startInstance("build");
+    const tools = createTools(engine, makeClient());
+    const res = await tools.ralphflow_continue.execute({}, { sessionID: "sess-1" } as any);
+    expect(String(res)).toContain("无需操作");
+    expect(fs.existsSync(path.join(engine.getInstanceDir(instId), ".done-tag-detected"))).toBe(false);
+    expect(engine.readState(instId)!.current_phase).toBe("do");
+  });
+
+  it("stale reinject counter from a previous step does not arm confirm-done", async () => {
+    // Counter is keyed step:phase; after the step changed (or after a clear that
+    // left a stale file) the old count must not trigger the confirm path.
+    const instId = startInstance("build");
+    fs.writeFileSync(path.join(engine.getInstanceDir(instId), ".do-reinject-count"), "old-step:do 99");
+    const tools = createTools(engine, makeClient());
+    const res = await tools.ralphflow_continue.execute({}, { sessionID: "sess-1" } as any);
+    expect(String(res)).toContain("无需操作");
+    expect(fs.existsSync(path.join(engine.getInstanceDir(instId), ".done-tag-detected"))).toBe(false);
   });
 
   it("tool activity does not burn the reinject counter", async () => {

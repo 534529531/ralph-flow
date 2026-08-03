@@ -19,7 +19,7 @@ import path from "path";
 import os from "os";
 import { tool } from "@opencode-ai/plugin";
 import type { Engine } from "./engine.js";
-import { isSubWorkflowStep, MAX_NESTING_DEPTH, MANUAL_GATE_MARKER, DONE_TAG_MARKER, type NormalStepDef, type RalphFlowState } from "./engine.js";
+import { isSubWorkflowStep, MAX_NESTING_DEPTH, MAX_DO_REINJECT, MANUAL_GATE_MARKER, DONE_TAG_MARKER, type NormalStepDef, type RalphFlowState } from "./engine.js";
 import { hasActiveCheck } from "./check.js";
 import { executeContextReset } from "./driver.js";
 
@@ -354,6 +354,21 @@ export function createTools(engine: Engine, client: Client) {
         engine.markPromptDelivered(step.id, instId);
         engine.logEvent(instId, "info", "instance_attached_resume_do", { instance: instId, step: step.id });
         return `## 已接管工作流实例 \`${instId}\`\n\n该实例中断于 DO 阶段，继续执行当前步骤。\n\n---\n\n${prompt}`;
+      }
+
+      // 5.5. Reinject-exhausted DO step: the driver stopped auto-driving after
+      //      MAX_DO_REINJECT nudges (it told the user "run /ralphflow-continue
+      //      to confirm completion"). THIS is that path — the user calling
+      //      continue here is declaring the step done. Arm the done-tag marker
+      //      so the next idle's Case 2 auto-runs the independent check. Without
+      //      this, continue would fall through to branch 6 ("nothing to do"),
+      //      the exhausted counter would never reset, and the driver would
+      //      re-warn forever — the workflow could never advance.
+      if (state.current_phase === "do" && engine.readReinjectCount(instId, state.current_step, "do") > MAX_DO_REINJECT) {
+        engine.writeMarker(DONE_TAG_MARKER, Date.now().toString(), instId);
+        engine.clearReinjectCounter(instId);
+        engine.logEvent(instId, "info", "do_confirmed_done_by_user", { step: state.current_step });
+        return `## ✅ 已确认完成\n\n步骤 \`${state.current_step}\` 已标记为完成，空闲时将自动运行独立验证（与模型自己输出 \`<promise>done</promise>\` 走同一条验证路径）。\n\n> 若其实还没做完——直接发消息告诉模型继续即可，验证不会擅自开始（验证只在空闲驱动检测到完成标记后才运行）。`;
       }
 
       // 6. In do, no gate, no pause, no attach. Nothing for this tool to change

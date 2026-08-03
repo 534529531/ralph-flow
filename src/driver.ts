@@ -20,12 +20,10 @@
 import fs from "fs";
 import path from "path";
 import type { Engine, WorkflowDef, NormalStepDef, RalphFlowState } from "./engine.js";
-import { isSubWorkflowStep, MANUAL_GATE_MARKER, DONE_TAG_MARKER, DEFAULT_ADVERSARIAL_TIMEOUT_MS, shouldResetOnTransition } from "./engine.js";
+import { isSubWorkflowStep, MANUAL_GATE_MARKER, DONE_TAG_MARKER, REINJECT_WARNED_MARKER, MAX_DO_REINJECT, DEFAULT_ADVERSARIAL_TIMEOUT_MS, shouldResetOnTransition } from "./engine.js";
 import { adversarialCheck, readOwnerSessionModel } from "./check.js";
 
 type Client = any;
-
-const MAX_DO_REINJECT = 5;
 
 // Per-session in-flight guard. The driver holds NO engine lock (its state is
 // read via listInstances and its writes are instId-scoped marker files), so a
@@ -488,6 +486,7 @@ export async function handleSessionIdle(
     const instDir = engine.getInstanceDir(mine.id);
     const phaseReportFile = path.join(instDir, ".last-phase-report");
     const reinjectFile = path.join(instDir, ".do-reinject-count");
+    const reinjectWarnedFile = path.join(instDir, REINJECT_WARNED_MARKER);
     const manualStepMarker = path.join(instDir, ".manual-step-active");
     const manualGateMarker = path.join(instDir, MANUAL_GATE_MARKER);
     const doneTagDetectedFile = path.join(instDir, DONE_TAG_MARKER);
@@ -627,14 +626,19 @@ export async function handleSessionIdle(
       // tool calls. If it made tool calls, it's actively working and not stuck.
       const reinjectCount = hasToolUse ? getReinjectCount() : incrementReinjectCount();
 
-      // Only raise the max-reinjection alarm when the model is actually idle —
-      // and do NOT keep driving: hand control to the user (the workflow state
-      // itself is NOT paused — driving resumes as soon as the user or the
-      // model acts again).
+      // Only raise the max-reinjection alarm ONCE — and do NOT keep driving:
+      // hand control to the user (the workflow state itself is NOT paused —
+      // driving resumes as soon as the user or the model acts again). Repeating
+      // the warning on every idle would just re-spam the exact message the user
+      // already acted on; the user's next action (a message to the model, or
+      // /ralphflow-continue declaring the step done) is what moves things.
       if (reinjectCount > MAX_DO_REINJECT && !hasToolUse) {
-        await injectPrompt(client, sessionId,
-          `## ⏸ 已暂停自动驱动 · 🙋 轮到你了\n\n步骤 \`${stateStep}\` 的 DO 阶段连续 ${reinjectCount} 次被催促仍未完成，为避免空转已停下等你：\n\n1. 🔍 看看卡在哪，补充信息后**直接发消息**让模型继续\n2. ✅ 若其实已经做完 → 运行 \`/ralphflow-continue\` 进入验证\n3. 🗑️ 运行 \`/ralphflow-cancel\` 取消\n\n（工作流没有真正暂停——你或模型一有动作就会自动恢复驱动。）`,
-          true);
+        if (!fileExists(reinjectWarnedFile)) {
+          writeFileSafe(reinjectWarnedFile, Date.now().toString());
+          await injectPrompt(client, sessionId,
+            `## ⏸ 已暂停自动驱动 · 🙋 轮到你了\n\n步骤 \`${stateStep}\` 的 DO 阶段连续被催促 ${MAX_DO_REINJECT} 次仍未完成，为避免空转已停下等你：\n\n1. 🔍 看看卡在哪，补充信息后**直接发消息**让模型继续（模型补上 \`<promise>done</promise>\` 后自动进入验证）\n2. ✅ 若其实已经做完 → 运行 \`/ralphflow-continue\` 将其**标记为完成**并进入独立验证\n3. 🗑️ 运行 \`/ralphflow-cancel\` 取消\n\n（工作流没有真正暂停——你或模型一有动作就会自动恢复驱动。）`,
+            true);
+        }
         return;
       }
 

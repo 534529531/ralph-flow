@@ -163,6 +163,10 @@ const ADVERSARIAL_SESSION_FILENAME = ".adversarial-session";
 export const MANUAL_STEP_MARKER = ".manual-step-active";
 export const MANUAL_GATE_MARKER = ".manual-gate";
 export const DONE_TAG_MARKER = ".done-tag-detected";
+export const REINJECT_WARNED_MARKER = ".reinject-warned";
+// 同一 DO 阶段被 idle 催促（无工具调用）达到此上限后，driver 停止自动驱动并
+// 把控制权交给用户（用户可 /ralphflow-continue 确认完成进入验证）。
+export const MAX_DO_REINJECT = 5;
 const MAX_STEP_RECORDS = 1000;
 export const MAX_NESTING_DEPTH = 5;
 const MAX_WORKFLOW_FILE_SIZE = 1024 * 1024; // 1 MB
@@ -455,9 +459,30 @@ export function createEngine(projectDir: string, platform: Platform) {
   function writeManualStepMarker(instId: string): void { writeMarker(MANUAL_STEP_MARKER, "active", instId); }
   function clearManualStepMarker(instId: string): void { clearMarker(MANUAL_STEP_MARKER, instId); }
   function clearManualGate(instId: string): void { clearMarker(MANUAL_GATE_MARKER, instId); }
-  function clearReinjectCounter(instId: string): void { clearMarker(".do-reinject-count", instId); }
+  // 催促计数归零 = 新一轮 DO 的开始，顺带清掉"已警告过催促上限"的标记，
+  // 这样新一轮再次超限时用户还能再看到一次警告（而不是永久静默）。
+  function clearReinjectCounter(instId: string): void {
+    clearMarker(".do-reinject-count", instId);
+    clearMarker(REINJECT_WARNED_MARKER, instId);
+  }
   function clearDoPromptCache(instId: string): void { clearMarker(".do-prompt-cache", instId); }
   function clearDoneTagDetected(instId: string): void { clearMarker(DONE_TAG_MARKER, instId); }
+
+  /**
+   * 读取当前 DO 阶段的催促计数（driver 写入 .do-reinject-count，格式
+   * "stepId:phase count"）。传入 stepId/phase 时校验 key——旧步骤的计数在
+   * 新步骤下视为 0（与 driver 的 getReinjectCount 语义一致）。
+   */
+  function readReinjectCount(instId: string, stepId?: string, phase?: string): number {
+    try {
+      const content = stripBom(fs.readFileSync(instPath(".do-reinject-count", reqInst(instId)), "utf-8")).trim();
+      const [key, count] = content.split(" ");
+      if (stepId && phase && key !== `${stepId}:${phase}`) return 0;
+      return parseInt(count, 10) || 0;
+    } catch {
+      return 0;
+    }
+  }
 
   function writeDoPromptCache(prompt: string, instId: string): void {
     try {
@@ -2110,7 +2135,7 @@ ${renderStepText(instId, step.check)}
     readState, writeState, isValidState,
     writeMarker, clearMarker, markerExists,
     writeManualStepMarker, clearManualStepMarker, clearManualGate,
-    clearReinjectCounter, clearDoPromptCache, clearDoneTagDetected,
+    clearReinjectCounter, readReinjectCount, clearDoPromptCache, clearDoneTagDetected,
     writeDoPromptCache, readDoPromptCache, buildDoNudge, markPromptDelivered,
     writeAdversarialSession, clearAdversarialSession, readAdversarialSession,
     // workflows
