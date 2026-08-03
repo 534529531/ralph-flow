@@ -649,15 +649,47 @@ steps:
     expect(handoff?.text).toContain("检查结果：通过");        // original transition text preserved below
   });
 
-  it("check fail → on_fail to self (same step, step marked reset) → no new session", async () => {
+  it("check fail → on_fail to self (same step, step marked reset) → reset fires", async () => {
     checkVerdict = "false";
-    startInstanceInStep("review");
+    const instId = startInstanceInStep("review");
     lastAssistantText = "did the work\n<promise>done</promise>";
     await handleSessionIdle(makeClientWithSessionCreate(), engine, "sess-1");
 
-    // No farewell message, no new session — just a retry
+    // Same-step retry on a reset-marked step ALSO gets a fresh context: a heavy
+    // DO bloats the old one past the point where keeping the scene helps.
+    expect(injected.some((m) => m.text.includes("上下文已重置"))).toBe(true);
+    const st = engine.readState(instId)!;
+    expect(st.current_step).toBe("review");           // still the same step
+    expect(st.session_id).not.toBe("sess-1");          // …but in a fresh session
+    const newMsgs = injected.filter((m) => m.sessionId === st.session_id);
+    expect(newMsgs.some((m) => m.text.includes("失败 ✗") && m.text.includes("review"))).toBe(true);
+  });
+
+  it("check fail → on_fail to self (same step, NOT marked reset) → no new session", async () => {
+    checkVerdict = "false";
+    const instId = startInstanceInStep("build");
+    lastAssistantText = "did the work\n<promise>done</promise>";
+    await handleSessionIdle(makeClientWithSessionCreate(), engine, "sess-1");
+
+    // Unmarked step keeps the scene on retry — no farewell, no new session
     expect(injected.some((m) => m.text.includes("上下文已重置"))).toBe(false);
-    expect(injected.some((m) => m.text.includes("失败 ✗") && m.text.includes("review"))).toBe(true);
+    expect(engine.readState(instId)!.session_id).toBe("sess-1");
+    expect(injected.some((m) => m.text.includes("失败 ✗") && m.text.includes("build"))).toBe(true);
+  });
+
+  it("auto_reset workflow: same-step retry also fires reset", async () => {
+    const wfDir = path.join(tmpDir, ".opencode", "ralph-flow", "workflows");
+    fs.writeFileSync(path.join(wfDir, "wf.yaml"), "auto_reset: true\n" + WF_RESET);
+    checkVerdict = "false";
+    const instId = startInstanceInStep("build");
+    lastAssistantText = "did the work\n<promise>done</promise>";
+    await handleSessionIdle(makeClientWithSessionCreate(), engine, "sess-1");
+
+    // auto_reset is "reset on every step", so the same-step retry resets too
+    expect(injected.some((m) => m.text.includes("上下文已重置"))).toBe(true);
+    const st = engine.readState(instId)!;
+    expect(st.current_step).toBe("build");
+    expect(st.session_id).not.toBe("sess-1");
   });
 
   it("check pass → normal step (no reset) → no new session (injected normally)", async () => {

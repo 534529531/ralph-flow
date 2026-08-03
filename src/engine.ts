@@ -1004,7 +1004,7 @@ export function createEngine(projectDir: string, platform: Platform) {
    * `rawParsed` is the untouched yaml.load result (parseWorkflowFile drops fields
    * the lints need to see).
    */
-  function lintWorkflow(wf: WorkflowDef, rawParsed: any): string[] {
+  function lintWorkflow(wf: WorkflowDef, rawParsed: any, fromBuiltin = false): string[] {
     const warnings: string[] = [];
 
     // Unreachable steps: execution enters at steps[0] and only moves along
@@ -1079,14 +1079,15 @@ export function createEngine(projectDir: string, platform: Platform) {
       }
     }
 
-    // reset / auto_reset 提示
-    if (wf.steps.length > 0 && wf.steps[0].reset === true) {
-      warnings.push(`首步 "${wf.steps[0].id}" 标了 reset：启动时已是新会话不触发，但后续步骤失败 on_fail 回到首步时仍会触发（此时上下文可能已膨胀，reset 有意义）`);
+    // reset / auto_reset 提示。内置工作流跳过：标 reset 是插件设计决定，
+    // 不该对用户显示"成本较高"的警告。
+    if (!fromBuiltin && wf.steps.length > 0 && wf.steps[0].reset === true) {
+      warnings.push(`首步 "${wf.steps[0].id}" 标了 reset：启动时已是新会话不触发；但进入该步的每次转换都触发——包括失败重试（on_fail 回本步）和后续步骤 on_fail 回首步。单步骤 loop 会频繁重置，token 成本较高`);
     }
-    if (wf.auto_reset === true) {
+    if (!fromBuiltin && wf.auto_reset === true) {
       const allOnFailSelf = wf.steps.every((s) => s.on_fail === s.id);
       if (allOnFailSelf) {
-        warnings.push(`auto_reset: true 且所有步骤的 on_fail 都指向自身（纯线性流）——每步都换新会话，token 成本较高`);
+        warnings.push(`auto_reset: true 且所有步骤的 on_fail 都指向自身（纯线性流）——每次失败重试也会换新会话，token 成本较高`);
       }
     }
 
@@ -1192,7 +1193,7 @@ export function createEngine(projectDir: string, platform: Platform) {
             // exactly the silent-drop trap — merge them with the lints.
             candidate.warnings = [
               ...problems.map((p) => `${p}（该步骤已被静默丢弃，工作流其余部分照常运行）`),
-              ...lintWorkflow(wf, rawParsed),
+              ...lintWorkflow(wf, rawParsed, source === "plugin"),
             ];
           } else {
             candidate.verdict = "invalid";
@@ -2140,10 +2141,10 @@ export function isSubWorkflowStep(step: StepDef): step is SubWorkflowStepDef {
 
 /**
  * 判断从 sourceStepId 转换到 targetStepId 时是否应触发上下文重置。
- * 同步骤转换（重试）不触发；跨步骤转换遇到目标标 reset 或工作流 auto_reset 时触发。
+ * 标了 reset 的步骤任何方式进入都触发（含同步骤重试——失败原因经
+ * retryContext 文本通道注入，不丢现场）；auto_reset = 全部步骤标 reset。
  */
 export function shouldResetOnTransition(workflow: WorkflowDef, sourceStepId: string, targetStepId: string): boolean {
-  if (sourceStepId === targetStepId) return false;
   if (workflow.auto_reset === true) return true;
   const step = workflow.steps.find((s) => s.id === targetStepId);
   return step?.reset === true;

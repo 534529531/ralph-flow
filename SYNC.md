@@ -27,7 +27,7 @@ opencode 版和内部的 Claude Code 版 ralph-flow **功能一致**，但**只�
 
 | 字段/工具 | opencode 版含义 | Claude 版行为 |
 |---|---|---|
-| `steps[].reset` / `auto_reset` | 重置门（v2.6.0）：跨步骤转换进入标记的步骤时自动换入全新会话继续；同步骤重试不触发，保留现场记忆 | `parseWorkflowFile` 透传未知字段，旧 YAML 不加字段行为不变；运行时无 SDK session，降级语义=提示用户 `/clear` 后 continue 或不支持，另行决策 |
+| `steps[].reset` / `auto_reset` | 重置门（v2.6.0，v2.7.2 语义统一）：标 `reset` 的步骤任何方式进入（含同步骤失败重试）都换入全新会话继续；`auto_reset` 与之一致（=所有步骤标 reset）；未标 reset 的步骤同步骤重试保留现场记忆 | `parseWorkflowFile` 透传未知字段，旧 YAML 不加字段行为不变；运行时无 SDK session，降级语义=提示用户 `/clear` 后 continue 或不支持，另行决策 |
 | `TransitionResult.enteredCompositeStepId` | 元数据：本次转换进入了哪个 composite 步骤的子工作流（供 reset 门判定） | 行为不变，Claude 版可忽略 |
 | `ralphflow_rewind` + `ralphflow_reset.reason`（v2.7.0） | 运行时回退到已通过 CHECK 的上游步骤重做；可选 `reason` 跨会话注入新会话首条 DO 提示前并随 idle keep-alive 保留 | Claude 版尚未对应；无 SDK session 时降级=提示用户 `/clear` 后 continue（rewind 仍可改 state，但靠手动 `/clear` 实现换会话语义） |
 | `StepExecutionRecord.workflowName` + `executeContextReset opts.kind`（v2.7.1） | 记录带产生时的工作流名（passedStepIds 跨栈帧同名隔离；旧记录无字段回退 stepId 匹配）；换会话路径区分 reset(🔄)/rewind(🔙) 标题与告别措辞；reset 遇 paused 拒绝 | Claude 版同步时一并采纳（记录面只增不改，向后兼容） |

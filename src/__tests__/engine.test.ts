@@ -512,10 +512,16 @@ steps:
 // ─── Reset Gate (shouldResetOnTransition, YAML validation, lint) ─────────────
 
 describe("reset gate", () => {
-  it("same step → false (retry, don't reset)", () => {
+  it("same step without reset → false (retry, keep the scene)", () => {
     writeProjectWorkflow("rwf", SIMPLE_WF);
     const wf = engine.loadWorkflow("rwf")!;
     expect(shouldResetOnTransition(wf, "one", "one")).toBe(false);
+  });
+
+  it("same step with target step reset → true (retry also resets)", () => {
+    writeProjectWorkflow("rwf", SIMPLE_WF.replace("desc: first step", "desc: first step\n    reset: true"));
+    const wf = engine.loadWorkflow("rwf")!;
+    expect(shouldResetOnTransition(wf, "one", "one")).toBe(true);
   });
 
   it("cross-step without reset or auto_reset → false", () => {
@@ -530,11 +536,11 @@ describe("reset gate", () => {
     expect(shouldResetOnTransition(wf, "one", "two")).toBe(true);
   });
 
-  it("auto_reset: true → every cross-step transition triggers", () => {
+  it("auto_reset: true → every transition triggers, including same-step retry", () => {
     writeProjectWorkflow("rwf", `auto_reset: true\n${SIMPLE_WF}`);
     const wf = engine.loadWorkflow("rwf")!;
     expect(shouldResetOnTransition(wf, "one", "two")).toBe(true);
-    expect(shouldResetOnTransition(wf, "one", "one")).toBe(false);
+    expect(shouldResetOnTransition(wf, "one", "one")).toBe(true);
   });
 
   it("auto_reset false → behaves like not set", () => {
@@ -568,6 +574,7 @@ steps:
 `);
     const wf = engine.loadWorkflow("rwf")!;
     expect(shouldResetOnTransition(wf, "a", "nest")).toBe(true);
+    expect(shouldResetOnTransition(wf, "nest", "nest")).toBe(true);
   });
 
   it("parseWorkflowFile rejects non-boolean reset on step", () => {
@@ -621,6 +628,13 @@ steps:
     const wf = engine.loadWorkflow("rwf")!;
     const warnings = engine.lintWorkflow(wf, {});
     expect(warnings.some((w) => w.includes("首步") && w.includes("one") && w.includes("reset"))).toBe(true);
+  });
+
+  it("lintWorkflow skips reset cost warnings for builtin workflows", () => {
+    writeProjectWorkflow("rwf", SIMPLE_WF.replace("desc: first step", "desc: first step\n    reset: true"));
+    const wf = engine.loadWorkflow("rwf")!;
+    const warnings = engine.lintWorkflow(wf, {}, true);
+    expect(warnings.some((w) => w.includes("首步") && w.includes("reset"))).toBe(false);
   });
 
   it("lintWorkflow warns about auto_reset on linear-only flow", () => {

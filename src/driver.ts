@@ -394,10 +394,10 @@ export async function runCheckAndAdvance(
           resetHit = parentWf.auto_reset === true
             || engine.getStep(parentWf, result.enteredCompositeStepId)?.reset === true;
         }
-      } else if (freshState.current_step !== state.current_step || freshState.workflow_name !== state.workflow_name) {
+      } else {
         // Regular transition (same workflow, or sub-workflow completion routing
-        // back into a plain parent step): the target is a real step of the
-        // workflow the state now points at.
+        // back into a plain parent step). Same-step retry (on_fail back to
+        // self) lands here too — reset-marked steps reset on retry as well.
         const effectiveWf = freshState.workflow_name === workflow.name ? workflow : engine.loadWorkflow(freshState.workflow_name);
         resetHit = !!effectiveWf && shouldResetOnTransition(effectiveWf, state.current_step, freshState.current_step);
       }

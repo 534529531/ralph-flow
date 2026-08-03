@@ -15,7 +15,7 @@
 ```
 CHECK 通过/失败 → 状态机算出目标步骤（现有逻辑，不动）
     ↓
-判定：跨步骤转换 && 目标步骤标了 reset（或工作流 auto_reset）
+判定：目标步骤标了 reset（或工作流 auto_reset；任何方式进入都触发，含同步骤重试）
     ↓
 session.create（新会话，parentID=旧会话，title 带约定前缀）
     ↓
@@ -40,7 +40,7 @@ state.session_id 改为新会话（claimOwnership，现有机制）
 约 1/3 的工程量拿到绝大部分收益，且是纯增量（additive）：不标 reset 的工作流行为零变化。
 
 与 ralph-flow-pi 的关系：pi 版"每步全新会话"等价于本方案的 `auto_reset: true`。
-本方案粒度更细（只在重步骤前换），且重试时保留现场记忆（pi 版每步重试也是新会话）。
+本方案粒度更细（只在重步骤前换）。v2.7.2 起重试也换新会话（pi 版每步重试同样是新会话）。
 
 ---
 
@@ -49,7 +49,7 @@ state.session_id 改为新会话（claimOwnership，现有机制）
 ```yaml
 description: 规格驱动开发
 
-# 方式一：工作流级（可选）——每次跨步骤转换都换新会话，等价 pi 版语义
+# 方式一：工作流级（可选）——等价给所有步骤标 reset，进入任何步骤（含失败重试）都换新会话
 auto_reset: true          # 缺省 false
 
 steps:
@@ -70,11 +70,12 @@ steps:
 
 - `steps[].reset: boolean`，缺省 false。可标在普通步骤和**子工作流（composite）步骤**上
   （composite 的语义 = "进入子工作流前换会话"，触发点在 push 子工作流栈之前）。
-- `auto_reset: boolean`，缺省 false。与步骤级 `reset` 是或关系。
+- `auto_reset: boolean`，缺省 false。等价于给所有步骤标 `reset`，与步骤级语义完全一致
+  （v2.7.2 统一；早期版本仅跨步骤转换触发）。
 - 两字段对 Claude 版插件完全兼容：其 `parseWorkflowFile` 透传未知字段，旧 YAML 不加字段行为不变。
 - doctor（lintWorkflow）新增提示：
   - `reset`/`auto_reset` 非 boolean → 校验错误（与其他字段同级处理）；
-  - `auto_reset: true` 且无任何步骤 `on_fail` 指向他步 → 信息级提示（纯线性流每步换会话，成本提示）；
+  - `auto_reset: true` 且无任何步骤 `on_fail` 指向他步 → 信息级提示（纯线性流每次失败重试也换会话，成本提示）；
   - 无需禁止任何组合。
 
 ## 3. 已验证技术事实（实施前必读，勿重复验证）
@@ -102,21 +103,25 @@ steps:
 
 ### 4.1 触发规则（核心，一张表）
 
-> **同步骤转换（on_fail 回本步 = 重试）不触发；跨步骤转换遇到目标标 reset（或 auto_reset）才触发。**
+> **一条规则：标了 `reset` 的步骤，任何方式进入都触发（含 on_fail 回本步的重试）；`auto_reset` = 给所有步骤标 `reset`，语义完全一致，没有第二种豁免。**
 
-理由：重试需要现场记忆（模型记得自己刚写的文件、跑的命令、踩的坑），失败原因
-（retryContext）本来就走文本通道（F11），跨步骤重置不丢信息。
+理由：重试需要现场记忆，但那是**轻量步骤**的假设——重量级步骤一次 DO 就把
+上下文撑爆，重试时现场记忆的收益小于膨胀的损失；失败原因（retryContext）
+走文本通道（F11）注入 DO 提示，同步骤重置不丢现场。未标 `reset` 的步骤
+重试不触发，轻量任务保留现场。（v2.7.2 起 `auto_reset` 与 `reset` 统一，
+避免两种豁免规则分叉；纯线性流配 `auto_reset` 的成本由 doctor 提示兜底。）
 
 | 场景 | 转换 | 触发 | 说明 |
 |---|---|---|---|
-| A fail → on_fail: A（重试） | 同步骤 | ❌ | 保留现场；fail_count 同段累计（≤max_fail_count 次，污染有限） |
+| A fail → on_fail: A（重试，A 未标 reset） | 同步骤 | ❌ | 轻量步骤保留现场；fail_count 同段累计（≤max_fail_count 次，污染有限） |
+| A fail → on_fail: A（重试，A 标 reset） | 同步骤 | ✅ | 重量级步骤换干净上下文；失败原因随 buildDoPrompt 注入新会话 |
+| A fail → on_fail: A（重试，auto_reset 流） | 同步骤 | ✅ | 与 reset 一致 |
 | C fail → on_fail: A（回炉，A 标 reset） | 跨步骤 | ✅ | 失败原因随 buildDoPrompt 注入新会话 |
 | A pass → B（B 标 reset） | 跨步骤 | ✅ | 正常前进 |
 | 进入子工作流步骤 S（S 标 reset） | 跨步骤 | ✅ | push 子工作流栈之前换会话 |
 | max_failures 暂停 → continue 恢复重试 | 同步骤 | ❌ | **关键**：暂停期间用户在会话里的指导是有价值上下文，绝不能自动重置；想干净重试用 `/ralphflow-reset` 手动 |
 | manual gate 审查通过 → CHECK → 下一步（标 reset） | 跨步骤 | ✅ | 审查发生在旧会话，CHECK 是独立会话（不受影响），通过后进新会话 |
 | check_error 暂停 → continue 重跑验证 | 无步骤转换 | ❌ | 仅重跑 CHECK |
-| `auto_reset: true` | — | 等价于"每次跨步骤转换都触发" | 重试豁免规则不变 |
 
 ### 4.2 实现落点：全部在注入层，engine 状态机零改动
 
@@ -126,11 +131,19 @@ steps:
 判断与执行放在**注入层**（driver.ts / tools.ts），即"拿到 transition text 之后、注入之前"：
 
 ```
-engine 新增纯函数：
-  shouldResetOnTransition(workflow: WorkflowDef, sourceStepId: string, targetStepId: string): boolean
-    = sourceStepId !== targetStepId
-      && (workflow.auto_reset === true || getStep(workflow, targetStepId)?.reset === true)
+engine 纯函数：
+  shouldResetOnTransition(workflow, sourceStepId, targetStepId): boolean
+    = workflow.auto_reset === true
+        || getStep(workflow, targetStepId)?.reset === true
+    // 统一语义：auto_reset = 给所有步骤标 reset。任何方式进入标 reset 的
+    // 步骤都触发，含同步骤重试；未标 reset 的步骤重试保留现场。
 ```
+
+v2.7.2 语义统一：`auto_reset` 从"仅跨步骤"改为与步骤级 `reset` 完全一致
+（任何方式进入都触发，含 on_fail 回本步的重试）。注入层的
+`runCheckAndAdvance` guard 相应放宽：同步骤转换（失败重试）不再被跳过，
+照常过 `shouldResetOnTransition`。continue（max_failures/check_error 恢复）
+是手动路径，不经过重置门，行为不变。
 
 注入层共有三处转换文本出口，全部汇到同一个执行函数：
 
@@ -280,8 +293,9 @@ ralphflow_reset 执行：
 ## 5. 测试矩阵（vitest，沿用现有 engine.test.ts/driver.test.ts 风格）
 
 **纯函数/解析（engine.test.ts）**
-1. `shouldResetOnTransition`：同步骤 false / 跨步骤+reset true / 跨步骤无标记 false /
-   auto_reset 跨步骤 true / auto_reset 同步骤 false / composite 步骤 reset true
+1. `shouldResetOnTransition`：同步骤无标记 false / 同步骤+reset true（v2.7.2 起）/
+   跨步骤+reset true / 跨步骤无标记 false / auto_reset 任何转换 true（含同步骤，
+   v2.7.2 起）/ composite 步骤 reset true（含同步骤重进）
 2. `parseWorkflowFile`：`reset: "yes"`（非 boolean）→ problems 报错；`auto_reset: 1` → 报错；
    合法值透传；缺省字段 undefined
 3. `lintWorkflow`：首步 reset 提示；auto_reset 纯线性流信息提示
@@ -290,7 +304,8 @@ ralphflow_reset 执行：
 4. runCheckAndAdvance：通过+目标标 reset → 旧会话收到告别（noReply）、
    新会话收到 transition 全文（含 DO 提示）、state.session_id=新会话、
    旧会话后续 idle 不再驱动、logEvent 有 context_reset
-5. 失败+on_fail 回本步（标 reset）→ **不**创建新会话，旧会话收到重试提示（现有行为）
+5. 失败+on_fail 回本步（标 reset）→ **创建**新会话，重试提示（含失败原因）注入新会话
+   （v2.7.2 起：同步骤重试也触发；旧行为=不创建，轻量步骤未标 reset 时保持）
 6. 失败+on_fail 回炉他步（标 reset）→ 创建新会话，重试提示（含失败原因）注入新会话
 7. manual gate：审查通过 → CHECK → 通过 → 目标标 reset → 重置发生（告别进旧会话）
 8. continue 恢复 max_failures（同步骤）→ 不重置
@@ -322,7 +337,8 @@ L0/L1 可见性 + 测试矩阵全部。**此时功能已完整可用**（手动�
 everything2rust 标 auto_reset）；SYNC.md/README/docs 更新；CHANGELOG。
 
 **建议内置工作流标注**（阶段三）：
-- `loop`（3 步）：不标——太短，重置是浪费；
+- `loop`（v2.7.2 起单步）：标 `reset: true`——默认每轮失败重试换干净上下文；
+  lint 对内置工作流跳过 reset 成本警告（设计决定，无需提示用户）；
 - `spec`（7 步）：`implement` 标 `reset: true`——最重的步骤前一刀切；
 - `c-to-rust`/`everything2rust`（多步长程）：`auto_reset: true`。
 

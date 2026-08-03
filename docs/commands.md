@@ -112,7 +112,7 @@
 | `workflow_resumed` | 用户恢复 |
 | `workflow_cancelled` | 用户取消 |
 | `rewind` | 用户用 `/ralphflow-rewind` 倒退状态机到上游已通过步骤（含 `from`/`to`/`keep_session`/`was_paused` 字段） |
-| `context_reset` | 重置门触发：跨步骤转换或手动 reset 换入全新会话（含 `from`/`to`/`step` 字段） |
+| `context_reset` | 重置门触发：进入标 reset 的步骤（含失败重试）或手动 reset 换入全新会话（含 `from`/`to`/`step` 字段） |
 | `legacy_instance_migrated` | 1.x 工作流被迁移进实例布局 |
 
 ### 步骤事件
