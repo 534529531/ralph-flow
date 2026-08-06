@@ -601,6 +601,18 @@ export async function handleSessionIdle(
 
     // ── Case 1: Done tag detected ────────────────────────────────────────────
     if (hasDoneTag) {
+      // check 阶段出现 done 标签 = 暂停前模型的旧消息（check_error 暂停 →
+      // continue 恢复后最常见）。若无活跃验证者则补跑检查——否则 continue 承诺
+      // 的"空闲时自动重新验证"永不兑现：idle 静默 → 用户再 continue 误入崩溃
+      // 恢复分支，投票进度被删、DO 重置，infra 恢复后也永远卡在"验证未运行"。
+      // （回归复现：全票 infra → check_error 暂停 → continue → idle 因 done
+      // 标签静默 → 再 continue 崩溃恢复重置。修复后 continue 一次即补跑。）
+      if (statePhase === "check") {
+        if (!state.paused && currentStep && !isSubWorkflowStep(currentStep) && !engine.readAdversarialSession(mine.id)) {
+          await runCheckAndAdvance(client, engine, sessionId, mine.id, workflow!, currentStep as NormalStepDef, state);
+        }
+        return;
+      }
       // A done tag only means something during the DO phase.
       if (statePhase !== "do") return;
 

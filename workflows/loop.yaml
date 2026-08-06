@@ -11,13 +11,13 @@ steps:
     do: |
       完成用户任务。
 
-      每轮结束前，把执行摘要追加到 checkpoints.md（多轮累积，每轮一节，保持精简）：
+      每轮结束前，把执行摘要追加到 summary.md（多轮累积，每轮一节，保持精简）：
       - 完成事项（对照任务）
       - 变更文件
       - 验证结果
       - 未完成部分与下一步打算
     input: 用户任务描述
-    output: 实现的代码/文件 + checkpoints.md（执行摘要）
+    output: 实现的代码/文件 + summary.md（执行摘要）
     check_voting:
       - check: 用户任务的每一条要求都已落实
       - check: 实现的行为符合预期，真实可用

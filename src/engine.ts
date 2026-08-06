@@ -1497,7 +1497,7 @@ export function createEngine(projectDir: string, platform: Platform) {
 
 **输出要求**：${renderStepText(instId, step.output)}
 
-**产出目录**：\`${getArtifactsRelDir(instId)}/\` — 本工作流的文档产出（清单、方案、报告等）统一放在此目录。步骤中提到的文档文件名（如 checkpoints.md）若未写路径，即指此目录下的文件；明确写了其他路径的除外。`);
+**产出目录**：\`${getArtifactsRelDir(instId)}/\` — 本工作流的文档产出（清单、方案、报告等）统一放在此目录。步骤中提到的文档文件名（如 summary.md）若未写路径，即指此目录下的文件；明确写了其他路径的除外。`);
 
     if (isRetry) {
       sections.push(`---
@@ -1680,7 +1680,14 @@ ${renderStepText(instId, entry.check)}`);
           try { fs.renameSync(stackFile, stackFile + ".corrupted." + Date.now()); } catch {}
         }
       }
-      stack.push(state);
+      // 栈帧是父状态的快照，不含运行时所有权（session_id）。session_id 若入帧，
+      // 子工作流完成/失败回父时会把「进入子工作流前」的旧 session 写回状态——
+      // reset 门换会话（claimOwnership）后所有权被旧值覆盖，实例被已废弃的旧
+      // 会话独占，新会话的空闲驱动对非属主实例静默，父工作流无人驱动（表现为
+      // "子工作流完成了回不到父工作流"：状态回父了但卡死不动）。
+      const frame: RalphFlowState = { ...state };
+      delete frame.session_id;
+      stack.push(frame);
       atomicWriteJson(stackFile, stack);
     } catch (e: any) {
       diag("[ralph-flow] Error pushing state:", e.message);
@@ -1701,6 +1708,9 @@ ${renderStepText(instId, entry.check)}`);
       }
       if (!Array.isArray(stack) || stack.length === 0) return null;
       const parentState = stack.pop()!;
+      // 防御：旧版本（修复前）写入的栈文件可能带 session_id，弹出时一并剥离，
+      // 保证任何回父路径 writeState({...parentState}) 都不会覆盖当前所有权。
+      delete parentState.session_id;
       atomicWriteJson(stackFile, stack);
       return parentState;
     } catch (e: any) {

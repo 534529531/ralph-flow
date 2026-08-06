@@ -2,6 +2,18 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 2.8.1 (2026-08-07)
+
+### 修复
+- **`/ralphflow-continue` 后验证永不重跑（死锁）**：`check_error` 暂停（检查器 infra：超时/API 错/模型不可用）后 continue，空闲驱动因模型最后一条消息仍带暂停前的 `<promise>done</promise>` 标签且阶段为 check 而直接静默 return——"空闲时自动重新验证"永不兑现；用户再 continue 会误入崩溃恢复分支重置 DO、误删投票进度，infra 恢复后也永远卡在"验证未运行"。修复：driver 空闲驱动在 check 阶段检测到 done 标签且无活跃验证者时补跑检查（单 `check` 与 `check_voting` 同路径，幂等不双跑）。配套回归测试覆盖：单 check/多验证者持续 infra 补跑、infra 恢复后推进、验证进行中不双跑、补跑遇真实失败走 on_fail。
+- **子工作流完成回不到父工作流（所有权被旧会话覆盖）**：嵌套工作流配合 reset 门换会话（composite `reset: true` / `auto_reset: true`）时，子工作流完成回父会把「进入子工作流前」的旧 `session_id` 从栈帧写回状态，覆盖 `executeContextReset` 换的新会话所有权——实例被已废弃的旧会话独占，新会话空闲驱动对非属主实例静默，父工作流状态虽已回退但永远无人驱动（表现为"子工作流完成了回不到父工作流"）。修复：`pushState` 压栈帧时剥离 `session_id`（运行时所有权不入状态快照），`popState` 弹出时防御清洗历史数据。配套 8 个嵌套回归测试（含三层嵌套、暂停/继续组合、manual 组合、reset 门换会话组合）。
+
+### 变更
+- 内置 `loop` 工作流执行摘要文件名 `checkpoints.md` → `summary.md`（README/命令说明同步）。
+
+### 端到端验证
+- 真实环境（独立 opencode server + 真实模型 + 真实验证会话）跑通：父 → 子工作流（reset 换会话）→ 子完成回父 → 父完成，全自动驱动。
+
 ## 2.8.0 (2026-08-06)
 
 ### 新增

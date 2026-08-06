@@ -1,6 +1,6 @@
 {
   "name": "@yibener/ralph-flow",
-  "version": "2.8.0",
+  "version": "2.8.1",
   "description": "opencode 工作流自动化插件 —— 让 AI 真正遵循复杂工作流：执行、独立验证、重试，直到完成",
   "type": "module",
   "main": "dist/index.js",

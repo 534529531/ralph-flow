@@ -322,12 +322,16 @@ describe("handleSessionIdle", () => {
     expect(injected[0].text).toContain("DO 阶段");
   });
 
-  it("done tag while phase is check → ignored, no stale marker", async () => {
+  it("done tag while phase is check with no active verifier → re-runs the check (no stale marker)", async () => {
     const instId = startInstance("build");
     engine.writeState({ ...engine.readState(instId)!, current_phase: "check" }, instId);
     lastAssistantText = "<promise>done</promise>";
     await handleSessionIdle(makeClient(), engine, "sess-1");
-    expect(injected.length).toBe(0);
+    // 回归：check_error 暂停 → continue 恢复后，模型最后一条消息仍是暂停前的
+    // done 标签。旧行为直接忽略（静默），用户 continue 永不推进。现在无活跃
+    // 验证者时必须补跑检查。
+    expect(injected.length).toBeGreaterThan(0);
+    expect(injected[0].text).toContain("CHECK 阶段");
     expect(fs.existsSync(path.join(engine.getInstanceDir(instId), ".done-tag-detected"))).toBe(false);
   });
 
