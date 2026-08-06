@@ -2,6 +2,27 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 2.8.0 (2026-08-06)
+
+### 新增
+- **CHECK 多验证者投票（`check_voting`）**：步骤可声明 `check_voting`（1-5 个验证者，每条目含独立的检查依据 `check`、可选 `model`/`timeout_ms`/`system_prompt`），N 个验证者并行独立会话验证，**全过才放行**。与 `check` 互斥（同写 → doctor 硬错，优先于类型检查）。失败时聚合所有失败者 reason 反馈 DO 重试（失败者完整 + 通过者摘要 + 各自检查依据）；通过时 N 票各一行汇总。设计文档见 `docs/multi-agent-design.md`。
+- **`check_model`：步骤级验证模型覆盖**（单 `check` 场景）。优先级链：条目 model > 步骤 check_model > 全局 `adversarial_check.model` > ralph-check agent 配置 > owner session 当前模型 > 全局默认。
+- **验证者输出契约精炼化**：`DEFAULT_ADVERSARIAL_SYSTEM_PROMPT` 输出格式改为"每条一行、最多 10 行、位置前缀可选（`[文件:行号]` / `[模块名]` / 架构问题裸写）"，从源头控制验证输出长度与信息密度（单验证者同样受益）。
+- **进度持久化 `.check-voting-progress.json`**：每票状态（pending/running/passed/failed/infra_pending/infra_failed/cancelled）落盘，供 TUI/status/continue/重启清理读取；`/ralphflow-status` 在验证中显示各票进度。
+- **plugin load 孤儿验证会话清理**：进程重启后，上一进程创建的验证会话由 plugin 初始化钩子删除（`setupDirs` 防重），空闲时自动重跑验证——顺带修复单验证者的"重启后 idle 卡死"既有问题（旧行为只能靠 continue 触发崩溃恢复）。
+
+### 变更
+- **内置 `loop` 工作流升级为多验证者投票版**：`check` 替换为 `check_voting`（3 个验证者，各查一条需求完成度标准：每一条要求都已落实 / 行为符合预期真实可用 / 没有遗漏的需求与边界情况）。`do` 精简为"完成用户任务"；每轮结束把执行摘要追加到 `checkpoints.md`（多轮累积、跨会话可查），`output` 同步标明。desc/description 保持原样。
+- **`infra` 语义细化**：单票 infra（超时/API 错/会话创建失败）自动重试 1 次；重试仍失败且无 failed 票 → `check_error` 暂停（不计 fail_count）；**failed 优先于 infra**（混合时直接判失败反馈 DO，基础设施故障不遮蔽工作问题）。continue 后 `infra_failed` 票重置为 pending 重新投票（重试预算按暂停会话计，不跨 continue 累计，永不死锁）。
+- **投票进度实时推送**：每票完成立即向用户会话注入一行 noreply 进度（`🔍 ✅ 验证者 2/3通过：<检查依据摘要>` / `❌ 不通过` / `⚠️ 基础设施故障，自动重试中`），长耗时投票不再"无声"，用户不会误以为卡死。
+- **`.adversarial-session` 改 JSON 数组**（多验证者并存），读兼容旧单值格式；`activeChecks` 改数组，取消时 abort 全部验证会话。
+- **noReply 展示消息纯文本化**：opencode TUI 对 user 角色消息用 HighlightedText 纯文本渲染（不做 markdown 解析，源码实证），CHECK 开始提示/进度推送/infra 暂停/崩溃提示全部改为纯文本排版（emoji + 对齐行，不再用表格/粗体），界面干净可读。推进类消息（DO prompt 等）保持 markdown 供模型阅读。
+
+### 文档
+- `docs/multi-agent-design.md`：check_voting 完整终版设计（已通过独立对抗验证）。
+- `docs/custom-workflows.md`：新增 `check_voting` / `check_model` 用法与规则。
+- `README.md`：能力表、内置工作流描述、文档索引同步 2.8.0。
+
 ## 2.7.3 (2026-08-03)
 
 ### 修复

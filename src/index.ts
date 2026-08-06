@@ -22,9 +22,35 @@ import { createEngine, type Platform, RALPH_CHECK_AGENT_PERMISSION } from "./eng
 import { createTools } from "./tools.js";
 import { handleSessionIdle, handleSessionGone } from "./driver.js";
 import { abortActiveCheck, isCheckSession } from "./check.js";
+import { deleteVotingProgress } from "./voting-progress.js";
 import { setup } from "./setup.js";
 
 const setupDirs = new Set<string>();
+const orphanCleanedDirs = new Set<string>();
+
+/**
+ * Plugin-load orphan cleanup (design §6.2): after a process restart, verifier
+ * sessions created by the previous process are orphans — nobody will ever
+ * collect their results. Delete them so the next idle re-runs the check
+ * instead of stalling on a stale .adversarial-session. Also fixes the
+ * single-verifier "restart then idle-stuck" behavior.
+ */
+async function cleanupOrphanVerifiers(client: any, engine: ReturnType<typeof createEngine>): Promise<void> {
+  try {
+    const instances = engine.listInstances();
+    for (const inst of instances) {
+      if (inst.state.current_phase !== "check") continue;
+      const orphans = engine.readAdversarialSessions(inst.id);
+      if (orphans.length === 0) continue;
+      for (const sid of orphans) {
+        try { await client.session.delete({ path: { id: sid } }); } catch {}
+      }
+      engine.clearAdversarialSession(inst.id);
+      deleteVotingProgress(engine, inst.id);
+      engine.logEvent(inst.id, "info", "orphan_verifier_cleaned", { count: orphans.length });
+    }
+  } catch {}
+}
 
 const RalphFlowPlugin: Plugin = async ({ client, directory }) => {
   if (!setupDirs.has(directory)) {
@@ -41,6 +67,12 @@ const RalphFlowPlugin: Plugin = async ({ client, directory }) => {
   const engine = createEngine(directory, platform);
   engine.ensureProjectWorkflows();
   engine.migrateLegacyInstance();
+
+  // Orphan verifier cleanup: once per project per process (design §6.2).
+  if (!orphanCleanedDirs.has(directory)) {
+    orphanCleanedDirs.add(directory);
+    void cleanupOrphanVerifiers(client, engine);
+  }
 
   const tools = createTools(engine, client);
 

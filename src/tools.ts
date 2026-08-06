@@ -22,6 +22,8 @@ import type { Engine } from "./engine.js";
 import { isSubWorkflowStep, MAX_NESTING_DEPTH, MAX_DO_REINJECT, MANUAL_GATE_MARKER, DONE_TAG_MARKER, type NormalStepDef, type RalphFlowState } from "./engine.js";
 import { hasActiveCheck } from "./check.js";
 import { executeContextReset } from "./driver.js";
+import { deleteVotingProgress, readVotingProgress } from "./voting-progress.js";
+import { voterStatusLabel } from "./check-voting.js";
 
 type Client = any;
 
@@ -289,8 +291,15 @@ export function createTools(engine: Engine, client: Client) {
             engine.logEvent(instId, "info", "crash_recovery_skipped", { step: state.current_step });
             return `## ⏳ 验证进行中\n\n步骤 **${state.current_step}** 的对抗性检查仍在运行。\n\n请等待完成，或使用 \`/ralphflow-cancel\` 取消工作流。`;
           }
+          // Orphan verifier sessions from a previous process: no one will ever
+          // collect their results — drop them before re-driving (design §6.2).
+          const orphans = engine.readAdversarialSessions(instId);
+          for (const sid of orphans) {
+            try { await client.session.delete({ path: { id: sid } }); } catch {}
+          }
           engine.clearAdversarialSession(instId);
-          engine.logEvent(instId, "warn", "crash_recovery", { step: state.current_step });
+          deleteVotingProgress(engine, instId);
+          engine.logEvent(instId, "warn", "crash_recovery", { step: state.current_step, orphan_sessions: orphans.length });
           state = { ...state, current_phase: "do" };
           engine.writeState(state, instId);
           engine.clearReinjectCounter(instId);
@@ -722,8 +731,22 @@ export function createTools(engine: Engine, client: Client) {
 - **任务**: ${currentStep.do}
 - **输入**: ${currentStep.input || "无"}
 - **输出**: ${currentStep.output || "无"}
-- **检查**: ${currentStep.check}
+- **检查**: ${Array.isArray(currentStep.check_voting) ? `多验证者投票（${currentStep.check_voting.length} 票）` : currentStep.check || "无"}
 - **最大失败次数**: ${currentStep.max_fail_count}`;
+        }
+      }
+
+      // Multi-voter progress (design §5.4): show per-vote status when in flight.
+      if (state.current_phase === "check") {
+        const progress = readVotingProgress(engine, target.id);
+        if (progress && progress.entries.length > 0) {
+          const done = progress.entries.filter((e) => e.status === "passed" || e.status === "failed").length;
+          status += `\n\n## 验证进度 (${done}/${progress.entries.length})\n`;
+          for (const e of progress.entries) {
+            const label = voterStatusLabel(e.status);
+            const summary = e.reason.split("\n").find((l) => l.trim())?.trim() ?? "";
+            status += `\n- ${label} 验证者 ${e.index + 1}/${progress.entries.length} ${e.check.substring(0, 30)}${e.status === "passed" || e.status === "failed" ? `:${summary.substring(0, 120)}` : ""}`;
+          }
         }
       }
 

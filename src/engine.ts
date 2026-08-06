@@ -29,13 +29,22 @@ import yaml from "js-yaml";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+export interface CheckVotingEntry {
+  check: string;
+  model?: string | { providerID?: string; modelID?: string };
+  timeout_ms?: number;
+  system_prompt?: string;
+}
+
 export interface NormalStepDef {
   id: string;
   desc: string;
   do: string;
   input: string;
   output: string;
-  check: string;
+  check?: string;
+  check_voting?: CheckVotingEntry[];
+  check_model?: string | { providerID?: string; modelID?: string };
   on_pass: string;
   on_fail: string;
   max_fail_count: number;
@@ -169,6 +178,8 @@ export const REINJECT_WARNED_MARKER = ".reinject-warned";
 export const MAX_DO_REINJECT = 5;
 const MAX_STEP_RECORDS = 1000;
 export const MAX_NESTING_DEPTH = 5;
+export const MAX_VOTERS = 5;
+export const VOTING_PROGRESS_FILENAME = ".check-voting-progress.json";
 const MAX_WORKFLOW_FILE_SIZE = 1024 * 1024; // 1 MB
 
 const isWin = process.platform === "win32";
@@ -527,12 +538,48 @@ export function createEngine(projectDir: string, platform: Platform) {
   }
 
   // ─── Adversarial-check session file (cross-session cancel support) ──────────
+  //
+  // Holds a JSON array of active verifier session ids (multi-voter support).
+  // Old single-value format is read-compatible.
+
+  function readAdversarialSessions(instId: string): string[] {
+    try {
+      const id = reqInst(instId);
+      if (!fs.existsSync(instPath(ADVERSARIAL_SESSION_FILENAME, id))) return [];
+      const v = stripBom(fs.readFileSync(instPath(ADVERSARIAL_SESSION_FILENAME, id), "utf-8")).trim();
+      if (!v) return [];
+      try {
+        const parsed = JSON.parse(v);
+        if (Array.isArray(parsed)) return parsed.filter((x) => typeof x === "string" && x.length > 0);
+        // Legacy single-value JSON string.
+        if (typeof parsed === "string" && parsed.length > 0) return [parsed];
+        return [];
+      } catch {
+        // Legacy single-value format: a bare session id, not JSON.
+        return [v];
+      }
+    } catch {
+      return [];
+    }
+  }
 
   function writeAdversarialSession(checkSessionId: string, instId: string): void {
     try {
       const id = reqInst(instId);
       if (!instanceExists(id)) return;
-      atomicWriteText(instPath(ADVERSARIAL_SESSION_FILENAME, id), String(checkSessionId));
+      const existing = readAdversarialSessions(id);
+      if (!existing.includes(checkSessionId)) existing.push(checkSessionId);
+      atomicWriteText(instPath(ADVERSARIAL_SESSION_FILENAME, id), JSON.stringify(existing));
+    } catch {}
+  }
+
+  function removeAdversarialSession(checkSessionId: string, instId: string): void {
+    try {
+      const id = reqInst(instId);
+      const existing = readAdversarialSessions(id);
+      const next = existing.filter((s) => s !== checkSessionId);
+      if (next.length === existing.length) return;
+      atomicWriteText(instPath(ADVERSARIAL_SESSION_FILENAME, id), JSON.stringify(next));
     } catch {}
   }
 
@@ -541,12 +588,8 @@ export function createEngine(projectDir: string, platform: Platform) {
   }
 
   function readAdversarialSession(instId: string): string | null {
-    try {
-      const v = stripBom(fs.readFileSync(instPath(ADVERSARIAL_SESSION_FILENAME, instId), "utf-8")).trim();
-      return v || null;
-    } catch {
-      return null;
-    }
+    const arr = readAdversarialSessions(instId);
+    return arr.length > 0 ? arr[0] : null;
   }
 
   // ─── Instance listing / resolution ──────────────────────────────────────────
@@ -820,8 +863,53 @@ export function createEngine(projectDir: string, platform: Platform) {
           continue;
         }
 
+        // check 与 check_voting 互斥(§3.4 规则 1):互斥优先于类型检查——即使
+        // check 类型错,只要两字段都在就按互斥硬错,不让配置错误被静默 skip 掩盖。
+        const hasCheck = step.check !== undefined && step.check !== null;
+        const hasVoting = step.check_voting !== undefined && step.check_voting !== null;
+        if (hasCheck && hasVoting) {
+          problem(`步骤 "${step.id}" 的 'check' 与 'check_voting' 互斥,不能同时写（二选一）`);
+          return null;
+        }
+
+        // check_voting 校验(§3.4 规则 2):非法 → 硬错。长度 1-MAX_VOTERS(5),用户写几个就几个。
+        if (hasVoting) {
+          if (!Array.isArray(step.check_voting) || step.check_voting.length === 0) {
+            problem(`步骤 "${step.id}" 的 'check_voting' 必须是 1-${MAX_VOTERS} 个验证者的数组`);
+            return null;
+          }
+          if (step.check_voting.length > MAX_VOTERS) {
+            problem(`步骤 "${step.id}" 的 'check_voting' 超过上限 ${MAX_VOTERS} 个验证者`);
+            return null;
+          }
+          for (let vi = 0; vi < step.check_voting.length; vi++) {
+            const entry = step.check_voting[vi];
+            if (!entry || typeof entry !== "object" || typeof entry.check !== "string" || !entry.check.trim()) {
+              problem(`步骤 "${step.id}" 的 check_voting[${vi}] 缺少非空的 'check' 字段`);
+              return null;
+            }
+            const em = (entry as any).model;
+            if (em !== undefined && em !== null && !resolveCheckModel(em)) {
+              problem(`步骤 "${step.id}" 的 check_voting[${vi}] 'model' 格式非法（应为 provider/model 或 {providerID, modelID}）`);
+              return null;
+            }
+            const et = (entry as any).timeout_ms;
+            if (et !== undefined && (typeof et !== "number" || et <= 0)) {
+              problem(`步骤 "${step.id}" 的 check_voting[${vi}] 'timeout_ms' 必须是正数`);
+              return null;
+            }
+          }
+          if (step.check_model !== undefined && step.check_model !== null) {
+            problem(`步骤 "${step.id}" 同时写了 'check_voting' 与 'check_model'：check_model 仅单 check 场景生效,此处无意义`);
+            return null;
+          }
+          validSteps.push(step);
+          continue;
+        }
+
         if (!step.do || typeof step.do !== "string") { skipStep(`Step "${step.id}" in ${workflowName}: missing/invalid 'do', skipped`); continue; }
-        if (!step.check || typeof step.check !== "string") { skipStep(`Step "${step.id}" in ${workflowName}: missing/invalid 'check', skipped`); continue; }
+        // 单 check 路径:check 可缺(与 check_voting 至少一个,这里已排除 voting),缺则跳过(与现有语义一致)
+        if (!hasCheck || typeof step.check !== "string") { skipStep(`Step "${step.id}" in ${workflowName}: missing/invalid 'check', skipped`); continue; }
         validSteps.push(step);
       }
 
@@ -1100,6 +1188,38 @@ export function createEngine(projectDir: string, platform: Platform) {
         if (!pidOk || !midOk) {
           const missing = !pidOk && !midOk ? "providerID 和 modelID" : !pidOk ? "providerID" : "modelID";
           warnings.push(`adversarial_check.model 是对象但缺少有效的 ${missing}（需要 {providerID, modelID} 两个非空字符串）——该配置被忽略，回退到 ralph-check agent 的默认模型`);
+        }
+      }
+    }
+
+    // check_voting 条目的 lint(设计 §3.5;硬错误已在 parseWorkflowFile 拦截,
+    // 这里只报已通过校验但仍可优化的配置)。
+    if (rawParsed && typeof rawParsed === "object" && Array.isArray(rawParsed.steps)) {
+      for (const s of rawParsed.steps) {
+        if (!s || typeof s !== "object" || !Array.isArray(s.check_voting)) continue;
+        const sid = typeof s.id === "string" ? s.id : "(?)";
+        if (s.check_voting.length === 1 && !(s.check_voting[0] && s.check_voting[0].model)) {
+          warnings.push(`步骤 "${sid}" 的 check_voting 只有 1 个验证者且未指定 model——等同单验证者，建议直接用 check 或配多视角/多模型`);
+        }
+        if (s.check_voting.length === 1 && s.check) {
+          warnings.push(`步骤 "${sid}" 同时写了 check 与 check_voting`);
+        }
+        if (s.check_model !== undefined && s.check_voting) {
+          warnings.push(`步骤 "${sid}" 同时写了 'check_voting' 与 'check_model'：check_model 仅单 check 场景生效`);
+        }
+        for (let vi = 0; vi < s.check_voting.length; vi++) {
+          const entry = s.check_voting[vi];
+          if (!entry || typeof entry !== "object") continue;
+          if (entry.model && typeof entry.model === "string" && !entry.model.includes("/")) {
+            warnings.push(`步骤 "${sid}" 的 check_voting[${vi}].model 是字符串（"${entry.model}"）——无法解析时将回退到 ralph-check agent 的默认模型`);
+          }
+          if (entry.model && typeof entry.model === "object") {
+            const pidOk = typeof entry.model.providerID === "string" && entry.model.providerID.trim();
+            const midOk = typeof entry.model.modelID === "string" && entry.model.modelID.trim();
+            if (!pidOk || !midOk) {
+              warnings.push(`步骤 "${sid}" 的 check_voting[${vi}].model 是对象但缺少有效的 providerID/modelID——该配置被忽略，回退到默认模型`);
+            }
+          }
         }
       }
     }
@@ -1421,7 +1541,7 @@ export function createEngine(projectDir: string, platform: Platform) {
     if (sections.length > 0) sections.push("---");
     sections.push(`## 检查依据
 
-${renderStepText(instId, step.check)}
+${renderStepText(instId, step.check || "")}
 
 ---
 
@@ -1433,6 +1553,38 @@ ${renderStepText(instId, step.check)}
 
 标签必须独占最后一行。`);
     return sections.join("\n\n");
+  }
+
+  /**
+   * 多验证者投票的单票 prompt:共享段(用户需求/DO 任务/产出目录)+ 该票专属
+   * 检查依据 + "你是 N 个验证者之一,只查自己视角"约束(设计 §8.4)。
+   */
+  function buildVotingCheckPrompt(instId: string, step: NormalStepDef, userTask: string | undefined, entry: CheckVotingEntry, index: number, count: number): string {
+    const sections: string[] = [];
+    if (userTask) sections.push(`## 用户需求\n\n${userTask}`);
+    sections.push(`## Do 阶段任务
+
+**步骤**：${step.id}
+**任务描述**：${renderStepText(instId, step.do)}
+**输入**：${renderStepText(instId, step.input)}
+**预期输出**：${renderStepText(instId, step.output)}
+**产出目录**：\`${getArtifactsRelDir(instId)}/\` — 检查依据中未写路径的文档文件名即指此目录下的文件`);
+    sections.push(`## 你的检查依据(专属视角)
+
+${renderStepText(instId, entry.check)}`);
+    sections.push(`## 你是 ${count} 个验证者之一
+
+- 你**只负责你自己的检查依据**(上方"检查依据"段),不要试图覆盖其他验证者的视角
+- 其他验证者正在并行检查其他方面,各有独立会话
+- 你的结论不受任何其他验证者影响,也不要等待或引用它们`);
+    sections.push(`请基于上述信息,自主探索项目验证任务完成情况。基于你自己的探索结果判断,不要依赖任何外部提供的"实现总结"。
+
+检查完成后输出:
+- 通过:先说明通过原因,最后一行输出 \`<promise-check>true</promise-check>\`
+- 不通过:先说明失败原因,最后一行输出 \`<promise-check>false</promise-check>\`
+
+标签必须独占最后一行。`);
+    return sections.join("\n\n---\n\n");
   }
 
   function buildSubWorkflowUserTask(instId: string, step: SubWorkflowStepDef, parentUserTask: string): string {
@@ -2138,10 +2290,11 @@ ${renderStepText(instId, step.check)}
     clearReinjectCounter, readReinjectCount, clearDoPromptCache, clearDoneTagDetected,
     writeDoPromptCache, readDoPromptCache, buildDoNudge, markPromptDelivered,
     writeAdversarialSession, clearAdversarialSession, readAdversarialSession,
+    readAdversarialSessions, removeAdversarialSession,
     // workflows
     parseWorkflowFile, loadWorkflow, listWorkflows, lintWorkflow, buildDoctorReport,
     // steps + prompts
-    getStep, buildDoPrompt, buildCheckPrompt, buildSubWorkflowUserTask,
+    getStep, buildDoPrompt, buildCheckPrompt, buildVotingCheckPrompt, buildSubWorkflowUserTask,
     resolveSubWorkflowEntry, renderStepText,
     // stack
     pushState, popState, getStackDepth, readStateStack,
@@ -2197,6 +2350,19 @@ export function resolveCheckModel(model: AdversarialCheckConfig["model"]): { pro
   return undefined;
 }
 
+/**
+ * 验证者模型优先级链(设计 §7):
+ * 条目 model(最强) > 步骤 check_model(仅单 check 场景) > effective(workflow+祖先链)
+ * 之后的 agent 配置 / owner session / 全局默认由 check.ts 的既有 fallback 链处理。
+ */
+export function resolveVerifierModel(
+  entryModel: AdversarialCheckConfig["model"] | undefined,
+  stepModel: AdversarialCheckConfig["model"] | undefined,
+  effective: AdversarialCheckConfig | undefined,
+): { providerID: string; modelID: string } | undefined {
+  return resolveCheckModel(entryModel ?? stepModel ?? effective?.model);
+}
+
 // ─── Adversarial check defaults (shared with check.ts) ──────────────────────
 
 export const DEFAULT_ADVERSARIAL_SYSTEM_PROMPT = `你是一个严格、独立的检查者。根据"检查依据"判断 DO 阶段声称完成的工作是否真的完成。
@@ -2219,12 +2385,23 @@ DO 的实现总结可能不完整、不准确、过于乐观。**你必须独立
 | "看着对，应该通过" | 通过必须有执行证据，禁止"看着对" |
 | "对结论不确定" | 任何疑问 → 不通过，没有例外 |
 
-## 输出格式
+## 输出格式(精炼,结构化)
 
-- 通过：每项依据的独立证据 → 最后一行 \`<promise-check>true</promise-check>\`
-- 不通过：每项依据的独立证据 + 失败原因 → 最后一行 \`<promise-check>false</promise-check>\`
+**判定**:最后一行输出标签:
+- 通过 → \`<promise-check>true</promise-check>\`
+- 不通过 → \`<promise-check>false</promise-check>\`
 
-标签独占最后一行。证据为准，不准只复述检查依据。`;
+**证据与原因,每条一行,最多 10 行**,位置前缀按情况选用:
+- 具体代码问题:\`[文件:行号] 问题一句话\`
+- 模块级问题:\`[模块名] 问题一句话\`
+- 架构级/跨文件问题:直接写问题一句话,不加前缀
+
+示例:
+- \`[auth.service.ts:47] JWT 密钥硬编码\`
+- \`[payment] 与 auth 共享全局可变状态,耦合过高\`
+- \`缺少统一错误处理层,各模块异常处理散落\`
+
+不要复述检查依据原文,不要写结论性空话。证据为准。标签独占最后一行。`;
 
 export const DEFAULT_ADVERSARIAL_TIMEOUT_MS = 900_000;
 

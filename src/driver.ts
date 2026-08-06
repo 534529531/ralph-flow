@@ -22,6 +22,8 @@ import path from "path";
 import type { Engine, WorkflowDef, NormalStepDef, RalphFlowState } from "./engine.js";
 import { isSubWorkflowStep, MANUAL_GATE_MARKER, DONE_TAG_MARKER, REINJECT_WARNED_MARKER, MAX_DO_REINJECT, DEFAULT_ADVERSARIAL_TIMEOUT_MS, shouldResetOnTransition } from "./engine.js";
 import { adversarialCheck, readOwnerSessionModel } from "./check.js";
+import { runVotingCheck } from "./check-voting.js";
+import { readVotingProgress, deleteVotingProgress } from "./voting-progress.js";
 
 type Client = any;
 
@@ -288,18 +290,31 @@ export async function runCheckAndAdvance(
   engine.recordStepStart(instId, state.current_step, "check");
   engine.logEvent(instId, "info", "step_start", { step: state.current_step, phase: "check" });
 
-  const checkPrompt = engine.buildCheckPrompt(instId, step, state.user_task);
+  const isVoting = Array.isArray(step.check_voting) && step.check_voting.length > 0;
+  const checkPrompt = isVoting ? "" : engine.buildCheckPrompt(instId, step, state.user_task);
 
   // Visible: the full context the independent verifier sees — user task, what the
   // DO phase was supposed to produce, and the check criteria. The original v1
   // plugin injected the complete buildCheckPrompt; the user should see everything
   // the verifier judges against, not just the check criteria in isolation.
+  //
+  // PLAIN TEXT: opencode renders user-role messages with HighlightedText (no
+  // markdown), so every noReply injection here must avoid markdown syntax —
+  // emoji + indentation instead of tables/headings/bold.
   const visibleSections: string[] = [];
   if (state.user_task) {
-    visibleSections.push(`### 用户需求\n\n${state.user_task}`);
+    visibleSections.push(`[用户需求]\n${state.user_task}`);
   }
-  visibleSections.push(`### Do 阶段任务\n\n**任务描述**：${engine.renderStepText(instId, step.do)}\n\n**输入**：${engine.renderStepText(instId, step.input)}\n\n**预期输出**：${engine.renderStepText(instId, step.output)}`);
-  visibleSections.push(`### 检查依据\n\n${engine.renderStepText(instId, step.check)}`);
+  visibleSections.push(`[Do 阶段任务]\n任务描述:${engine.renderStepText(instId, step.do)}\n输入:${engine.renderStepText(instId, step.input)}\n预期输出:${engine.renderStepText(instId, step.output)}`);
+  if (isVoting && step.check_voting) {
+    const n = step.check_voting.length;
+    const rows = step.check_voting
+      .map((e, i) => `  ${i + 1}/${n} ${engine.renderStepText(instId, e.check).split("\n")[0].trim().substring(0, 50)} · 模型:${typeof e.model === "string" ? e.model : e.model ? `${e.model.providerID}/${e.model.modelID}` : "默认"}`)
+      .join("\n");
+    visibleSections.push(`[各验证者检查依据]\n${rows}`);
+  } else {
+    visibleSections.push(`[检查依据]\n${engine.renderStepText(instId, (step as any).check || "")}`);
+  }
   // Report the CONFIGURED timeout ceiling, not a made-up "~1 minute". The
   // verifier independently explores the project and runs the check commands
   // (builds/tests can take minutes); its only hard bound is this timeout.
@@ -308,19 +323,49 @@ export async function runCheckAndAdvance(
   const adversarialConfig = engine.getEffectiveAdversarialCheck(instId, workflow);
   const timeoutMin = Math.max(1, Math.round((adversarialConfig?.timeout_ms || DEFAULT_ADVERSARIAL_TIMEOUT_MS) / 60000));
   await injectPrompt(client, sessionId,
-    `## 🔍 CHECK 阶段 · 自动验证中\n\n正在用**独立验证会话**验证步骤 \`${step.id}\`（与本对话隔离运行，最长 ${timeoutMin} 分钟）。\n\n⏳ **现在无需你操作，请等待结果。** 这一步由独立会话完成，在这里发消息不会加快它、也不影响判定。\n> 迟迟没有结果时：\`/ralphflow-status\` 看进度，或 \`/ralphflow-cancel\` 取消。\n\n---\n\n以下是它正在核对的依据（供你了解，不用回复）：\n\n${visibleSections.join("\n\n")}`,
+    isVoting
+      ? `🔍 CHECK 阶段:多验证者并行验证中\n\n正在用 ${step.check_voting!.length} 个独立验证会话并行验证步骤 ${step.id}(各自与本对话隔离,最长 ${timeoutMin} 分钟)。\n\n⏳ 现在无需你操作,请等待结果。验证者互不共享记忆,全过才放行。\n迟迟没有结果时:/ralphflow-status 看进度,或 /ralphflow-cancel 取消。\n\n以下是验证者正在核对的依据(供你了解,不用回复):\n\n${visibleSections.join("\n\n")}`
+      : `🔍 CHECK 阶段:自动验证中\n\n正在用独立验证会话验证步骤 ${step.id}(与本对话隔离运行,最长 ${timeoutMin} 分钟)。\n\n⏳ 现在无需你操作,请等待结果。这一步由独立会话完成,在这里发消息不会加快它、也不影响判定。\n迟迟没有结果时:/ralphflow-status 看进度,或 /ralphflow-cancel 取消。\n\n以下是它正在核对的依据(供你了解,不用回复):\n\n${visibleSections.join("\n\n")}`,
     true);
 
   let checkResult;
   try {
-    checkResult = await adversarialCheck(client, engine, instId, sessionId, step, checkPrompt, state.user_task, adversarialConfig);
+    if (isVoting && step.check_voting) {
+      // 进度文件生命周期(设计 §5.3):phase="do" 跨轮 → 删;phase="check" 续跑/全投
+      if (state.current_phase === "do") {
+        deleteVotingProgress(engine, instId);
+      }
+      const progress = readVotingProgress(engine, instId);
+      const outcome = await runVotingCheck(client, engine, instId, sessionId, step, state.user_task, step.check_voting, adversarialConfig, {
+        phase: state.current_phase,
+        workflowName: state.workflow_name,
+        progress,
+        // 投票进度推送(设计:长耗时验证不让用户误以为卡死):每票完成注入一行 noreply
+        onVoteProgress: (msg) => { void injectPrompt(client, sessionId, `🔍 ${msg}`, true); },
+      });
+      if (outcome.kind === "cancelled") {
+        engine.logEvent(instId, "warn", "voting_cancelled", { step: step.id });
+        return;
+      }
+      if (outcome.kind === "infra_pause") {
+        checkResult = { passed: false, infra: true, reason: outcome.reason };
+      } else {
+        checkResult = { passed: outcome.kind === "passed", reason: outcome.reason };
+      }
+    } else {
+      // 单 check 场景:步骤级 check_model 覆盖全局(设计 §7 优先级链第 2 级)
+      const singleCheckConfig = step.check_model
+        ? { ...(adversarialConfig || {}), model: step.check_model }
+        : adversarialConfig;
+      checkResult = await adversarialCheck(client, engine, instId, sessionId, step, checkPrompt, state.user_task, singleCheckConfig);
+    }
   } catch (err: any) {
     engine.logEvent(instId, "error", "adversarial_check_uncaught", { stepId: step.id, error: err.message });
     const st = engine.readState(instId);
     if (st && st.active && st.current_phase === "check" && st.current_step === state.current_step && st.workflow_name === state.workflow_name) {
       engine.writeState({ ...st, paused: true, pause_reason: "check_error", last_failure_reason: `对抗性检查崩溃：${err.message}` }, instId);
     }
-    await injectPrompt(client, sessionId, `## ⚠️ 验证未能运行 · 🙋 轮到你了\n\n对抗性检查崩溃：${err.message}\n\n这是**验证程序自身**的问题，不是你工作成果的问题——本次不计入失败次数，已完成的工作保持原样。\n\n👉 处理后运行 \`/ralphflow-continue\` 即可重新验证（无需重做任务），或 \`/ralphflow-cancel\` 放弃。`, true);
+    await injectPrompt(client, sessionId, `⚠️ 验证未能运行 · 🙋 轮到你了\n\n对抗性检查崩溃:${err.message}\n\n这是验证程序自身的问题,不是你工作成果的问题——本次不计入失败次数,已完成的工作保持原样。\n\n👉 处理后运行 /ralphflow-continue 即可重新验证(无需重做任务),或 /ralphflow-cancel 放弃。`, true);
     return;
   }
 
@@ -341,7 +386,9 @@ export async function runCheckAndAdvance(
     engine.writeState({ ...cur, paused: true, pause_reason: "check_error", last_failure_reason: checkResult.reason }, instId);
     engine.logEvent(instId, "warn", "workflow_paused", { workflow: cur.workflow_name, step: cur.current_step, reason: "check_infra_error" });
     await injectPrompt(client, sessionId,
-      `## ⚠️ 验证未能运行 · 🙋 轮到你了\n\n${checkResult.reason}\n\n这是验证进程自身的问题（额度/API/超时），**不是**你工作成果的问题：本次不计入失败次数，已完成的工作无需重做。\n\n👉 问题解决后运行 \`/ralphflow-continue\` 直接重新验证，或 \`/ralphflow-cancel\` 放弃。`,
+      isVoting
+        ? `⚠️ 部分验证未能运行 · 🙋 轮到你了\n\n${checkResult.reason}\n\n这是验证进程自身的问题(额度/API/超时),不是你工作成果的问题:本次不计入失败次数,已完成的工作无需重做。已通过的验证者结果保留,不会重跑。\n\n👉 问题解决后运行 /ralphflow-continue 只重新验证失败的验证者,或 /ralphflow-cancel 放弃。`
+        : `⚠️ 验证未能运行 · 🙋 轮到你了\n\n${checkResult.reason}\n\n这是验证进程自身的问题(额度/API/超时),不是你工作成果的问题:本次不计入失败次数,已完成的工作无需重做。\n\n👉 问题解决后运行 /ralphflow-continue 直接重新验证,或 /ralphflow-cancel 放弃。`,
       true);
     return;
   }

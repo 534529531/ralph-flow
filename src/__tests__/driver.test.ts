@@ -1524,3 +1524,122 @@ steps:
     expect(engine.readDoPromptCache(instId)).toContain("模型开始跑偏");
   });
 });
+
+// ─── check_voting driver-level smoke tests ────────────────────────────────────
+
+describe("check_voting via handleSessionIdle", () => {
+  let vTmpDir: string;
+  let vEngine: Engine;
+
+  // A voting client whose verifier prompt routes verdicts by the check text.
+  function makeVotingClient(votes: Record<string, boolean>) {
+    return {
+      session: {
+        messages: async () => ({
+          data: [
+            {
+              info: { role: "assistant" },
+              parts: [{ type: "text", text: lastAssistantText }],
+            },
+          ],
+        }),
+        create: async () => ({ data: { id: "chk-v-" + Math.random().toString(36).slice(2) } }),
+        delete: async () => ({}),
+        abort: async () => ({}),
+        promptAsync: async (args: any) => {
+          injected.push({ sessionId: args.path.id, text: args.body.parts[0].text, noReply: !!args.body.noReply });
+          return { data: {} };
+        },
+        prompt: async (args: any) => {
+          const text: string = args.body.parts?.[0]?.text ?? "";
+          for (const [key, pass] of Object.entries(votes)) {
+            if (text.includes(key)) {
+              return { data: { parts: [{ type: "text", text: `判定:${key}\n<promise-check>${pass ? "true" : "false"}</promise-check>` }] } };
+            }
+          }
+          return { data: { parts: [{ type: "text", text: "ok\n<promise-check>true</promise-check>" }] } };
+        },
+      },
+    };
+  }
+
+  const VOTING_WF = `
+steps:
+  - id: build
+    desc: build it
+    do: build the thing
+    input: user input
+    output: "thing.md"
+    check_voting:
+      - check: "PASS:视角A"
+      - check: "PASS:视角B"
+    on_pass: done
+    on_fail: build
+    max_fail_count: 3
+`;
+
+  function startVotingStep(sessionId = "sess-1"): string {
+    const instId = vEngine.generateInstanceId("voting-smoke");
+    fs.mkdirSync(vEngine.getInstanceDir(instId), { recursive: true });
+    vEngine.writeArtifactsDirName(instId, "task");
+    vEngine.writeState({
+      active: true, workflow_name: "voting-smoke", current_step: "build", current_phase: "do",
+      fail_count: 0, user_task: "task", paused: false, session_id: sessionId,
+    }, instId);
+    const wf = vEngine.loadWorkflow("voting-smoke")!;
+    vEngine.buildDoPrompt(instId, wf.steps[0] as any, "task");
+    return instId;
+  }
+
+  beforeEach(() => {
+    injected = [];
+    __resetDrivingSessions();
+    vTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ralph-flow-voting-driver-"));
+    const platform: Platform = {};
+    vEngine = createEngine(vTmpDir, platform) as Engine;
+    const wfDir = path.join(vTmpDir, ".opencode", "ralph-flow", "workflows");
+    fs.mkdirSync(wfDir, { recursive: true });
+    fs.writeFileSync(path.join(wfDir, "voting-smoke.yaml"), VOTING_WF, "utf-8");
+  });
+
+  afterEach(() => {
+    fs.rmSync(vTmpDir, { recursive: true, force: true });
+  });
+
+  it("all voters pass → workflow advances to done", async () => {
+    const instId = startVotingStep();
+    lastAssistantText = "done\n<promise>done</promise>";
+    lastHasToolUse = false;
+    await handleSessionIdle(makeVotingClient({ "视角A": true, "视角B": true }), vEngine, "sess-1");
+
+    const st = vEngine.readState(instId);
+    expect(st).toBeNull(); // completed → instance destroyed
+  });
+
+  it("one voter fails → back to DO with aggregated reason", async () => {
+    const instId = startVotingStep();
+    lastAssistantText = "done\n<promise>done</promise>";
+    lastHasToolUse = false;
+    await handleSessionIdle(makeVotingClient({ "视角A": true, "视角B": false }), vEngine, "sess-1");
+
+    const st = vEngine.readState(instId)!;
+    expect(st.current_phase).toBe("do");
+    expect(st.current_step).toBe("build");
+    expect(st.fail_count).toBe(1);
+    expect(st.last_failure_reason).toContain("视角B");
+    expect(st.last_failure_reason).toContain("全过才放行");
+  });
+
+  it("live per-vote progress is injected into the owner session", async () => {
+    const instId = startVotingStep();
+    lastAssistantText = "done\n<promise>done</promise>";
+    lastHasToolUse = false;
+    const before = injected.length;
+    await handleSessionIdle(makeVotingClient({ "视角A": true, "视角B": false }), vEngine, "sess-1");
+    const progressMsgs = injected.slice(before).filter((m) => /^🔍 [✅❌⚠️]/.test(m.text) && m.noReply);
+    expect(progressMsgs.length).toBe(2); // one per vote
+    const all = progressMsgs.map((m) => m.text).join("\n");
+    expect(all).toContain("✅ 验证者");
+    expect(all).toContain("❌ 验证者");
+  });
+});

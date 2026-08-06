@@ -56,13 +56,14 @@ steps:
 | `do` | ✅ | 任务提示词 —— 工作会话要做什么 |
 | `input` | ✅ | 本步骤消费什么 |
 | `output` | ✅ | 本步骤必须产出什么 |
-| `check` | ✅ | 独立会话执行的验证配方 |
+| `check` / `check_voting` | ✅（二选一） | `check`：单验证者配方；`check_voting`：多验证者投票（见[多验证者投票](#check_voting--多验证者投票280-新增)） |
+| `check_model` | ❌ | 单 `check` 场景的步骤级验证模型覆盖 |
 | `on_pass` | ✅ | 通过后的下一步 id，或 `"done"` 表示完成 |
 | `on_fail` | ✅ | 失败后重试/回退到的步骤 id（不允许 `"done"`） |
 | `max_fail_count` | ✅ | 暂停前的最大 CHECK 失败次数（数字 ≥ 1，每步独立） |
 | `reset` | ❌ | `true` 时，**进入**本步骤前换入一个全新的上下文会话（见[上下文重置门](#上下文重置门reset)） |
 
-> ⚠️ **上面每个字段都是逐步骤必填的。** 缺任何一个的步骤会被**静默丢弃**，其余工作流照常运行。绝不要省略 `input`/`output`。`/ralphflow-doctor` 会报告每个被丢弃的步骤。
+> ⚠️ **上面每个字段都是逐步骤必填的。** 缺任何一个的步骤会被**静默丢弃**，其余工作流照常运行。绝不要省略 `input`/`output`。`/ralphflow-doctor` 会报告每个被丢弃的步骤。`check` 与 `check_voting` 互斥——同写是**硬错误**（工作流无法加载），两者都缺的步骤被跳过。
 
 ### 子工作流步骤
 
@@ -210,6 +211,64 @@ adversarial_check:
 - 用**更严格、`edit` 被硬拒**的 agent
 - 为特定领域自定义 **system prompt**
 - 为需要更长验证的任务增大**超时**
+
+### `check_voting` —— 多验证者投票（2.8.0 新增）
+
+步骤级**多验证者并行验证**：N 个独立验证会话同时检查，每个验证者查一条自己的检查依据（可配不同模型），**全过才放行**。与 `check` **互斥**（二选一，同写 → doctor 硬错）。
+
+```yaml
+steps:
+  - id: implement
+    desc: 实现功能
+    do: 按 design.md 实现
+    input: design.md
+    output: 测试通过的代码
+    # check 换成 check_voting：1-5 个验证者，写几个就几个
+    check_voting:
+      - check: 用户任务的每一条要求都已落实
+        model: anthropic/claude-sonnet        # 可选：该票专用模型
+      - check: 实现的行为符合预期，真实可用
+        timeout_ms: 600000                     # 可选：该票超时
+      - check: 没有遗漏的需求，边界情况已覆盖
+        # system_prompt 也可选（覆盖全局验证者系统提示）
+    on_pass: done
+    on_fail: implement
+    max_fail_count: 5
+```
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `check` | ✅ | 该验证者独立的检查依据（只查这一条） |
+| `model` | ❌ | 该票专用模型；不填走 `check_model` → `adversarial_check.model` → 默认链 |
+| `timeout_ms` | ❌ | 该票超时；不填继承 `adversarial_check.timeout_ms` |
+| `system_prompt` | ❌ | 该票系统提示覆盖；不填用全局验证者系统提示 |
+
+**行为要点：**
+- **全过才放行**：任一票不通过 → 整体失败，聚合所有失败者 reason（失败者完整 + 通过者摘要 + 各自检查依据）反馈 DO 重试。
+- **每票实时进度**：每票完成立即推送一行（`✅ 通过` / `❌ 不通过` / `⚠️ 基础设施故障，自动重试中`），长投票不再无声。
+- **基础设施故障（infra）自动重试 1 次**；重试仍失败且无 failed 票 → `check_error` 暂停（不计失败次数），`/ralphflow-continue` 后只重跑失败的票（已通过的保留）。
+- **failed 优先于 infra**：一票工作失败 + 一票基础设施故障时，直接判失败反馈 DO，不会被故障遮蔽。
+- 验证者 prompt 自动注入"你是 N 个之一，只查自己的检查依据"约束，防止各票趋同。
+- 进度持久化在 `.check-voting-progress.json`（实例目录），`/ralphflow-status` 可查各票状态。
+
+**推荐场景：** 用不同标准/视角验证同一份产出（需求逐条落实 / 行为真实可用 / 无遗漏边界），或对同一产出用不同模型交叉检查。成本 ≈ N 票的验证 token，每票可配便宜模型缓解。
+
+### `check_model` —— 步骤级验证模型覆盖（2.8.0 新增）
+
+仅单 `check` 场景生效：该步骤的验证模型覆盖全局 `adversarial_check.model`。
+
+```yaml
+steps:
+  - id: quick
+    do: 小事一桩
+    check: 验证一下
+    check_model: anthropic/claude-haiku-4-5   # 这步用便宜模型验
+    on_pass: done
+    on_fail: quick
+    max_fail_count: 3
+```
+
+**模型优先级链**（从强到弱）：`check_voting` 条目 `model` > 步骤 `check_model` > 全局 `adversarial_check.model`（含子工作流继承）> agent 配置 > owner session 当前模型 > opencode 全局默认。
 
 ### 子工作流里的继承
 
