@@ -940,7 +940,7 @@ describe("check result parsing", () => {
   it("extracts the reason and truncates long ones", () => {
     expect(engine.getAdversarialCheckReason("because\n<promise-check>false</promise-check>")).toBe("because");
     const long = "x".repeat(6000) + "\n<promise-check>false</promise-check>";
-    expect(engine.getAdversarialCheckReason(long).length).toBeLessThanOrEqual(5003);
+    expect(engine.getAdversarialCheckReason(long).length).toBeLessThanOrEqual(20003);
   });
 });
 

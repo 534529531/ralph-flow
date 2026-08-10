@@ -1918,7 +1918,7 @@ ${renderStepText(instId, entry.check)}`);
   function getAdversarialCheckReason(responseText: string): string {
     const lines = responseText.trim().split("\n");
     const reason = lines.slice(0, -1).join("\n").trim();
-    return reason.length > 5000 ? reason.substring(0, 5000) + "..." : reason;
+    return reason.length > 20000 ? reason.substring(0, 20000) + "..." : reason;
   }
 
   // ─── Workflow Advancement Logic (shared by done handler) ────────────────────

@@ -243,8 +243,8 @@ function mergeVerdicts(base: VoterVerdict[], retry: VoterVerdict[]): VoterVerdic
   return [...map.values()].sort((a, b) => a.index - b.index);
 }
 
-const MAX_TOTAL_REASON = 8000;
-const PER_FAILED_REASON = 1200;
+const MAX_TOTAL_REASON = 24000;
+const PER_FAILED_REASON = 4000;
 
 /** Aggregate failure feedback for DO (design §4.5). */
 export function formatVotingFailureReason(verdicts: VoterVerdict[], entries: CheckVotingEntry[]): string {
@@ -265,14 +265,14 @@ export function formatVotingFailureReason(verdicts: VoterVerdict[], entries: Che
     for (const v of passed) {
       const entry = entries[v.index];
       const summary = v.reason.split("\n").find((l) => l.trim())?.trim() ?? "";
-      lines.push(`验证者 ${v.index + 1}/${verdicts.length} ${entry.check.substring(0, 40)}:${truncate(summary, 200)}`);
+      lines.push(`验证者 ${v.index + 1}/${verdicts.length} ${entry.check.substring(0, 40)}:${truncate(summary, 400)}`);
     }
   }
   const infra = verdicts.filter((v) => v.status === "infra");
   if (infra.length > 0) {
     lines.push("", "### ⚠️ 基础设施故障票(本轮未出判定,下次重投)");
     for (const v of infra) {
-      lines.push(`验证者 ${v.index + 1}/${verdicts.length}:${truncate(v.reason, 200)}`);
+      lines.push(`验证者 ${v.index + 1}/${verdicts.length}:${truncate(v.reason, 400)}`);
     }
   }
   return truncate(lines.join("\n"), MAX_TOTAL_REASON);
@@ -292,7 +292,7 @@ export function formatVotingPassReason(verdicts: VoterVerdict[], entries: CheckV
 export function formatVotingInfraReason(infraVotes: VoterVerdict[], entries: CheckVotingEntry[]): string {
   const lines: string[] = [];
   for (const v of infraVotes) {
-    lines.push(`验证者 ${v.index + 1}/${entries.length}${entries[v.index] ? `(${entries[v.index].check.substring(0, 30)})` : ""} 重试后仍无法运行:${truncate(v.reason, 400)}`);
+    lines.push(`验证者 ${v.index + 1}/${entries.length}${entries[v.index] ? `(${entries[v.index].check.substring(0, 30)})` : ""} 重试后仍无法运行:${truncate(v.reason, 800)}`);
   }
   return truncate(lines.join("\n"), MAX_TOTAL_REASON);
 }

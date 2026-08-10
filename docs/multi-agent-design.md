@@ -258,7 +258,7 @@ const cancelled = verdicts.filter(v => v.status === "cancelled");
 - 失败者在前(完整 reason),通过者在后(一句话摘要)
 - 每票标注"检查依据原文"——DO 没看过 check_voting 配置,必须知道该票的判定标准
 - 通过者摘要带上:DO 需要知道哪些部分已被确认,避免修复时改坏
-- 长度:验证者输出已受输出契约约束(§8,每票 ≤10 行),聚合总长天然有界;仍保留总兜底截断 8000 字符
+- 长度:验证者输出已受输出契约约束(§8,每票 ≤10 行),聚合总长天然有界;仍保留总兜底截断 24000 字符
 - 此 reason 作为 `checkResult.reason` 传给 handleCheckFailed → buildDoPrompt 的 retryContext(engine.ts:1361),现有链路不动
 
 ### 4.6 通过反馈
@@ -445,7 +445,7 @@ for each 活跃实例(instId):
 
 ### 8.3 收益
 
-- 输出天然有界:每票 ≤10 行 → 3 票 ~30 行,聚合无需逐票截断,只留总兜底 8000
+- 输出天然有界:每票 ≤10 行 → 3 票 ~30 行,聚合无需逐票截断,只留总兜底 24000
 - 信息密度高:`[文件:行号] 问题` 一眼可定位;架构问题裸写不受位置格式约束
 - 解析逻辑不变:`getAdversarialCheckReason` 仍取标签前全文;`parseCheckResult` 仍查末行标签
 - 单验证者 reason/通过反馈顺带更精炼(行为改进,非破坏)
@@ -527,7 +527,7 @@ for each 活跃实例(instId):
 | `check-voting.test.ts` | 并发 N 票执行;聚合决策(全过/有失败/混合);**failed 优先于 infra(混合票判失败不判暂停)**;infra 重试轮只重跑未判定票;重试仍 infra 且无 failed → check_error;**continue 后 infra_failed 重置 pending 重跑(不死锁)**;**连续两次 infra 后无 failed → 暂停 → continue → 重跑 → 仍 infra → 再暂停(预算不跨 continue 累计)** |
 | `voting-progress.test.ts` | 文件初始化/更新/删除生命周期;跨轮删除;check_error 保留;`infra_failed` 重置 `pending`;**崩溃恢复删除**;并发原子写 |
 | `resolve-verifier-model.test.ts` | 优先级链:条目 > check_model > effective > agent 配置 > owner session > 全局;无效值回退 |
-| `aggregate-reason.test.ts` | 失败者完整+通过者摘要;检查依据标注;8000 兜底截断;全过格式;混合 failed+infra 时只列 failed 给 DO |
+| `aggregate-reason.test.ts` | 失败者完整+通过者摘要;检查依据标注;24000 兜底截断;全过格式;混合 failed+infra 时只列 failed 给 DO |
 | `output-contract-parse.test.ts` | 精炼格式解析兼容(末行标签);10 行上限(doctor 提示,运行时不强制) |
 | `doctor-rules.test.ts` | §3.5 全部规则;**互斥同写硬错优先于类型检查(§3.4 规则 1)** |
 | `cancel-restart.test.ts` | abort 全部票;.adversarial-session 数组读写/兼容旧值;崩溃恢复清孤儿会话;进度文件清理 |
