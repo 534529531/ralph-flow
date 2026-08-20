@@ -2451,7 +2451,7 @@ DO 的实现总结可能不完整、不准确、过于乐观。**你必须独立
 
 不要复述检查依据原文,不要写结论性空话。证据为准。标签独占最后一行。`;
 
-export const DEFAULT_ADVERSARIAL_TIMEOUT_MS = 900_000;
+export const DEFAULT_ADVERSARIAL_TIMEOUT_MS = 1_800_000;
 
 // ─── Verifier permissions: edit hard-deny + bash open + prompt discipline ────
 //

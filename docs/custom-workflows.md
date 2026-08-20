@@ -185,7 +185,7 @@ adversarial_check:
     - 所有函数都有错误处理
     - 没有硬编码密钥
     - 测试覆盖边界情况
-  timeout_ms: 1800000               # 检查超时（毫秒）；默认 900000（15 分钟），上限 3600000（1 小时）
+  timeout_ms: 1800000               # 检查超时（毫秒）；默认 1800000（30 分钟），上限 3600000（1 小时）
 ```
 
 | 字段 | 说明 | 默认值 |
@@ -193,7 +193,7 @@ adversarial_check:
 | `agent` | 用哪个 agent 验证 | `ralph-check`（`edit: deny` + `bash: allow`） |
 | `model` | `{providerID, modelID}` 对象或 `"provider/model"` 字符串 | 见下方「默认模型解析顺序」 |
 | `system_prompt` | 给检查者的额外 system prompt | 内置验证提示词 |
-| `timeout_ms` | 检查超时（毫秒，上限 `3600000`） | `900000`（15 分钟） |
+| `timeout_ms` | 检查超时（毫秒，上限 `3600000`） | `1800000`（30 分钟） |
 
 > **不配 `model` 时验证用哪个模型？** 按顺序取第一个命中的：
 > 1. 你在 opencode 配置里给验证 agent 显式指定的模型（如 `agent.ralph-check.model`）

@@ -410,7 +410,7 @@ for each 活跃实例(instId):
 
 - 抽取纯函数 `resolveVerifierModel(entryModel, stepModel, effective)`(复用 check.ts:167 现有解析,插入两级),可单测
 - `effective` 来自现有 `getEffectiveAdversarialCheck`(engine.ts:1590,含子工作流祖先链继承)
-- 条目缺 `timeout_ms` → effective.timeout_ms → 全局默认(900s);缺 `system_prompt` → effective.system_prompt → DEFAULT_ADVERSARIAL_SYSTEM_PROMPT
+- 条目缺 `timeout_ms` → effective.timeout_ms → 全局默认(1800s);缺 `system_prompt` → effective.system_prompt → DEFAULT_ADVERSARIAL_SYSTEM_PROMPT
 - `agent` 恒为 effective.agent(默认 ralph-check),条目级不提供
 
 ---
