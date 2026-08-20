@@ -45,6 +45,7 @@ export interface NormalStepDef {
   check?: string;
   check_voting?: CheckVotingEntry[];
   check_model?: string | { providerID?: string; modelID?: string };
+  no_check?: boolean;
   on_pass: string;
   on_fail: string;
   max_fail_count: number;
@@ -908,8 +909,29 @@ export function createEngine(projectDir: string, platform: Platform) {
         }
 
         if (!step.do || typeof step.do !== "string") { skipStep(`Step "${step.id}" in ${workflowName}: missing/invalid 'do', skipped`); continue; }
-        // 单 check 路径:check 可缺(与 check_voting 至少一个,这里已排除 voting),缺则跳过(与现有语义一致)
-        if (!hasCheck || typeof step.check !== "string") { skipStep(`Step "${step.id}" in ${workflowName}: missing/invalid 'check', skipped`); continue; }
+        // 单 check 路径(此处已排除 voting):以"真正的字符串 check"为准判断。
+        // 之前缺 check 会把步骤整体静默丢弃;现在允许 no-check 的合法步骤——DO 完成
+        // 后直接走 on_pass,不跑对抗性验证(manual_step 的人工审查门即验证,默认也走这里)。
+        const singleHasCheck = typeof step.check === "string" && step.check.trim() !== "";
+        if (step.check_model !== undefined && step.check_model !== null) {
+          // check_model 只对"有 check"才有意义——设了它却没写 check,几乎肯定是配置
+          // 笔误(漏了 check 或 check 写错类型)。硬错,不静默放过。
+          if (!singleHasCheck) {
+            problem(`步骤 "${step.id}" 写了 'check_model' 但没有可用的 'check'：check_model 仅当步骤提供 check 时才生效，请补上 check 或删掉 check_model`);
+            return null;
+          }
+        }
+        if (singleHasCheck) {
+          validSteps.push(step);
+          continue;
+        }
+        // 显式写了个非字符串的 check(如 check: true)是配置错误,不是刻意的跳过,
+        // 同样硬错——避免把"想要 check"误读成"不想 check"。
+        if (step.check !== undefined && step.check !== null && typeof step.check !== "string") {
+          problem(`步骤 "${step.id}" 的 'check' 必须是字符串（非字符串会被视为未配置检查并跳过验证，若你本意是跳过请直接删掉该字段）`);
+          return null;
+        }
+        step.no_check = true;
         validSteps.push(step);
       }
 
@@ -1224,6 +1246,15 @@ export function createEngine(projectDir: string, platform: Platform) {
       }
     }
 
+    // 没有 check 的步骤会跳过对抗性验证。manual_step 由人工审查替代,是刻意的
+    // 默认,不算问题;普通步骤跳过验证则要醒目——避免"忘了写 check"被静默当成
+    // "故意跳过"。
+    for (const s of wf.steps) {
+      if ((s as any).no_check && !(wf.manual_step && wf.manual_step.includes(s.id))) {
+        warnings.push(`步骤 "${s.id}" 未配置对抗性检查（无 check/check_voting），DO 完成后直接进入下一步，不会被独立验证`);
+      }
+    }
+
     // reset / auto_reset 提示。内置工作流跳过：标 reset 是插件设计决定，
     // 不该对用户显示"成本较高"的警告。
     if (!fromBuiltin && wf.steps.length > 0 && wf.steps[0].reset === true) {
@@ -1497,7 +1528,7 @@ export function createEngine(projectDir: string, platform: Platform) {
 
 **输出要求**：${renderStepText(instId, step.output)}
 
-**产出目录**：\`${getArtifactsRelDir(instId)}/\` — 本工作流的文档产出（清单、方案、报告等）统一放在此目录。步骤中提到的文档文件名（如 summary.md）若未写路径，即指此目录下的文件；明确写了其他路径的除外。`);
+**产出目录**：\`${getArtifactsRelDir(instId)}/\` — 本工作流的文档产出（清单、方案、报告等）统一放在此目录。步骤中提到的文档文件名（如 summary.md）若未写路径，即指此目录下的文件；明确写了其他路径的除外。${step.no_check ? `\n\n> ℹ️ 本步骤**不配置对抗性检查**：完成即可，不会有独立的验证进程来复核。请务必自查产出是否满足任务要求（manual_step 步骤则由你审查后运行 \`/ralphflow-continue\` 放行）。` : ""}`);
 
     if (isRetry) {
       sections.push(`---
@@ -1923,11 +1954,18 @@ ${renderStepText(instId, entry.check)}`);
 
   // ─── Workflow Advancement Logic (shared by done handler) ────────────────────
 
-  function handleCheckPassed(instId: string, state: RalphFlowState, workflow: WorkflowDef, step: StepDef, checkResult: { reason?: string }): TransitionResult {
+  function handleCheckPassed(instId: string, state: RalphFlowState, workflow: WorkflowDef, step: StepDef, checkResult: { reason?: string; skipped?: boolean }): TransitionResult {
     // Note: manual steps no longer pause after the check — the manual review gate
     // now sits BEFORE the check (the driver stops the session when the DO phase of
     // a manual step completes; the user's ralphflow_continue call is the approval
     // that starts the check). Once the check passes, the workflow advances.
+    //
+    // checkResult.skipped = 步骤没有对抗性检查(未配置 check,或 manual_step 默认由
+    // 人工审查替代)。这种情况没有真正运行验证器,标题要如实说明"跳过验证"而不是
+    // 假装"检查通过"。
+    const passHeader = checkResult.skipped
+      ? "## 步骤已通过（跳过对抗性验证）"
+      : "## 检查结果：通过 ✓";
 
     if (step.on_pass === "done") {
       const parentState = popState(instId);
@@ -1948,7 +1986,7 @@ ${renderStepText(instId, entry.check)}`);
             }
             logEvent(instId, "info", "sub_workflow_end", { workflow: state.workflow_name, parent_workflow: parentState.workflow_name, parent_step: parentState.current_step });
             return {
-              text: `## 检查结果：通过 ✓\n\n${checkResult.reason || "检查通过。"}\n\n---\n\n## 子工作流 "${state.workflow_name}" 已完成！\n\n---\n\n${grandparentResult.text}`,
+              text: `${passHeader}\n\n${checkResult.reason || "检查通过。"}\n\n---\n\n## 子工作流 "${state.workflow_name}" 已完成！\n\n---\n\n${grandparentResult.text}`,
               paused: grandparentResult.paused,
               completed: grandparentResult.completed,
               // Propagate a sub-workflow entry from the recursive advance (e.g.
@@ -1963,7 +2001,7 @@ ${renderStepText(instId, entry.check)}`);
         writeState({ ...parentState, paused: true, pause_reason: "config_error", last_failure_reason: `父工作流 "${parentState.workflow_name}" 加载失败。` }, instId);
         logEvent(instId, "warn", "parent_workflow_not_found", { workflow: state.workflow_name, parent_workflow: parentState.workflow_name });
         return {
-          text: `## 检查结果：通过 ✓\n\n${checkResult.reason || "检查通过。"}\n\n---\n\n子工作流 "${state.workflow_name}" 已完成，但父工作流 "${parentState.workflow_name}" 加载失败。工作流已暂停 — 请修复工作流 YAML 后调用 \`ralphflow_continue\` 恢复。`,
+          text: `${passHeader}\n\n${checkResult.reason || "检查通过。"}\n\n---\n\n子工作流 "${state.workflow_name}" 已完成，但父工作流 "${parentState.workflow_name}" 加载失败。工作流已暂停 — 请修复工作流 YAML 后调用 \`ralphflow_continue\` 恢复。`,
           paused: true,
         };
       }
@@ -1972,7 +2010,7 @@ ${renderStepText(instId, entry.check)}`);
       const reportPath = destroyInstance(instId, "completed");
       logEvent(instId, "info", "workflow_end", { workflow: state.workflow_name });
       return {
-        text: `## 检查结果：通过 ✓\n\n${checkResult.reason || "检查通过。"}\n\n---\n\n## 🎉 工作流完成！\n\n所有步骤已验证通过，无需再操作。${reportPath ? `\n\n执行报告：${path.relative(projectDir, reportPath)}` : ""}`,
+        text: `${passHeader}\n\n${checkResult.reason || "检查通过。"}\n\n---\n\n## 🎉 工作流完成！\n\n所有步骤已验证通过，无需再操作。${reportPath ? `\n\n执行报告：${path.relative(projectDir, reportPath)}` : ""}`,
         completed: true,
       };
     }
@@ -1981,7 +2019,7 @@ ${renderStepText(instId, entry.check)}`);
     if (!nextStep) {
       logEvent(instId, "error", "next_step_not_found", { step: state.current_step, on_pass: step.on_pass });
       writeState({ ...state, paused: true, pause_reason: "config_error", last_failure_reason: `下一步 "${step.on_pass}" 在工作流定义中未找到。` }, instId);
-      return { text: `## 检查结果：通过 ✓\n\n下一步 "${step.on_pass}" 在工作流定义中未找到。\n\n## 工作流已暂停\n\n工作流配置错误。请修复工作流定义，然后调用 \`ralphflow_continue\` 恢复。`, paused: true };
+      return { text: `${passHeader}\n\n下一步 "${step.on_pass}" 在工作流定义中未找到。\n\n## 工作流已暂停\n\n工作流配置错误。请修复工作流定义，然后调用 \`ralphflow_continue\` 恢复。`, paused: true };
     }
 
     if (isSubWorkflowStep(nextStep)) {
@@ -1999,7 +2037,7 @@ ${renderStepText(instId, entry.check)}`);
         return { text: subResult.text, paused: true };
       }
       return {
-        text: `## 检查结果：通过 ✓\n\n${checkResult.reason || "检查通过。"}\n\n---\n\n## 进入子工作流：${nextStep.id}\n\n---\n\n${subResult.text}`,
+        text: `${passHeader}\n\n${checkResult.reason || "检查通过。"}\n\n---\n\n## 进入子工作流：${nextStep.id}\n\n---\n\n${subResult.text}`,
         enteredCompositeStepId: nextStep.id,
       };
     }
@@ -2009,7 +2047,7 @@ ${renderStepText(instId, entry.check)}`);
     recordStepStart(instId, nextStep.id, "do");
     logEvent(instId, "info", "step_start", { step: nextStep.id, phase: "do" });
     return {
-      text: `## 检查结果：通过 ✓\n\n${checkResult.reason || "检查通过。"}\n\n---\n\n下一步：**${nextStep.id}** - ${nextStep.desc}\n\n---\n\n${buildDoPrompt(instId, nextStep, state.user_task)}`,
+      text: `${passHeader}\n\n${checkResult.reason || "检查通过。"}\n\n---\n\n下一步：**${nextStep.id}** - ${nextStep.desc}\n\n---\n\n${buildDoPrompt(instId, nextStep, state.user_task)}`,
     };
   }
 

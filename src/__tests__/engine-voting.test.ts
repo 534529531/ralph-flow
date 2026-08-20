@@ -178,12 +178,13 @@ describe("parseWorkflowFile check_voting validation", () => {
     expect((wf!.steps[0] as any).check).toBe("验证一下");
   });
 
-  it("step with neither check nor check_voting is skipped (legacy semantics)", () => {
+  it("step with neither check nor check_voting becomes a valid no-check step", () => {
     writeWorkflow(wfWith(``));
     const problems: string[] = [];
     const wf = engine.loadWorkflow("voting-wf", problems);
-    // no valid steps → null
-    expect(wf).toBeNull();
+    // 无 check/check_voting 不再丢步骤:作为 skip-verify 的合法步骤,DO 完成后直接走 on_pass
+    expect(wf).not.toBeNull();
+    expect((wf!.steps[0] as any).no_check).toBe(true);
   });
 });
 

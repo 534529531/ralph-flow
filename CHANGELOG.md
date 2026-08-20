@@ -2,6 +2,19 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 2.9.0 (2026-08-20)
+
+### 新增
+- **对抗性 check 可选化（与 Claude Code 版镜像）**：步骤可以完全省略 `check` / `check_voting` —— DO 完成后**直接跳过后台对抗验证**、按 `on_pass` 推进，不再被当作"漏写"静默丢弃。对抗 check 是耗时且不可见的黑盒，适合留给真正需要独立复核的步骤；文档整理、纯编排等不需要独立复核的步骤如今可以不写 check。**`manual_step` 默认**不再叠加对抗 check（人工审查门本身就是"人审过的检查"），除非步骤显式写了 `check` / `check_voting`。
+- **让"跳过"不至于隐形**：
+  - `check` 写成非字符串（如 `check: true`）是**配置错误**，会拒绝——避免把"想要 check"误读成"不要"。
+  - `check_model` 却没写可用的 `check` 是**配置错误**，会拒绝——避免漏写 check 的笔误被静默吞掉。
+  - doctor 对**非 manual** 的无 check 步骤给出醒目警告（防止忘了写 check 被当成熟练跳过）；manual 的无 check 步骤保持安静。
+- **DO/完成文案如实反馈**：DO prompt 对 no-check 步骤注明"不配置对抗性检查：完成即可，不会有独立的验证进程来复核"；通过头对该类步骤显示"跳过对抗性验证"，不再伪造"检查通过"。
+
+### 测试
+- 新增 `check-optional.test.ts`（11 断言：parse/lint/DO prompt 语义）+ `check-optional-driver.test.ts`（2 断言：no-check 步骤端到端不 spawn 验证者会话、check 步骤照常）；更新 1 条旧"无 check 被丢弃"语义测试为新语义。全量 13 文件 / 242 断言绿。
+
 ## 2.8.2 (2026-08-10)
 
 ### 变更
