@@ -16,35 +16,40 @@ flowchart TD
     DoPrompt --> AI["会话执行任务"]
     AI -->|"检测到 done 标记"| DoneTag["session.idle 触发<br/>驱动器检测 done 标记"]
     DoneTag --> Manual{"手动步骤？"}
-    Manual -->|"是"| Review["📋 会话停下<br/>用户审查后 /ralphflow-continue"]
-    Manual -->|"否"| CallContinue["驱动器提示：调用 ralphflow_continue"]
-    Review --> CheckPrompt
-    CallContinue --> CheckPrompt["ralphflow_continue 创建独立验证会话"]
+    Manual -->|"是"| Review["会话停下<br/>用户审查后 /ralphflow-continue"]
+    Manual -->|"否"| HasCheck{"步骤配了<br/>check / check_voting？"}
+    Review --> HasCheck
+    HasCheck -->|"否"| Pass
+    HasCheck -->|"是"| CheckPrompt["创建独立验证会话"]
     CheckPrompt --> AICheck["独立会话验证结果"]
     AICheck -->|"true"| Pass["引擎读取 on_pass"]
     AICheck -->|"false"| Fail["引擎递增 fail_count"]
     AICheck -->|"基础设施故障"| Infra["在 check 阶段暂停<br/>continue 只重跑验证"]
-    Pass -->|"on_pass: done"| Complete["实例完成<br/>归档报告，删除目录"]
+    Pass -->|"on_pass: done"| Complete["实例完成<br/>归档报告，删除实例目录"]
     Pass -->|"下一步 id"| DoPrompt
     Fail -->|"未达上限"| DoPrompt
     Fail -->|"达到上限"| Pause["工作流暂停<br/>等待 /ralphflow-continue"]
     Pause -->|用户继续| DoPrompt
 ```
 
+普通步骤验证是**自动**的：DO 输出 `<promise>done</promise>` 后，idle 驱动自动拉起验证会话，模型不需要调用 `ralphflow_continue`。步骤不配 `check` / `check_voting` 时直接跳过验证（见下方阶段细节）。`ralphflow_continue` 只用于批准手动审查、恢复暂停、接管实例。
+
 ### 阶段细节
 
 **DO 阶段**（工作会话）：
-1. `ralphflow_start` / `ralphflow_continue` 工具返回步骤的 DO 提示词
+1. 工具返回步骤的 DO 提示词（第一步由 `ralphflow_start`，后续步骤由驱动器自动注入）
 2. 会话执行任务（写代码、跑命令、产出指定输出）
 3. 完成后在最后一行输出 `<promise>done</promise>`
 4. 驱动器通过 `session.idle` 事件检测标记
 
 **CHECK 阶段**（独立会话）：
-1. `ralphflow_continue` 构建步骤的检查提示词，拉起一个全新的验证会话（`ralph-check` agent：`edit: deny` + `bash: allow`）
+1. 驱动器构建步骤的检查提示词，拉起一个全新的验证会话（`ralph-check` agent：`edit: deny` + `bash: allow`）
 2. 验证者自主探索项目，按检查依据评估工作成果 —— 它完全没看过 DO 阶段的对话
 3. 在最后一行返回 `<promise-check>true</promise-check>` 或 `<promise-check>false</promise-check>`
 4. 引擎处理结果，要么推进（`on_pass`），要么带失败原因重试（`on_fail`）
 5. 验证会话被删除
+
+**跳过验证**：步骤不配 `check` / `check_voting` 时，DO 完成后直接按 `on_pass` 推进，不创建验证会话，通过头显示"跳过对抗性验证"。`manual_step` 默认就走这条路（人工审查即验证）；只有在手动步骤上显式写了 `check` 时，批准后才叠加独立验证。
 
 ---
 
@@ -55,15 +60,15 @@ CHECK 阶段用**独立会话**验证任务完成情况，杜绝自我审查偏�
 ```mermaid
 sequenceDiagram
     participant Main as 工作会话
-    participant Tool as ralphflow_continue
+    participant Driver as 驱动器（idle 驱动）
     participant Check as 验证会话
 
-    Main->>Tool: DO 完成（done 标记）→ 调用 ralphflow_continue
-    Tool->>Check: 用检查提示词创建全新会话
+    Main->>Driver: DO 完成（done 标记）
+    Driver->>Check: 用检查提示词创建全新会话
     Check->>Check: 独立验证
-    Check->>Tool: 返回 通过/失败 + 原因
-    Tool->>Main: 返回下一步提示词（或带原因重试）
-    Tool->>Check: 自动删除会话
+    Check->>Driver: 返回 通过/失败 + 原因
+    Driver->>Main: 注入下一步提示词（或带原因重试）
+    Driver->>Check: 自动删除会话
 ```
 
 ### 为什么用独立会话？
@@ -113,7 +118,7 @@ adversarial_check:
 
 ## 手动审查门
 
-工作流 `manual_step` 里列出的步骤在 **DO 完成后、验证开始前**暂停。当这类步骤检测到 done 标记时，驱动器**不**驱动模型继续 —— 而是用 📋 消息停下会话等待。用户的 `/ralphflow-continue` 是启动独立验证的批准。用户要改，会话就改，然后再次输出 `<promise>done</promise>` —— 审查门重新武装。
+工作流 `manual_step` 里列出的步骤在 **DO 完成后、验证开始前**暂停。当这类步骤检测到 done 标记时，驱动器**不**驱动模型继续 —— 而是用 📋 消息停下会话等待。用户的 `/ralphflow-continue` 是批准：若该步骤显式写了 `check`，批准后启动独立验证；没写则直接按 `on_pass` 推进（人工审查即验证）。用户要改，会话就改，然后再次输出 `<promise>done</promise>` —— 审查门重新武装。
 
 ---
 
@@ -142,6 +147,8 @@ adversarial_check:
 | 当前步上下文脏了想原地重来 | `/ralphflow-reset` | 不动（停当前步） | **保留**——不赦免，自动刹车仍然真 | 默认换干净会话 | 可选 |
 | 已经做到后期，发现前面某步方向错了，要回去重做 | `/ralphflow-rewind` | 倒退到一个**已通过 CHECK**的上游步骤 | 归零 + 清暂停 | 默认换干净会话 | **必填**，跨会话注入新会话首条 DO 提示前 |
 | 整个推倒重来 | `/ralphflow-cancel` + `/ralphflow-start` | 销毁实例 | — | — | — |
+
+"换干净会话"的载体由工作流级 `isNewOpen` 决定（v2.10.0，缺省 `false`）：`false`（默认）保持应用内换会话 + TUI 跳转，与 2.9.x 行为一致；`true` 物理新开终端窗口 attach 新会话，开窗失败自动降级为应用内跳转，工作流不断。
 
 ### 为什么 rewind 的 reason 必填
 
@@ -253,6 +260,9 @@ flowchart LR
     │       ├── artifacts-dir        # 本实例产出目录的名字
     │       ├── .do-prompt-cache     # 当前 DO 提示词（保活重注入）
     │       ├── .manual-gate         # 手动审查标记
+    │       ├── .done-tag-detected   # DO 已完成，等待放行
+    │       ├── .adversarial-session # 运行中的验证会话 id（多验证者时是数组）
+    │       ├── .check-voting-progress.json  # 多验证者投票进度
     │       └── logs/
     │           ├── execution.log
     │           └── step-records.json

@@ -24,6 +24,7 @@ import { isSubWorkflowStep, MANUAL_GATE_MARKER, DONE_TAG_MARKER, REINJECT_WARNED
 import { adversarialCheck, readOwnerSessionModel } from "./check.js";
 import { runVotingCheck } from "./check-voting.js";
 import { readVotingProgress, deleteVotingProgress } from "./voting-progress.js";
+import { spawnTerminalWindow } from "./window.js";
 
 type Client = any;
 
@@ -222,22 +223,55 @@ export async function executeContextReset(
       engine.logEvent(instId, "warn", "context_reset_first_inject_failed", { to: newSessionId.slice(0, 8), step: targetStepId });
     }
 
+    // New-window handoff (isNewOpen). Default false: keep the pre-2.10 in-app
+    // behavior (context switch + TUI navigation) so existing setups are
+    // unchanged. Only an explicit `isNewOpen: true` opens a physical terminal
+    // window attaching this freshly created session — the user sees one window
+    // working and the old window kept for review. On failure (headless / no
+    // terminal) it degrades to the in-app TUI navigation below, so the workflow
+    // never breaks over a window. The drive already started via the inject
+    // above, so an opened window lands on live work.
+    let windowOpened = false;
+    const wf = engine.loadWorkflow(workflowName);
+    const isNewOpen = wf?.isNewOpen === true; // 缺省 false → 不开窗，走应用内跳转
+    if (isNewOpen) {
+      try {
+        const win = await spawnTerminalWindow("opencode", ["--session", newSessionId], {
+          cwd: engine.projectDir,
+          title,
+        });
+        windowOpened = win.ok;
+        if (!win.ok) {
+          engine.logEvent(instId, "warn", "context_reset_window_spawn_failed", { to: newSessionId.slice(0, 8), step: targetStepId, error: win.error });
+        }
+      } catch (e: any) {
+        engine.logEvent(instId, "warn", "context_reset_window_spawn_failed", { to: newSessionId.slice(0, 8), step: targetStepId, error: e.message });
+      }
+    }
+
+    const handoffNote = windowOpened
+      ? "工作流已在新窗口打开；本窗口保留，可随时切回审视"
+      : `正在自动跳转过去；若未跳转，用 \`/session\` 打开 **${title}** 即可`;
+
     const farewell = kind === "rewind"
-      ? `## 🔙 已回退到步骤 \`${targetStepId}\` 重做\n\n工作流 \`${workflowName}\` 已回退到步骤 \`${targetStepId}\`，并在新会话 **${title}** 中重做该步及后续（正在自动跳转过去；若未跳转，用 \`/session\` 打开 🔙 开头的会话即可）。本会话正在进行的生成已停止；新会话已带完整交接简报与回退原因，无需你重复背景。\n\n本会话的历史仍保留，你可以随时切回来查看；但工作流已不在本会话中执行。`
-      : `## 🔄 上下文已重置\n\n工作流 \`${workflowName}\` 已在新会话 **${title}** 中继续（正在自动跳转过去；若未跳转，用 \`/session\` 打开 🔄 开头的会话即可）。本会话正在进行的生成已停止；新会话已带完整交接简报，无需你重复背景。\n\n本会话的历史仍保留，你可以随时切回来查看；但工作流已不在本会话中执行。`;
+      ? `## 🔙 已回退到步骤 \`${targetStepId}\` 重做\n\n工作流 \`${workflowName}\` 已回退到步骤 \`${targetStepId}\`，并在新会话 **${title}** 中重做该步及后续。本会话正在进行的生成已停止；新会话已带完整交接简报与回退原因，无需你重复背景。\n\n${handoffNote}\n\n本会话的历史仍保留，你可以随时切回来查看；但工作流已不在本会话中执行。`
+      : `## 🔄 上下文已重置\n\n工作流 \`${workflowName}\` 已在新会话 **${title}** 中继续。本会话正在进行的生成已停止；新会话已带完整交接简报，无需你重复背景。\n\n${handoffNote}\n\n本会话的历史仍保留，你可以随时切回来查看；但工作流已不在本会话中执行。`;
     await injectPrompt(client, oldSessionId, farewell, true);
 
-    // Ask the TUI to follow the workflow into its new home. The v1 SDK client
-    // predates the /tui/select-session endpoint, but the server's publish
-    // handler already routes tui.session.select (and the TUI navigates on it);
-    // older servers reject or ignore the unknown event type, which is fine —
-    // the top-level session stays findable via /session either way.
-    try {
-      await client.tui?.publish?.({
-        body: { type: "tui.session.select", properties: { sessionID: newSessionId } },
-        query: { directory: engine.projectDir },
-      });
-    } catch {}
+    if (!windowOpened) {
+      // Ask the TUI to follow the workflow into its new home (in-app fallback,
+      // also the isNewOpen:false path). The v1 SDK client predates the
+      // /tui/select-session endpoint, but the server's publish handler already
+      // routes tui.session.select (and the TUI navigates on it); older servers
+      // reject or ignore the unknown event type, which is fine — the top-level
+      // session stays findable via /session either way.
+      try {
+        await client.tui?.publish?.({
+          body: { type: "tui.session.select", properties: { sessionID: newSessionId } },
+          query: { directory: engine.projectDir },
+        });
+      } catch {}
+    }
 
     engine.logEvent(instId, "info", "context_reset", { from: oldSessionId.slice(0, 8), to: newSessionId.slice(0, 8), step: targetStepId });
 

@@ -56,18 +56,20 @@ steps:
 | `do` | ✅ | 任务提示词 —— 工作会话要做什么 |
 | `input` | ✅ | 本步骤消费什么 |
 | `output` | ✅ | 本步骤必须产出什么 |
-| `check` / `check_voting` | ✅（二选一） | `check`：单验证者配方；`check_voting`：多验证者投票（见[多验证者投票](#check_voting--多验证者投票280-新增)） |
+| `check` / `check_voting` | ❌ | `check`：单验证者配方；`check_voting`：多验证者投票（见[多验证者投票](#check_voting--多验证者投票280-新增)）。**可选**——不写则跳过对抗验证（见[跳过对抗验证](#跳过对抗验证)） |
 | `check_model` | ❌ | 单 `check` 场景的步骤级验证模型覆盖 |
 | `on_pass` | ✅ | 通过后的下一步 id，或 `"done"` 表示完成 |
 | `on_fail` | ✅ | 失败后重试/回退到的步骤 id（不允许 `"done"`） |
 | `max_fail_count` | ✅ | 暂停前的最大 CHECK 失败次数（数字 ≥ 1，每步独立） |
 | `reset` | ❌ | `true` 时，**进入**本步骤前换入一个全新的上下文会话（见[上下文重置门](#上下文重置门reset)） |
 
-> ⚠️ **上面每个字段都是逐步骤必填的。** 缺任何一个的步骤会被**静默丢弃**，其余工作流照常运行。绝不要省略 `input`/`output`。`/ralphflow-doctor` 会报告每个被丢弃的步骤。`check` 与 `check_voting` 互斥——同写是**硬错误**（工作流无法加载），两者都缺的步骤被跳过。
+> **必填的是** `id`、`desc`、`do`、`input`、`output`、`on_pass`、`on_fail`、`max_fail_count`——缺任何一个的步骤会被**静默丢弃**，其余工作流照常运行。`/ralphflow-doctor` 会报告每个被丢弃的步骤。
+>
+> `check` 和 `check_voting` **都**是可选的（v2.9.0 起），两者**互斥**——同写是**硬错误**（工作流无法加载）；把 `check` 写成非字符串（如 `check: true`）同样硬错，因为那不是"我要跳过"，而是配置写错了。
 
 ### 子工作流步骤
 
-步骤可以用 `workflow:` 代替 `do`/`check` 调用另一个工作流：
+步骤可以用 `workflow:` 代替 `do` 委托给另一个工作流（子工作流步骤不配 `check`）：
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
@@ -214,7 +216,7 @@ adversarial_check:
 
 ### `check_voting` —— 多验证者投票（2.8.0 新增）
 
-步骤级**多验证者并行验证**：N 个独立验证会话同时检查，每个验证者查一条自己的检查依据（可配不同模型），**全过才放行**。与 `check` **互斥**（二选一，同写 → doctor 硬错）。
+步骤级**多验证者并行验证**：N 个独立验证会话同时检查，每个验证者查一条自己的检查依据（可配不同模型），**全过才放行**。与 `check` **互斥**（同写 → doctor 硬错）；与 `check` 都不写则跳过对抗验证（见[跳过对抗验证](#跳过对抗验证)）。
 
 ```yaml
 steps:
@@ -239,7 +241,7 @@ steps:
 | 字段 | 必填 | 说明 |
 |------|------|------|
 | `check` | ✅ | 该验证者独立的检查依据（只查这一条） |
-| `model` | ❌ | 该票专用模型；不填走 `check_model` → `adversarial_check.model` → 默认链 |
+| `model` | ❌ | 该票专用模型；不填继承全局 `adversarial_check.model`（含子工作流继承链），再往后是默认模型链 |
 | `timeout_ms` | ❌ | 该票超时；不填继承 `adversarial_check.timeout_ms` |
 | `system_prompt` | ❌ | 该票系统提示覆盖；不填用全局验证者系统提示 |
 
@@ -269,6 +271,32 @@ steps:
 ```
 
 **模型优先级链**（从强到弱）：`check_voting` 条目 `model` > 步骤 `check_model` > 全局 `adversarial_check.model`（含子工作流继承）> agent 配置 > owner session 当前模型 > opencode 全局默认。
+
+### 跳过对抗验证
+
+`check` 和 `check_voting` 都是可选的。都不写时，DO 完成（输出 `<promise>done</promise>`）后**直接按 `on_pass` 推进**，不创建验证会话。DO 提示词会注明"本步骤不配置对抗性检查：完成即可，不会有独立的验证进程来复核"，通过头显示"跳过对抗性验证"，不会伪造"检查通过"。
+
+```yaml
+steps:
+  - id: docs
+    desc: 更新文档
+    do: 把新字段写进 README 和 API 文档。
+    input: 本次变更内容
+    output: 更新后的文档
+    on_pass: done
+    on_fail: docs
+    max_fail_count: 3
+```
+
+什么情况下适合不写 check：
+
+- 纯编排、文档整理这类不需要独立复核的步骤；
+- `manual_step` 人工审查门**默认**就相当于跳过对抗验证——你审过即通过；只有在该步骤显式写了 `check` 时才两者叠加。
+
+注意两点（doctor 会提醒）：
+
+- **`manual_step` 之外**的步骤不写 check 会收到 doctor 警告——防止"忘了写 check"被当成"故意跳过"。如果你确实想跳过，忽略该警告即可。
+- 把 `check` 写成非字符串（如 `check: true`）、或写了 `check_model` 却没写 check，都是**硬错误**（工作流无法加载）——这些更像笔误，不是刻意的跳过。
 
 ### 子工作流里的继承
 
@@ -388,10 +416,21 @@ full-dev.yaml
 
 ### 重置时发生什么
 
-1. 创建**新的顶级会话**（`/session` 列表可见，标题 `🔄 工作流名 · 步骤`），TUI 自动跳转过去；
+1. 创建**新的顶级会话**（`/session` 列表可见，标题 `🔄 工作流名 · 步骤`）；
 2. 旧会话正在进行的回合被中止（防止新旧会话同时改工作区），历史完整保留，随时可切回查看；
 3. 新会话的第一条注入带**会话交接说明**（为什么接手、步骤进度、产出目录、done 约定）+ 完整 DO 提示——之前步骤的产出都在项目和 artifacts 目录里，模型直接读取，不重做；
 4. 工作流状态（当前步骤、`fail_count`、失败原因）原样延续，模型跟随旧会话当前使用的模型。
+
+**交接载体由工作流级 `isNewOpen` 决定**（v2.10.0，缺省 `false`）：
+
+- `false`（默认）：应用内换会话 + TUI 跳转，不物理开窗——与 2.9.x 行为一致。
+- `true`：物理**新开一个终端窗口**，窗口内 `opencode --session <新会话id>` attach 新会话，旧窗口保留可回看。开窗失败（headless / 无终端环境）自动降级为应用内跳转（`tui.session.select`），工作流不断。
+
+```yaml
+isNewOpen: true   # 工作流级，可选，缺省 false。reset 时物理新开窗口交接
+```
+
+设计细节见 [reset 新窗口化设计](reset-window-design.md)。
 
 > 首步标 `reset` 时启动不触发（启动时本来就是新会话），但**每次失败重试（`on_fail` 回本步）与后续步骤 `on_fail` 回首步都会触发**——单步骤 loop 任务会频繁重置，token 成本较高（自定义工作流 doctor 会提示成本；插件内置的 `loop` 工作流默认就标了 `reset`，跳过该提示）。
 

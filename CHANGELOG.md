@@ -2,6 +2,18 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 2.10.0 (2026-08-30)
+
+### 新增
+- **reset 新窗口化（`workflow.isNewOpen`）**：reset（手动 / 自动门 / 失败重试）达成"上下文重置"的载体可配置，与 `reset` / `auto_reset` 正交。
+  - 缺省 `false`（不交接）：保持现状——应用内换会话 + 跳转，与 2.9.x 行为一致（默认不物理开窗）。
+  - `true`（交接）：opencode 物理**新开终端窗口**，窗口内 `opencode --session <新会话>` attach reset 创建的空会话继续干活，旧窗口保留可回看；开窗失败（headless / 无终端）自动降级为应用内 `tui.session.select` 跳转，工作流不断。
+  - 与 Claude Code 版统一语义：Claude 端 `true`=开新窗口 `claude --resume` 交接、`false`=当前会话 compact 代替；Claude 端作为内部另一仓库交接实施。设计文档见 `docs/reset-window-design.md`。
+- **跨平台开窗模块 `src/window.ts`**：argv 直接透传不经 shell 解析（新窗口默认 shell 无关）；win32 优先 `wt.exe` 后 `cmd start` 兜底，macOS `open -a Terminal` + 临时 `#!/bin/sh` 脚本，Linux 终端探测表（x-terminal-emulator/gnome-terminal/konsole/xfce4-terminal/xterm）；任何失败返回 `ok:false` 不抛异常。
+
+### 测试
+- 新增 `window.test.ts`（9 断言：平台探测表 + argv 透传 + headless 降级 + 脚本内容）+ driver 4 条 isNewOpen 分支（默认不开窗 / 显式 true 开窗成功 / false 不开窗 / true 开窗失败降级）；engine 4 条解析/校验。全量 14 文件 / 260 断言绿。
+
 ## 2.9.0 (2026-08-20)
 
 ### 新增

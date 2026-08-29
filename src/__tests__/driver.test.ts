@@ -6,6 +6,20 @@ import { createEngine, type Platform, type Engine, RALPH_CHECK_AGENT_PERMISSION,
 import { detectDoneTag, stripCodeBlocks, handleSessionIdle, __resetDrivingSessions } from "../driver.js";
 import { createTools } from "../tools.js";
 
+// Mock the terminal-window spawner: tests control whether the physical window
+// "opens" (ok:true) or degrades (ok:false → in-app TUI navigation). Default
+// false so existing assertions (and CI without DISPLAY) stay on the fallback.
+vi.mock("../window.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../window.js")>();
+  return { ...actual, spawnTerminalWindow: vi.fn() };
+});
+import { spawnTerminalWindow } from "../window.js";
+
+beforeEach(() => {
+  (spawnTerminalWindow as any).mockReset();
+  (spawnTerminalWindow as any).mockResolvedValue({ ok: false });
+});
+
 // ─── Verifier permissions: edit hard-deny + bash open + prompt discipline ─────
 
 describe("ralph-check verifier permissions", () => {
@@ -795,6 +809,77 @@ steps:
     expect(injected.some((m) => m.sessionId === "sess-1" && m.text.includes("上下文已重置") && m.noReply)).toBe(true);
     const newMsgs = injected.filter((m) => m.sessionId === st.session_id);
     expect(newMsgs.some((m) => m.text.includes("检查结果：通过") && m.text.includes("review"))).toBe(true);
+  });
+
+  it("isNewOpen unset (default false): no window, in-app navigation (2.9.x behavior)", async () => {
+    checkVerdict = "true";
+    const instId = startInstanceInStep("build");
+    lastAssistantText = "did the work\n<promise>done</promise>";
+    await handleSessionIdle(makeClientWithSessionCreate(), engine, "sess-1");
+
+    // Default is the pre-2.10 behavior: no physical window, in-app navigation.
+    expect(spawnTerminalWindow).not.toHaveBeenCalled();
+    expect(tuiPublished.some((p) => p.body?.type === "tui.session.select")).toBe(true);
+
+    // Farewell keeps the in-app wording (no window mention).
+    const oldMsgs = injected.filter((i) => i.sessionId === "sess-1");
+    expect(oldMsgs.some((m) => m.text.includes("已在新窗口打开"))).toBe(false);
+  });
+
+  it("isNewOpen: true explicitly → opens window with --session, no in-app nav on success", async () => {
+    const wfDir = path.join(tmpDir, ".opencode", "ralph-flow", "workflows");
+    fs.writeFileSync(path.join(wfDir, "wf.yaml"), "isNewOpen: true\n" + WF_RESET);
+    checkVerdict = "true";
+    (spawnTerminalWindow as any).mockResolvedValue({ ok: true });
+    const instId = startInstanceInStep("build");
+    lastAssistantText = "did the work\n<promise>done</promise>";
+    await handleSessionIdle(makeClientWithSessionCreate(), engine, "sess-1");
+
+    const st = engine.readState(instId)!;
+    expect(spawnTerminalWindow).toHaveBeenCalledTimes(1);
+    const [cmd, args, opts] = (spawnTerminalWindow as any).mock.calls[0];
+    expect(cmd).toBe("opencode");
+    expect(args).toEqual(["--session", st.session_id]);
+    expect(opts.cwd).toBe(tmpDir);
+    expect(opts.title).toContain("🔄");
+
+    // Window opened → the in-app navigation is skipped (user already in the new window).
+    expect(tuiPublished.some((p) => p.body?.type === "tui.session.select")).toBe(false);
+
+    // Farewell tells the user a new window was opened and the old one is kept.
+    const oldMsgs = injected.filter((i) => i.sessionId === "sess-1");
+    expect(oldMsgs.some((m) => m.text.includes("已在新窗口打开") && m.noReply)).toBe(true);
+  });
+
+  it("isNewOpen: false → no window, in-app navigation (current behavior)", async () => {
+    const wfDir = path.join(tmpDir, ".opencode", "ralph-flow", "workflows");
+    fs.writeFileSync(path.join(wfDir, "wf.yaml"), "isNewOpen: false\n" + WF_RESET);
+    checkVerdict = "true";
+    const instId = startInstanceInStep("build");
+    lastAssistantText = "did the work\n<promise>done</promise>";
+    await handleSessionIdle(makeClientWithSessionCreate(), engine, "sess-1");
+
+    expect(spawnTerminalWindow).not.toHaveBeenCalled();
+    expect(tuiPublished.some((p) => p.body?.type === "tui.session.select")).toBe(true);
+    // Farewell keeps the in-app wording (no window mention).
+    const oldMsgs = injected.filter((i) => i.sessionId === "sess-1");
+    expect(oldMsgs.some((m) => m.text.includes("已在新窗口打开"))).toBe(false);
+  });
+
+  it("isNewOpen: true but window spawn fails → degrades to in-app navigation", async () => {
+    const wfDir = path.join(tmpDir, ".opencode", "ralph-flow", "workflows");
+    fs.writeFileSync(path.join(wfDir, "wf.yaml"), "isNewOpen: true\n" + WF_RESET);
+    checkVerdict = "true";
+    (spawnTerminalWindow as any).mockResolvedValue({ ok: false, error: "headless 环境，无窗口可开" });
+    const instId = startInstanceInStep("build");
+    lastAssistantText = "did the work\n<promise>done</promise>";
+    await handleSessionIdle(makeClientWithSessionCreate(), engine, "sess-1");
+
+    expect(spawnTerminalWindow).toHaveBeenCalledTimes(1);
+    // Fallback keeps the workflow alive: in-app navigation still happens.
+    expect(tuiPublished.some((p) => p.body?.type === "tui.session.select")).toBe(true);
+    const oldMsgs = injected.filter((i) => i.sessionId === "sess-1");
+    expect(oldMsgs.some((m) => m.text.includes("上下文已重置") && m.noReply)).toBe(true);
   });
 
   it("ralphflow_reset swaps the context container but keeps fail_count (no amnesty)", async () => {

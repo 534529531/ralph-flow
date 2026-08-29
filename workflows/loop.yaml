@@ -1,5 +1,6 @@
 description: 单步对抗验证循环：实现与验证在同一环节内迭代，直到通过
 
+# 单步轻量循环：失败重试频繁，reset 用默认载体（应用内换会话），不物理开新窗口
 adversarial_check:
   # model: anthropic/claude-sonnet-4-5  # 可选：验证模型（"provider/model" 或 {providerID, modelID}）；不填则用 ralph-check agent 默认模型
   timeout_ms: 3600000  # 60 分钟（上限）

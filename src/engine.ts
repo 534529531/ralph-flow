@@ -81,6 +81,13 @@ export interface WorkflowDef {
   steps: StepDef[];
   adversarial_check?: AdversarialCheckConfig;
   auto_reset?: boolean;
+  /**
+   * reset 触发时用哪种载体达成"上下文重置"。缺省 false（不交接：opencode 保持应用内
+   * 换会话 + 跳转，与 2.9.x 行为一致）。true = 交接：opencode 物理开新窗口
+   * `opencode --session <新会话>` attach 新会话，Claude 版开新窗口 `claude --resume`。
+   * 与 reset/auto_reset 正交。
+   */
+  isNewOpen?: boolean;
 }
 
 export interface RalphFlowState {
@@ -965,6 +972,12 @@ export function createEngine(projectDir: string, platform: Platform) {
         parsed.auto_reset !== undefined ? (problem("'auto_reset' 必须为 boolean（true/false）"), false) : false
       );
 
+      // isNewOpen: boolean，缺省 false（不交接，保持 2.9.x 应用内换会话行为）。
+      // 非 boolean → 校验错误，与其他字段同级。
+      const isNewOpen: boolean | undefined = typeof parsed.isNewOpen === "boolean" ? parsed.isNewOpen : (
+        parsed.isNewOpen !== undefined ? (problem("'isNewOpen' 必须为 boolean（true/false）"), undefined) : undefined
+      );
+
       const manual_step: string[] = Array.isArray(parsed.manual_step)
         ? parsed.manual_step.filter((s: any) => typeof s === "string" && s.trim()).map((s: string) => s.trim())
         : typeof parsed.manual_step === "string"
@@ -1030,6 +1043,7 @@ export function createEngine(projectDir: string, platform: Platform) {
         steps: validSteps,
         adversarial_check,
         auto_reset,
+        isNewOpen,
       };
     } catch (e: any) {
       diag(`[ralph-flow] Error parsing workflow ${filePath}:`, e.message);

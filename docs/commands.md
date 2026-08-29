@@ -121,7 +121,7 @@
 |------|------|
 | `step_start` | 某步骤阶段开始 |
 | `done_detected` | 检测到 `<promise>done</promise>` |
-| `adversarial_check_start` / `_result` / `_timeout` | 独立验证生命周期 |
+| `adversarial_check_start` / `_result` / `_timeout` / `_error` | 独立验证生命周期 |
 | `adversarial_check_request_failed` | 验证请求被服务端拒绝（如模型不存在/未授权），`error` 字段带真实原因 |
 | `fail_count_increment` | 某步骤失败计数增加 |
 | `sub_workflow_end` | 子工作流完成 |
@@ -179,6 +179,7 @@ tail -10 .opencode/ralph-flow/instances/<id>/logs/execution.log
 | `.manual-step-active` / `.manual-gate` | 手动审查门标记 |
 | `.done-tag-detected` | DO 已完成，等待 `ralphflow_continue` |
 | `.do-prompt-cache` | 当前 DO 提示词（保活时重新注入） |
-| `.adversarial-session` | 运行中的验证会话 id |
+| `.adversarial-session` | 运行中的验证会话 id（多验证者时为 JSON 数组） |
+| `.check-voting-progress.json` | 多验证者投票进度（每票 pending/running/passed/failed/infra...，供 status/continue/重启读取） |
 | `logs/execution.log` | JSON Lines 事件日志 |
 | `logs/step-records.json` | 逐步骤记录，用于生成最终报告 |

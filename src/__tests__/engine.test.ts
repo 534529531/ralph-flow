@@ -623,6 +623,32 @@ steps:
     expect(wf.auto_reset).toBe(true);
   });
 
+  it("parseWorkflowFile accepts isNewOpen: false and passthrough", () => {
+    writeProjectWorkflow("good-newopen", `isNewOpen: false\n${SIMPLE_WF}`);
+    const wf = engine.loadWorkflow("good-newopen")!;
+    expect(wf.isNewOpen).toBe(false);
+  });
+
+  it("parseWorkflowFile accepts isNewOpen: true", () => {
+    writeProjectWorkflow("good-newopen-true", `isNewOpen: true\n${SIMPLE_WF}`);
+    const wf = engine.loadWorkflow("good-newopen-true")!;
+    expect(wf.isNewOpen).toBe(true);
+  });
+
+  it("parseWorkflowFile leaves isNewOpen undefined when unset (runtime defaults to false)", () => {
+    writeProjectWorkflow("good-newopen-unset", SIMPLE_WF);
+    const wf = engine.loadWorkflow("good-newopen-unset")!;
+    expect(wf.isNewOpen).toBeUndefined();
+  });
+
+  it("parseWorkflowFile rejects non-boolean isNewOpen", () => {
+    writeProjectWorkflow("bad-newopen", `isNewOpen: "yes"\n${SIMPLE_WF}`);
+    const problems: string[] = [];
+    const wf = engine.loadWorkflow("bad-newopen", problems);
+    expect(wf).not.toBeNull();
+    expect(problems.some((p) => p.includes("isNewOpen") && p.includes("boolean"))).toBe(true);
+  });
+
   it("lintWorkflow warns about reset on first step", () => {
     writeProjectWorkflow("rwf", SIMPLE_WF.replace("desc: first step", "desc: first step\n    reset: true"));
     const wf = engine.loadWorkflow("rwf")!;

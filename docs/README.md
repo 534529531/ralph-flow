@@ -15,7 +15,7 @@
 | [创建设计一个工作流](custom-workflows.md#快速示例) | ✅ | YAML 从零到一，附示例 |
 | [产出目录与模板变量](custom-workflows.md#产出目录与模板变量) | ✅ | 交付物放哪、唯一模板记号 |
 | [人工审查门](custom-workflows.md#manual_step) | ✅ | 在验证前停下来让你审查 |
-| [上下文重置门（reset）](custom-workflows.md#上下文重置门reset) | | 步骤级 `reset`、工作流级 `auto_reset`、手动 `/ralphflow-reset` |
+| [上下文重置门（reset）](custom-workflows.md#上下文重置门reset) | | 步骤级 `reset`、工作流级 `auto_reset`、手动 `/ralphflow-reset`、`isNewOpen` 交接载体 |
 | [中途回退（rewind）](custom-workflows.md#中途回退rewind) | | 倒退到上游已通过步骤重做 |
 | [子工作流与嵌套](custom-workflows.md#工作流嵌套) | | 组合可复用工作流组件，含输入传递 |
 | [对抗性验证配置](custom-workflows.md#adversarial_check) | | 配置验证者的 agent、模型、超时 |
@@ -27,6 +27,7 @@
 | [工作原理](how-it-works.md) | 架构：DO/CHECK 循环、独立验证、多实例模型、会话事件、文件结构 |
 | [命令参考](commands.md) | 命令表、使用示例、工具 API、日志事件、实例与报告格式 |
 | [重置门与回退设计](reset-gate-design.md) | 技术方案：触发规则、abort 顺序、parentID 决策、会话交接简报 |
+| [reset 新窗口化设计](reset-window-design.md) | `isNewOpen` 交接载体设计：开窗模块、降级、跨平台实现 |
 | [SYNC.md](../SYNC.md) | 与 Claude Code 姊妹插件的结构映射与镜像约束 |
 
 ## 进阶：场景速查

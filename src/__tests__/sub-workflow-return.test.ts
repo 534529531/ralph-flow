@@ -1,10 +1,17 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "fs";
 import path from "path";
 import os from "os";
 import { createEngine, type Platform, type Engine } from "../engine.js";
 import { handleSessionIdle, __resetDrivingSessions } from "../driver.js";
 import { createTools } from "../tools.js";
+
+// Reset-gate tests hit executeContextReset → the terminal-window spawner.
+// Mock it so tests run headless everywhere (default: spawn fails → in-app fallback).
+vi.mock("../window.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../window.js")>();
+  return { ...actual, spawnTerminalWindow: vi.fn(async () => ({ ok: false, error: "test" })) };
+});
 
 // 用户反馈：子工作流完成了回不到父工作流。
 // 本测试端到端验证：父(stepA → nest(child) → stepC) → 子(sub1 → sub2)，
