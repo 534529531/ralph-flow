@@ -124,7 +124,7 @@ steps:
 | A pass → B（B 标 reset） | 跨步骤 | ✅ | 正常前进 |
 | 进入子工作流步骤 S（S 标 reset） | 跨步骤 | ✅ | push 子工作流栈之前换会话 |
 | max_failures 暂停 → continue 恢复重试 | 同步骤 | ❌ | **关键**：暂停期间用户在会话里的指导是有价值上下文，绝不能自动重置；想干净重试用 `/ralphflow-reset` 手动 |
-| manual gate 审查通过 → CHECK → 下一步（标 reset） | 跨步骤 | ✅ | 审查发生在旧会话，CHECK 是独立会话（不受影响），通过后进新会话 |
+| manual gate：CHECK 通过 → 审查 → 放行 → 下一步（标 reset） | 跨步骤 | ✅ | CHECK 是独立会话（不受影响），审查在旧会话，放行后进新会话 |
 | check_error 暂停 → continue 重跑验证 | 无步骤转换 | ❌ | 仅重跑 CHECK |
 
 ### 4.2 实现落点：全部在注入层，engine 状态机零改动
@@ -311,7 +311,7 @@ ralphflow_reset 执行：
 5. 失败+on_fail 回本步（标 reset）→ **创建**新会话，重试提示（含失败原因）注入新会话
    （v2.7.2 起：同步骤重试也触发；旧行为=不创建，轻量步骤未标 reset 时保持）
 6. 失败+on_fail 回炉他步（标 reset）→ 创建新会话，重试提示（含失败原因）注入新会话
-7. manual gate：审查通过 → CHECK → 通过 → 目标标 reset → 重置发生（告别进旧会话）
+7. manual gate：CHECK 通过 → 审查 → 放行 → 目标标 reset → 重置发生（告别进旧会话）
 8. continue 恢复 max_failures（同步骤）→ 不重置
 9. 子工作流入口步骤标 reset → push 前换会话
 10. `ralphflow_reset`：do 阶段中途 → 新会话收到缓存 DO 提示+失败原因，fail_count 不变；

@@ -19,8 +19,9 @@
 
 import fs from "fs";
 import path from "path";
-import type { Engine, WorkflowDef, NormalStepDef, RalphFlowState, CheckResult } from "./engine.js";
-import { isSubWorkflowStep, MANUAL_GATE_MARKER, DONE_TAG_MARKER, REINJECT_WARNED_MARKER, MAX_DO_REINJECT, DEFAULT_ADVERSARIAL_TIMEOUT_MS, shouldResetOnTransition } from "./engine.js";
+import { createHash } from "node:crypto";
+import type { Engine, WorkflowDef, NormalStepDef, RalphFlowState, CheckResult, TransitionResult } from "./engine.js";
+import { isSubWorkflowStep, MANUAL_GATE_MARKER, MANUAL_GATE_APPROVED_MARKER, MANUAL_GATE_LAST_MARKER, DONE_TAG_MARKER, REINJECT_WARNED_MARKER, MAX_DO_REINJECT, DEFAULT_ADVERSARIAL_TIMEOUT_MS, shouldResetOnTransition } from "./engine.js";
 import { adversarialCheck, readOwnerSessionModel } from "./check.js";
 import { runVotingCheck } from "./check-voting.js";
 import { readVotingProgress, deleteVotingProgress } from "./voting-progress.js";
@@ -73,6 +74,14 @@ function removeFile(filePath: string): void {
 
 function fileExists(filePath: string): boolean {
   try { fs.accessSync(filePath); return true; } catch { return false; }
+}
+
+// Short stable digest of a model message. Used to tell apart the "old done" that
+// armed a manual review gate from a "new done" the model emits after the user
+// asked for changes — without this, an idle would re-check the already-approved
+// step forever (every idle sees the same old done tag).
+function digest(text: string): string {
+  return createHash("sha256").update(text).digest("hex").slice(0, 16);
 }
 
 // ─── Prompt injection (replaces hook JSON output) ────────────────────────────
@@ -194,6 +203,16 @@ export async function executeContextReset(
     }
 
     engine.claimOwnership(instId, newSessionId);
+
+    // 换会话即"改头换面"：清掉所有旧会话语境下的实例级 marker（审查门、
+    // done 标记、批准标记、催促计数），否则旧 marker 会跟着进新会话干扰新
+    // 上下文的驱动（例如在审查门布防期间 reset，残留 gate 会让新会话 DO
+    // 阶段被静默）。rewind 等调用方在进入前也清过，这里统一兜底。
+    engine.clearManualStepMarker(instId);
+    engine.clearManualGate(instId);
+    engine.clearManualGateApproved(instId);
+    engine.clearDoneTagDetected(instId);
+    engine.clearReinjectCounter(instId);
 
     // Stop the old session's in-flight turn. Ownership moved above, so the old
     // session would no longer be DRIVEN on idle — but a turn already running
@@ -317,6 +336,7 @@ export async function runCheckAndAdvance(
   }
   engine.clearManualStepMarker(instId);
   engine.clearManualGate(instId);
+  engine.clearManualGateApproved(instId);
   engine.clearReinjectCounter(instId);
   engine.clearDoPromptCache(instId);
   engine.clearDoneTagDetected(instId);
@@ -450,10 +470,49 @@ export async function runCheckAndAdvance(
   }
 
   engine.addStepRecord(instId, cur.current_step, "check", checkResult.passed ? "passed" : "failed", cur.fail_count || 0, checkResult.reason, cur.workflow_name);
+
+  // 人工审查门：CHECK 通过后停下，请用户对"已验证的产物"定方向。审查门不再
+  // 位于 CHECK 之前——旧的"先审后验"会把用户卷进质量循环（check 失败 → 重试
+  // → 又停下等你 → 再 check → 再失败……反复打扰）。现在 check 失败只走
+  // on_fail 自动重试，只有 check 通过才停下请你审查；你有意见就让模型改，
+  // 改完自动重新验证，通过后再回到这里。
+  if (checkResult.passed && workflow.manual_step?.includes(cur.current_step) && !isSubWorkflowStep(step)) {
+    engine.clearManualStepMarker(instId);
+    engine.clearManualGate(instId);
+    engine.writeManualStepMarker(instId);
+    engine.writeMarker(MANUAL_GATE_MARKER, Date.now().toString(), instId);
+    // 停在当前步骤等待批准（fail_count 保留作历史记录；approved 放行时清零）。
+    engine.writeState({ ...cur, current_phase: "do" }, instId);
+    const { text: lastOutput } = await getLastAssistantMessage(client, sessionId);
+    engine.writeManualGateLast(instId, digest(lastOutput));
+    const skipped = (checkResult as { skipped?: boolean }).skipped === true;
+    engine.logEvent(instId, "info", "manual_gate_armed", { workflow: cur.workflow_name, step: cur.current_step, skipped });
+    await injectPrompt(client, sessionId, buildManualReviewPrompt(engine, cur.current_step, skipped), true);
+    return;
+  }
+
   const result = checkResult.passed
     ? engine.handleCheckPassed(instId, cur, workflow, step, checkResult)
     : engine.handleCheckFailed(instId, cur, workflow, step, checkResult);
+  await applyAdvanceResult(client, engine, sessionId, instId, workflow, cur, result);
+}
 
+// ─── Apply a transition result (shared by auto-advance & manual-gate approval) ─
+
+/**
+ * 应用一次"转换结果"：清理下一个 DO 阶段的 marker、按 reset/auto_reset 判定
+ * 是否需要换会话、最后注入转换文本（完成/暂停为 noReply，前进则驱动模型）。
+ * runCheckAndAdvance（auto 路径）与人工审查门批准放行（approved 路径）共用。
+ */
+async function applyAdvanceResult(
+  client: Client,
+  engine: Engine,
+  sessionId: string,
+  instId: string,
+  workflow: WorkflowDef,
+  state: RalphFlowState,
+  result: TransitionResult
+): Promise<void> {
   // Set up the next DO phase markers before injecting the transition text
   // (handleCheckPassed/Failed already updated the state and cached the DO prompt).
   if (!result.completed && !result.paused) {
@@ -509,6 +568,15 @@ export async function runCheckAndAdvance(
     }
   }
   await injectPrompt(client, sessionId, result.text, result.completed || result.paused);
+}
+
+// ─── Manual review gate prompt (CHECK passed → stop for the user) ─────────────
+
+function buildManualReviewPrompt(engine: Engine, stepId: string, skipped: boolean): string {
+  const head = skipped
+    ? `## 🙋 轮到你审查\n\n手动步骤 \`${stepId}\` 已完成（本步骤未配置对抗性检查，**你的审查即最终验证**）。现在停下等你：`
+    : `## 🙋 轮到你审查\n\n手动步骤 \`${stepId}\` 已完成**并通过自动验证**。现在停下等你定方向：`;
+  return `${head}\n\n- ✅ **满意** → 运行 \`/ralphflow-continue\`，放行进入下一步\n- ✏️ **要改** → 直接说要改什么，模型会修改；改完会自动重新验证，通过后再回来请你审查\n- 🗑️ **放弃** → 运行 \`/ralphflow-cancel\`\n\n在你决定前，工作流会一直停在这里，你可以放心地跟模型来回讨论。`;
 }
 
 // ─── Extract last assistant message (mirror of the hook's transcript read) ───
@@ -592,6 +660,7 @@ export async function handleSessionIdle(
     const reinjectWarnedFile = path.join(instDir, REINJECT_WARNED_MARKER);
     const manualStepMarker = path.join(instDir, ".manual-step-active");
     const manualGateMarker = path.join(instDir, MANUAL_GATE_MARKER);
+    const manualGateApprovedFile = path.join(instDir, MANUAL_GATE_APPROVED_MARKER);
     const doneTagDetectedFile = path.join(instDir, DONE_TAG_MARKER);
     const postToolMarker = path.join(instDir, ".post-tool-active");
 
@@ -630,6 +699,31 @@ export async function handleSessionIdle(
     if (!freshState || !freshState.active || freshState.paused) return;
 
     const hasDoneTag = lastOutput ? detectDoneTag(lastOutput) : false;
+
+    // ── Manual review gate approved → advance the already-verified step ───────
+    // 用户 /ralphflow-continue 批准了审查门（工具只写批准标记）。CHECK 已在
+    // 门布防前通过，这里执行放行——不重复验证，直接按 on_pass 前进（含 reset
+    // 判定）。放在 Case 1 之前：continue 后模型通常没有新输出，旧 done 必须
+    // 让位于批准标记，否则会永远卡在"旧 done 静默"里。
+    if (fileExists(manualGateApprovedFile)) {
+      const approvedStep = readTextFile(manualGateApprovedFile);
+      removeFile(manualGateApprovedFile);
+      engine.clearManualGateApproved(mine.id);
+      // 残留标记（步骤不匹配）→ 作废，不误放行：pause/恢复/接管/重做后旧的
+      // 批准已失效，走正常逻辑（会自然清理）。
+      if (approvedStep !== stateStep) return;
+      engine.clearManualStepMarker(mine.id);
+      engine.clearManualGate(mine.id);
+      engine.logEvent(mine.id, "info", "manual_gate_approved", { step: stateStep });
+      if (currentStep && !isSubWorkflowStep(currentStep)) {
+        const result = engine.handleCheckPassed(mine.id, state, workflow!, currentStep as NormalStepDef, {
+          reason: "你已批准该步骤，工作流继续推进。",
+          fromManualGate: true,
+        });
+        await applyAdvanceResult(client, engine, sessionId, mine.id, workflow!, state, result);
+      }
+      return;
+    }
 
     // ── Reinjection counter helpers ──────────────────────────────────────────
     const reinjectKey = `${stateStep}:${statePhase}`;
@@ -675,20 +769,22 @@ export async function handleSessionIdle(
       removeFile(reinjectFile);
       writeFileSafe(doneTagDetectedFile, Date.now().toString());
 
-      // Manual step: the review gate sits BEFORE the check. Do NOT run the
-      // check — stop so the USER can review. Their /ralphflow-continue is the
-      // approval that starts verification.
-      if (fileExists(manualStepMarker)) {
-        writeFileSafe(manualGateMarker, Date.now().toString());
-        await injectPrompt(client, sessionId,
-          `## 🙋 轮到你审查\n\n手动步骤 \`${stateStep}\` 已完成，**现在停下等你**——你有三个选择：\n\n- ✅ **满意** → 运行 \`/ralphflow-continue\`，进入独立验证并继续\n- ✏️ **要改** → 直接在对话里说要改什么，模型会修改，改完再次提示你审查\n- 🗑️ **放弃** → 运行 \`/ralphflow-cancel\`\n\n在你做出选择前，工作流会一直停在这里，你可以放心地跟模型来回讨论。`,
-          true);
-        return;
+      // Manual review gate armed (CHECK already passed): the model's last message
+      // is the SAME done that armed the gate → the user is still reviewing, stay
+      // silent (they chat freely; only /ralphflow-continue releases the gate).
+      // A DIFFERENT done means the user asked for changes and the model just
+      // finished redoing the step → clear the gate and re-verify; the next CHECK
+      // pass re-arms the gate. This is what keeps the user OUT of the quality
+      // loop: check failures retry automatically, only passes pause for review.
+      if (fileExists(manualGateMarker)) {
+        if (engine.readManualGateLast(mine.id) === digest(lastOutput)) return;
+        engine.clearManualGate(mine.id);
+        engine.clearManualStepMarker(mine.id);
       }
 
-      // Normal step: run the independent check automatically (idle-driven),
-      // injecting the visible CHECK-phase and result messages. The model does
-      // not need to call any tool.
+      // Manual steps check FIRST — the review gate sits after the CHECK pass, so
+      // a done tag runs the same automatic verification as normal steps. The
+      // model does not need to call any tool.
       if (currentStep && !isSubWorkflowStep(currentStep)) {
         await runCheckAndAdvance(client, engine, sessionId, mine.id, workflow!, currentStep as NormalStepDef, state);
       }

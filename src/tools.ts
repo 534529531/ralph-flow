@@ -10,8 +10,9 @@
  * the instance's state.json. `context.sessionID` identifies the caller.
  *
  * Check is NOT run from any tool — the driver runs it automatically on idle
- * for normal steps and for manual steps whose gate was just approved.
- * ralphflow_continue is pure state management (approve gate / resume / attach).
+ * for every step (manual steps too: the review gate now sits AFTER the check
+ * pass). ralphflow_continue is pure state management (release a review gate /
+ * resume / attach).
  */
 
 import fs from "fs";
@@ -19,7 +20,7 @@ import path from "path";
 import os from "os";
 import { tool } from "@opencode-ai/plugin";
 import type { Engine } from "./engine.js";
-import { isSubWorkflowStep, MAX_NESTING_DEPTH, MAX_DO_REINJECT, MANUAL_GATE_MARKER, DONE_TAG_MARKER, type NormalStepDef, type RalphFlowState } from "./engine.js";
+import { isSubWorkflowStep, MAX_NESTING_DEPTH, MAX_DO_REINJECT, MANUAL_GATE_MARKER, MANUAL_GATE_APPROVED_MARKER, DONE_TAG_MARKER, type NormalStepDef, type RalphFlowState } from "./engine.js";
 import { hasActiveCheck } from "./check.js";
 import { executeContextReset } from "./driver.js";
 import { deleteVotingProgress, readVotingProgress } from "./voting-progress.js";
@@ -225,15 +226,20 @@ export function createTools(engine: Engine, client: Client) {
         }
       }
 
-      // 2. manual gate: the user approves the work. Clear the gate so the
-      //    next idle auto-runs the check (same path as normal steps). Do NOT
-      //    touch the done-tag marker — the original detected-done idle wrote
-      //    it, and Case 2 needs it to trigger check on the next idle.
+      // 2. manual gate: the user approves the (already CHECK-passed) work.
+      //    CHECK ran BEFORE the gate now — the gate only arms after a pass — so
+      //    approving is a RELEASE, not a "start the check". Write the approved
+      //    marker; the driver's next idle advances the step (on_pass), honoring
+      //    reset gates. Leave the done-tag marker alone — the driver clears it
+      //    as part of advancing.
       if (engine.markerExists(MANUAL_GATE_MARKER, instId)) {
         engine.clearManualStepMarker(instId);
         engine.clearManualGate(instId);
+        // 记录批准的步骤 id：driver 侧校验一致才放行，避免残留标记在错误的
+        // 步骤上误触发（pause/恢复/接管/重做后旧批准必须作废）。
+        engine.writeMarker(MANUAL_GATE_APPROVED_MARKER, state.current_step, instId);
         engine.logEvent(instId, "info", "manual_gate_approved", { step: state.current_step });
-        return `## ✅ 审查通过\n\n步骤 \`${state.current_step}\` 已批准。空闲时将自动运行独立验证。`;
+        return `## ✅ 审查通过\n\n步骤 \`${state.current_step}\` 已通过验证并获得你批准。即将放行进入下一步。`;
       }
 
       // 3. Paused (max_failures / config_error / session_*): reset fail_count
@@ -244,6 +250,7 @@ export function createTools(engine: Engine, client: Client) {
         engine.clearReinjectCounter(instId);
         engine.clearDoneTagDetected(instId);
         engine.clearManualGate(instId);
+        engine.clearManualGateApproved(instId);
         engine.writeState({ ...state, current_phase: "do", paused: false, pause_reason: undefined, fail_count: 0 }, instId);
         engine.logEvent(instId, "info", "workflow_resumed", { workflow: state.workflow_name, step: state.current_step });
 
@@ -305,6 +312,7 @@ export function createTools(engine: Engine, client: Client) {
           engine.clearReinjectCounter(instId);
           engine.clearManualStepMarker(instId);
           engine.clearManualGate(instId);
+          engine.clearManualGateApproved(instId);
           engine.clearDoneTagDetected(instId);
           const step = engine.getStep(workflow, state.current_step);
           if (!step) {
@@ -342,8 +350,10 @@ export function createTools(engine: Engine, client: Client) {
 
       // 5. Attach: taking over an instance that died MID-DO (no done tag, no
       //    manual gate). Re-issue the DO prompt — the check runs on the
-      //    next idle after the model re-does this step.
+      //    next idle after the model re-does this step. (Gate-armed instances
+      //    are handled by branch 2 above — continue approves and releases.)
       if (attached && !engine.markerExists(DONE_TAG_MARKER, instId) && !engine.markerExists(MANUAL_GATE_MARKER, instId)) {
+        engine.clearManualGateApproved(instId); // 接管即重做，旧批准作废
         if (isSubWorkflowStep(step)) {
           engine.pushState({ ...state, current_step: step.id, current_phase: "do", fail_count: state.fail_count || 0 }, instId);
           const subResult = engine.resolveSubWorkflowEntry(instId, step.workflow, state.user_task, step, MAX_NESTING_DEPTH, state.last_failure_reason, state.fail_count || 0);
@@ -573,6 +583,7 @@ export function createTools(engine: Engine, client: Client) {
       // 都和新位置无关；reinject 计数也要清（进入新 phase）。
       engine.clearManualGate(instId);
       engine.clearManualStepMarker(instId);
+      engine.clearManualGateApproved(instId);
       engine.clearDoneTagDetected(instId);
       engine.clearReinjectCounter(instId);
 
@@ -706,7 +717,7 @@ export function createTools(engine: Engine, client: Client) {
       if (state.last_failure_reason) status += `\n- **上次失败原因**: ${state.last_failure_reason}`;
 
       if (target.manualGate) {
-        status += `\n\n> 📋 该实例正在等待手动审查。审查完成后调用 \`ralphflow_continue\` 进入验证阶段。`;
+        status += `\n\n> 🙋 该实例已通过验证，正在等待你人工审查。满意后调用 \`ralphflow_continue\` 放行进入下一步；要改就说，改完会自动重新验证。`;
       } else if (target.owner && target.owner !== sessionId) {
         status += `\n\n> ℹ️ 该实例的属主是另一个会话。调用 \`ralphflow_continue\`（必要时带实例 ID）可在当前会话接管并继续。`;
       }

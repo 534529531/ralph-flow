@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { createEngine, type Platform, type Engine, RALPH_CHECK_AGENT_PERMISSION, shouldResetOnTransition, MANUAL_STEP_MARKER } from "../engine.js";
+import { createEngine, type Platform, type Engine, RALPH_CHECK_AGENT_PERMISSION, shouldResetOnTransition, MANUAL_STEP_MARKER, MANUAL_GATE_APPROVED_MARKER } from "../engine.js";
 import { detectDoneTag, stripCodeBlocks, handleSessionIdle, __resetDrivingSessions } from "../driver.js";
 import { createTools } from "../tools.js";
 
@@ -290,15 +290,23 @@ describe("handleSessionIdle", () => {
     expect(injected.some((i) => i.text.includes("下一步") && i.text.includes("review"))).toBe(false);
   });
 
-  it("done tag on a MANUAL step → stops for user review (noReply), arms the gate", async () => {
+  it("done tag on a MANUAL step → auto-checks first, then stops for user review (noReply), arms the gate", async () => {
+    // 审查门现在位于 CHECK 之后：manual 步骤 done → 先自动验证 → 通过 → 停下审查。
     const instId = startInstance("review");
     lastAssistantText = "prepared\n<promise>done</promise>";
     await handleSessionIdle(makeClient(), engine, "sess-1");
-    expect(injected.length).toBe(1);
-    expect(injected[0].text).toContain("轮到你审查");
-    expect(injected[0].text).toContain("/ralphflow-continue");
-    expect(injected[0].noReply).toBe(true); // user-facing, must NOT drive the model
+    // 先跑独立验证（CHECK 阶段横幅）
+    expect(injected.some((i) => i.text.includes("🔍 CHECK 阶段"))).toBe(true);
+    // 最后停下请你审查（不驱动模型）
+    const reviewMsg = injected[injected.length - 1];
+    expect(reviewMsg.text).toContain("轮到你审查");
+    expect(reviewMsg.text).toContain("/ralphflow-continue");
+    expect(reviewMsg.text).toContain("通过自动验证");
+    expect(reviewMsg.noReply).toBe(true);
     expect(fs.existsSync(path.join(engine.getInstanceDir(instId), ".manual-gate"))).toBe(true);
+    // 停在当前步骤等待批准（不前进、不再检查）
+    expect(engine.readState(instId)!.current_phase).toBe("do");
+    expect(engine.readState(instId)!.current_step).toBe("review");
   });
 
   it("manual gate active → completely silent so the user can chat", async () => {
@@ -310,6 +318,126 @@ describe("handleSessionIdle", () => {
     await handleSessionIdle(makeClient(), engine, "sess-1");
     expect(injected.length).toBe(0);
     expect(fs.existsSync(path.join(engine.getInstanceDir(instId), ".manual-gate"))).toBe(true);
+  });
+
+  it("manual step: CHECK fails → auto-retries (on_fail) WITHOUT re-arming the review gate", async () => {
+    // 核心修复：审查门位于 CHECK 之后。check 失败是质量循环，走 on_fail 自动重试，
+    // 不再停下请用户——用户只在 check 通过后才被请来审查。这消灭了
+    // "用户修改 → AI 审查失败 → 用户又改"的循环。
+    checkVerdict = "false";
+    const instId = startInstance("review");
+    lastAssistantText = "prepared\n<promise>done</promise>";
+    await handleSessionIdle(makeClient(), engine, "sess-1");
+    let st = engine.readState(instId)!;
+    expect(st.current_step).toBe("review");
+    expect(st.current_phase).toBe("do");
+    expect(st.fail_count).toBe(1);
+    expect(injected.some((i) => i.text.includes("检查结果：失败 ✗"))).toBe(true);
+    // 没有停下请你审查，门也未布防
+    expect(injected.some((i) => i.text.includes("轮到你审查"))).toBe(false);
+    expect(fs.existsSync(path.join(engine.getInstanceDir(instId), ".manual-gate"))).toBe(false);
+
+    // 模型修复后再次 done → 自动 re-check → 再次失败 → 依旧不布防审查门
+    injected = [];
+    lastAssistantText = "fixed it\n<promise>done</promise>";
+    await handleSessionIdle(makeClient(), engine, "sess-1");
+    st = engine.readState(instId)!;
+    expect(st.fail_count).toBe(2);
+    expect(injected.some((i) => i.text.includes("轮到你审查"))).toBe(false);
+    expect(fs.existsSync(path.join(engine.getInstanceDir(instId), ".manual-gate"))).toBe(false);
+
+    // 直到 check 通过，才停下请你审查
+    injected = [];
+    checkVerdict = "true";
+    lastAssistantText = "finally good\n<promise>done</promise>";
+    await handleSessionIdle(makeClient(), engine, "sess-1");
+    expect(injected.some((i) => i.text.includes("轮到你审查"))).toBe(true);
+    expect(fs.existsSync(path.join(engine.getInstanceDir(instId), ".manual-gate"))).toBe(true);
+    expect(engine.readState(instId)!.fail_count).toBe(2); // 历史失败次数保留
+  });
+
+  it("manual step: user asks for changes after the gate → model redo → auto re-check → gate re-arms → approve advances", async () => {
+    checkVerdict = "true";
+    const instId = startInstance("review");
+    lastAssistantText = "prepared\n<promise>done</promise>";
+    await handleSessionIdle(makeClient(), engine, "sess-1");
+    // check 通过 → 布防审查门
+    expect(fs.existsSync(path.join(engine.getInstanceDir(instId), ".manual-gate"))).toBe(true);
+    expect(injected.some((i) => i.text.includes("轮到你审查"))).toBe(true);
+
+    // 门布防期间的"旧 done"静默（用户还在审查，没要求改）
+    injected = [];
+    await handleSessionIdle(makeClient(), engine, "sess-1");
+    expect(injected.length).toBe(0);
+    expect(fs.existsSync(path.join(engine.getInstanceDir(instId), ".manual-gate"))).toBe(true);
+
+    // 用户说要改 → 模型修改并输出新的 done → 自动重新验证 → 通过 → 门重新布防
+    injected = [];
+    lastAssistantText = "revised review\n<promise>done</promise>";
+    await handleSessionIdle(makeClient(), engine, "sess-1");
+    expect(injected.some((i) => i.text.includes("🔍 CHECK 阶段"))).toBe(true);
+    expect(injected.some((i) => i.text.includes("轮到你审查"))).toBe(true);
+    expect(fs.existsSync(path.join(engine.getInstanceDir(instId), ".manual-gate"))).toBe(true);
+
+    // 批准 → 放行进入下一步（review on_pass = done → 工作流完成）
+    const tools = createTools(engine, makeClient());
+    await tools.ralphflow_continue.execute({}, { sessionID: "sess-1" } as any);
+    await handleSessionIdle(makeClient(), engine, "sess-1");
+    expect(engine.readState(instId)).toBeNull();
+  });
+
+  it("stale approval marker (step mismatch) is ignored, not mis-advanced", async () => {
+    // 防御：残留的批准标记若指向别的步骤（pause/接管/重做后旧批准失效），
+    // 绝不误放行——静默作废，走正常逻辑。
+    const instId = startInstance("review");
+    engine.writeMarker(MANUAL_GATE_APPROVED_MARKER, "some-other-step", instId);
+    lastAssistantText = "still reviewing"; // no done tag → should stay silent
+    await handleSessionIdle(makeClient(), engine, "sess-1");
+    expect(injected.length).toBe(0);
+    expect(engine.readState(instId)!.current_step).toBe("review");
+    expect(engine.readState(instId)!.current_phase).toBe("do");
+    // 标记已被消费（不会残留到下一次误触发）
+    expect(fs.existsSync(path.join(engine.getInstanceDir(instId), MANUAL_GATE_APPROVED_MARKER))).toBe(false);
+  });
+
+  it("manual step WITHOUT check: done → gate arms with skipped check (your review is the verdict), approve advances", async () => {
+    const wfDir = path.join(tmpDir, ".opencode", "ralph-flow", "workflows");
+    fs.writeFileSync(path.join(wfDir, "wf.yaml"), `manual_step: [review]
+steps:
+  - id: build
+    desc: build it
+    do: build the thing
+    input: user input
+    output: "thing.md"
+    on_pass: review
+    on_fail: build
+    max_fail_count: 3
+  - id: review
+    desc: manual review step
+    do: prepare for review
+    input: thing.md
+    output: "review.md"
+    on_pass: done
+    on_fail: review
+    max_fail_count: 3
+`);
+    const instId = startInstance("review"); // startInstance arms the manual-step marker
+    lastAssistantText = "prepared\n<promise>done</promise>";
+    await handleSessionIdle(makeClient(), engine, "sess-1");
+    // 无 check → 跳过验证：不创建验证会话、无 CHECK 横幅；直接布防门停下请你审查
+    const st = engine.readState(instId)!;
+    expect(st.current_phase).toBe("do");
+    expect(injected.some((i) => i.text.includes("🔍 CHECK 阶段"))).toBe(false);
+    const reviewMsg = injected[injected.length - 1];
+    expect(reviewMsg.text).toContain("轮到你审查");
+    expect(reviewMsg.text).toContain("未配置对抗性检查");
+    expect(fs.existsSync(path.join(engine.getInstanceDir(instId), ".manual-gate"))).toBe(true);
+
+    // 批准放行 → review on_pass = done → 工作流完成
+    const tools = createTools(engine, makeClient());
+    await tools.ralphflow_continue.execute({}, { sessionID: "sess-1" } as any);
+    await handleSessionIdle(makeClient(), engine, "sess-1");
+    expect(engine.readState(instId)).toBeNull();
   });
 
   it("manual step, DO phase, model asks a question (no done tag) → no auto-nudge", async () => {
@@ -791,24 +919,24 @@ steps:
     lastAssistantText = "did the work\n<promise>done</promise>";
     const client = makeClientWithSessionCreate();
 
-    // 1. Done on a manual step → review gate arms; no reset, no check yet.
+    // 1. Done on a manual step → auto-check passes → review gate arms; no reset yet.
     await handleSessionIdle(client, engine, "sess-1");
     expect(injected.some((m) => m.sessionId === "sess-1" && m.text.includes("轮到你审查"))).toBe(true);
     expect(injected.some((m) => m.text.includes("上下文已重置"))).toBe(false);
     expect(engine.readState(instId)!.session_id).toBe("sess-1");
 
-    // 2. User approves → gate cleared (done-tag marker deliberately kept).
+    // 2. User approves → gate cleared, approval marker written (CHECK already ran).
     const tools = createTools(engine, client);
     await tools.ralphflow_continue.execute({}, { sessionID: "sess-1" } as any);
 
-    // 3. Next idle → check runs (pass) → transition to review (reset) → new session.
+    // 3. Next idle → approved step advances to review (reset) → new session.
     await handleSessionIdle(client, engine, "sess-1");
     const st = engine.readState(instId)!;
     expect(st.current_step).toBe("review");
     expect(st.session_id).not.toBe("sess-1");
     expect(injected.some((m) => m.sessionId === "sess-1" && m.text.includes("上下文已重置") && m.noReply)).toBe(true);
     const newMsgs = injected.filter((m) => m.sessionId === st.session_id);
-    expect(newMsgs.some((m) => m.text.includes("检查结果：通过") && m.text.includes("review"))).toBe(true);
+    expect(newMsgs.some((m) => m.text.includes("人工审查通过") && m.text.includes("review"))).toBe(true);
   });
 
   it("isNewOpen unset (default false): no window, in-app navigation (2.9.x behavior)", async () => {

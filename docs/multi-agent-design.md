@@ -400,7 +400,7 @@ for each 活跃实例(instId):
 
 ### 6.3 与 reset/rewind/manual_step 的交互
 
-- **manual_step**:审查门在 check 前,与投票无冲突;门放行后 idle 触发投票
+- **manual_step**:审查门在 check 后（先自动验证、通过后停下请人审），与投票无冲突;门放行后 idle 直接推进
 - **reset**:abort 全部在跑票 + 删进度文件,新会话重做当前步
 - **rewind**:同上(回退到上游已通过步骤)
 

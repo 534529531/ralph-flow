@@ -2,6 +2,20 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 2.11.0 (2026-09-03)
+
+### 变更
+- **手动审查门移到 CHECK 之后（消灭「改 → 审 → 再改」循环）**：`manual_step` 步骤与普通步骤一样，DO 完成后**先自动运行独立验证**；只有 **check 通过**才停下用 🙋 消息请你审查——你审的永远是通过验证的产物。你的 `/ralphflow-continue` 从"启动验证"变为**放行**（直接按 `on_pass` 推进，不重复验证）。
+  - check 失败只走 `on_fail` 自动重试，**不再**重新布防审查门——用户不再被卷进"AI 审查失败 → 用户又改"的质量循环。
+  - 你要改：直接说要改什么，模型修改后输出 `<promise>done</promise>`，自动重新验证，通过后再停下等你审查；你满意才放行进入下一步。
+  - 该步骤未配置 `check` / `check_voting` 时人工审查即最终验证（与 2.9 的「manual 默认跳过对抗 check」一致，只是门从 DO 后挪到 check 通过点）。
+- 内部：新增 `.manual-gate-approved`（用户批准待放行，driver 空闲时前进，记录步骤 id 防残留误触发）与 `.manual-gate-last`（门布防时模型最后输出的摘要，区分"旧 done 静默"与"要改后的新 done 重新验证"）。
+- **换会话统一清理实例级 marker**：`executeContextReset` 在所有权转移后清空审查门 / done / 批准 / 催促计数等标记——修复"审查门布防期间 `/ralphflow-reset` 后，旧 gate 残留到新会话导致新 DO 阶段被静默卡住"。
+
+### 测试
+- 新增 `manual-gate-e2e.test.ts` 端到端集成套件（真实会话序列驱动完整工作流）：build→review(门)→deploy→完成；review check 失败自动重试不布防门 → 通过 → 门 → 用户要改 → re-check → 门 → 放行；审查门布防期间 reset 换干净会话且 marker 不残留；另一会话接管门中实例直接放行；voting+manual 全过 → 门 → 放行完成。
+- 单测新增 4 条回归（同上文）。更新 3 条旧「先审后验」语义测试 + 子工作流 manual 组合测试。全量 15 文件 / 269 断言绿。
+
 ## 2.10.0 (2026-08-30)
 
 ### 新增

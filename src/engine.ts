@@ -179,6 +179,13 @@ const STACK_FILENAME = "state-stack.json";
 const ADVERSARIAL_SESSION_FILENAME = ".adversarial-session";
 export const MANUAL_STEP_MARKER = ".manual-step-active";
 export const MANUAL_GATE_MARKER = ".manual-gate";
+// 用户已通过 /ralphflow-continue 批准审查门，等 idle 执行放行（进入下一步）。
+// 审查门现在位于 CHECK 之后（先自动验证、通过后才停下请你审查），所以批准
+// 不再是"启动验证"，而是"放行已通过验证的步骤"。
+export const MANUAL_GATE_APPROVED_MARKER = ".manual-gate-approved";
+// 审查门布防时记录的模型最后一条输出摘要：用于区分"布防前就存在的旧 done"
+//（静默）与"你要求修改后模型新输出的 done"（重新自动验证）。
+export const MANUAL_GATE_LAST_MARKER = ".manual-gate-last";
 export const DONE_TAG_MARKER = ".done-tag-detected";
 export const REINJECT_WARNED_MARKER = ".reinject-warned";
 // 同一 DO 阶段被 idle 催促（无工具调用）达到此上限后，driver 停止自动驱动并
@@ -477,7 +484,20 @@ export function createEngine(projectDir: string, platform: Platform) {
 
   function writeManualStepMarker(instId: string): void { writeMarker(MANUAL_STEP_MARKER, "active", instId); }
   function clearManualStepMarker(instId: string): void { clearMarker(MANUAL_STEP_MARKER, instId); }
-  function clearManualGate(instId: string): void { clearMarker(MANUAL_GATE_MARKER, instId); }
+  function clearManualGate(instId: string): void {
+    clearMarker(MANUAL_GATE_MARKER, instId);
+    clearMarker(MANUAL_GATE_LAST_MARKER, instId);
+  }
+  function clearManualGateApproved(instId: string): void { clearMarker(MANUAL_GATE_APPROVED_MARKER, instId); }
+  function writeManualGateLast(instId: string, digest: string): void { writeMarker(MANUAL_GATE_LAST_MARKER, digest, instId); }
+  function readManualGateLast(instId: string): string {
+    try {
+      return stripBom(fs.readFileSync(instPath(MANUAL_GATE_LAST_MARKER, reqInst(instId)), "utf-8")).trim();
+    } catch {
+      return "";
+    }
+  }
+  function clearManualGateLast(instId: string): void { clearMarker(MANUAL_GATE_LAST_MARKER, instId); }
   // 催促计数归零 = 新一轮 DO 的开始，顺带清掉"已警告过催促上限"的标记，
   // 这样新一轮再次超限时用户还能再看到一次警告（而不是永久静默）。
   function clearReinjectCounter(instId: string): void {
@@ -1968,18 +1988,20 @@ ${renderStepText(instId, entry.check)}`);
 
   // ─── Workflow Advancement Logic (shared by done handler) ────────────────────
 
-  function handleCheckPassed(instId: string, state: RalphFlowState, workflow: WorkflowDef, step: StepDef, checkResult: { reason?: string; skipped?: boolean }): TransitionResult {
-    // Note: manual steps no longer pause after the check — the manual review gate
-    // now sits BEFORE the check (the driver stops the session when the DO phase of
-    // a manual step completes; the user's ralphflow_continue call is the approval
-    // that starts the check). Once the check passes, the workflow advances.
+  function handleCheckPassed(instId: string, state: RalphFlowState, workflow: WorkflowDef, step: StepDef, checkResult: { reason?: string; skipped?: boolean; fromManualGate?: boolean }): TransitionResult {
+    // Note: the manual review gate now sits AFTER the check. The driver stops
+    // the session when a manual step's CHECK passes; the user's
+    // ralphflow_continue call is the approval that advances the workflow
+    // (handleCheckPassed is invoked again at that point with fromManualGate).
     //
     // checkResult.skipped = 步骤没有对抗性检查(未配置 check,或 manual_step 默认由
     // 人工审查替代)。这种情况没有真正运行验证器,标题要如实说明"跳过验证"而不是
     // 假装"检查通过"。
     const passHeader = checkResult.skipped
       ? "## 步骤已通过（跳过对抗性验证）"
-      : "## 检查结果：通过 ✓";
+      : checkResult.fromManualGate
+        ? "## ✅ 人工审查通过"
+        : "## 检查结果：通过 ✓";
 
     if (step.on_pass === "done") {
       const parentState = popState(instId);
@@ -2349,6 +2371,8 @@ ${renderStepText(instId, entry.check)}`);
     readState, writeState, isValidState,
     writeMarker, clearMarker, markerExists,
     writeManualStepMarker, clearManualStepMarker, clearManualGate,
+    clearManualGateApproved,
+    writeManualGateLast, readManualGateLast, clearManualGateLast,
     clearReinjectCounter, readReinjectCount, clearDoPromptCache, clearDoneTagDetected,
     writeDoPromptCache, readDoPromptCache, buildDoNudge, markPromptDelivered,
     writeAdversarialSession, clearAdversarialSession, readAdversarialSession,

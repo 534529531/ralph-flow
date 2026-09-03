@@ -15,18 +15,21 @@ flowchart TD
     State --> DoPrompt["工具返回 DO 阶段提示词"]
     DoPrompt --> AI["会话执行任务"]
     AI -->|"检测到 done 标记"| DoneTag["session.idle 触发<br/>驱动器检测 done 标记"]
-    DoneTag --> Manual{"手动步骤？"}
-    Manual -->|"是"| Review["会话停下<br/>用户审查后 /ralphflow-continue"]
-    Manual -->|"否"| HasCheck{"步骤配了<br/>check / check_voting？"}
-    Review --> HasCheck
-    HasCheck -->|"否"| Pass
+    DoneTag --> HasCheck{"步骤配了<br/>check / check_voting？"}
+    HasCheck -->|"否"| Manual2{"手动步骤？"}
     HasCheck -->|"是"| CheckPrompt["创建独立验证会话"]
     CheckPrompt --> AICheck["独立会话验证结果"]
-    AICheck -->|"true"| Pass["引擎读取 on_pass"]
+    AICheck -->|"true"| Pass
     AICheck -->|"false"| Fail["引擎递增 fail_count"]
     AICheck -->|"基础设施故障"| Infra["在 check 阶段暂停<br/>continue 只重跑验证"]
-    Pass -->|"on_pass: done"| Complete["实例完成<br/>归档报告，删除实例目录"]
-    Pass -->|"下一步 id"| DoPrompt
+    Manual2 -->|"是"| Review2["停下——用户审查"]
+    Manual2 -->|"否"| Pass
+    Pass -->|"手动步骤"| Review["停下——用户审查<br/>（已通过验证）"]
+    Review -->|"批准放行"| Next{"on_pass"}
+    Review2 -->|"批准放行"| Next
+    Pass -->|"普通步骤"| Next
+    Next -->|"on_pass: done"| Complete["实例完成<br/>归档报告，删除实例目录"]
+    Next -->|"下一步 id"| DoPrompt
     Fail -->|"未达上限"| DoPrompt
     Fail -->|"达到上限"| Pause["工作流暂停<br/>等待 /ralphflow-continue"]
     Pause -->|用户继续| DoPrompt
@@ -49,7 +52,7 @@ flowchart TD
 4. 引擎处理结果，要么推进（`on_pass`），要么带失败原因重试（`on_fail`）
 5. 验证会话被删除
 
-**跳过验证**：步骤不配 `check` / `check_voting` 时，DO 完成后直接按 `on_pass` 推进，不创建验证会话，通过头显示"跳过对抗性验证"。`manual_step` 默认就走这条路（人工审查即验证）；只有在手动步骤上显式写了 `check` 时，批准后才叠加独立验证。
+**跳过验证**：步骤不配 `check` / `check_voting` 时，DO 完成后直接按 `on_pass` 推进，不创建验证会话，通过头显示"跳过对抗性验证"。`manual_step` 默认就走这条路（人工审查即验证）；只有在手动步骤上显式写了 `check` 时，才先跑独立验证、通过后再停下请你审查。
 
 ---
 
@@ -118,7 +121,7 @@ adversarial_check:
 
 ## 手动审查门
 
-工作流 `manual_step` 里列出的步骤在 **DO 完成后、验证开始前**暂停。当这类步骤检测到 done 标记时，驱动器**不**驱动模型继续 —— 而是用 📋 消息停下会话等待。用户的 `/ralphflow-continue` 是批准：若该步骤显式写了 `check`，批准后启动独立验证；没写则直接按 `on_pass` 推进（人工审查即验证）。用户要改，会话就改，然后再次输出 `<promise>done</promise>` —— 审查门重新武装。
+工作流 `manual_step` 里列出的步骤在 **CHECK 通过后**暂停。驱动器和普通步骤一样先自动运行独立验证；通过后它**不**直接推进，而是用 🙋 消息停下会话，让你审查**已验证的产物**。你的 `/ralphflow-continue` 是放行——直接按 `on_pass` 推进（若该步骤未配置 `check`，人工审查即最终验证，`check` 跳过）。check 失败走 `on_fail` 自动重试，不打扰你；你要改，会话就改并再次输出 `<promise>done</promise>`，自动重新验证，通过后再停下等你审查。
 
 ---
 
@@ -259,7 +262,8 @@ flowchart LR
     │       ├── state-stack.json    # 子工作流嵌套栈
     │       ├── artifacts-dir        # 本实例产出目录的名字
     │       ├── .do-prompt-cache     # 当前 DO 提示词（保活重注入）
-    │       ├── .manual-gate         # 手动审查标记
+    │       ├── .manual-gate         # 手动审查门已布防（CHECK 通过后停下等你）
+    │       ├── .manual-gate-approved # 你已批准，等空闲驱动放行进入下一步
     │       ├── .done-tag-detected   # DO 已完成，等待放行
     │       ├── .adversarial-session # 运行中的验证会话 id（多验证者时是数组）
     │       ├── .check-voting-progress.json  # 多验证者投票进度

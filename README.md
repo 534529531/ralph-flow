@@ -24,12 +24,13 @@ flowchart TD
     Inst --> DO["DO 阶段：会话执行步骤"]
     DO --> DoneTag{"有 done 标记？"}
     DoneTag -->|"继续干活"| DO
-    DoneTag -->|"检测到"| HasCheck{"步骤配了检查？"}
-    HasCheck -->|"否（check 可选）"| Pass
-    HasCheck -->|"是"| Manual{"手动步骤？"}
-    Manual -->|"是"| Review["停下——用户审查"]
+    DoneTag -->|"检测到"| Manual{"手动步骤？"}
     Manual -->|"否"| CHECK["CHECK 阶段：独立会话验证"]
-    Review -->|"批准"| CHECK
+    Manual -->|"是"| CHECK2["CHECK（没配 check 则跳过）"]
+    CHECK2 --> Pass2{"通过？"}
+    Pass2 -->|"是"| Review["停下——用户审查"]
+    Pass2 -->|"否"| Fail
+    Review -->|"批准放行"| Next{"on_pass"}
     CHECK --> Pass{"通过？"}
     Pass -->|"是"| Next{"on_pass"}
     Pass -->|"否"| Fail["失败计数 + 1<br/>带着失败原因重试"]
@@ -37,13 +38,13 @@ flowchart TD
     Next -->|"下一步"| DO
     Next -->|"done"| Complete["工作流完成<br/>归档报告"]
     Fail -->|"未超限"| DO
-    Fail -->|"达到上限"| Pause["暂停——你决定"]
-    Pause -->|"用户恢复"| DO
+    Fail -->|"达上限"| Pause["暂停<br/>continue 恢复"]
+    Pause --> DO
 ```
 
 CHECK 不是同一个会话再问一遍"你做完了吗"。它是一个独立的验证者会话——没看过 DO 阶段的对话、没有实现上下文、不认识你——只按检查依据判断工作有没有真的完成。AI 对自己的工作过度自信，验证者不会，它要求独立的证据。
 
-`check` 不是必填。步骤不写 `check` / `check_voting` 时，DO 完成后直接按 `on_pass` 推进，不跑对抗验证。适合文档整理、纯编排这类不需要独立复核的步骤。需要人审的步骤用 `manual_step`——人工审查门本身就算通过。
+`check` 不是必填。步骤不写 `check` / `check_voting` 时，DO 完成后直接按 `on_pass` 推进，不跑对抗验证。适合文档整理、纯编排这类不需要独立复核的步骤。需要人审的步骤用 `manual_step`——先自动验证、通过后才停下请你审查（没写 check 时人工审查即最终验证）。
 
 ## 能力
 
@@ -54,7 +55,7 @@ CHECK 不是同一个会话再问一遍"你做完了吗"。它是一个独立的
 | 检查可选 | 步骤不写 `check` / `check_voting` 就跳过对抗验证，DO 完成后直接走 `on_pass`；`manual_step` 默认由人工审查替代验证（显式写了 check 才叠加）；doctor 对非 manual 的无 check 步骤醒目告警 |
 | 自动重试 | CHECK 不通过，带着失败原因回到 DO——不是盲目重来 |
 | 多实例并行 | 同一项目里每会话跑自己的实例，互不干扰 |
-| 人工审查门 | `manual_step` 做完停下让你审查，`continue` 放行（显式写了 check 才叠加验证） |
+| 人工审查门 | `manual_step` 先自动验证、通过后停下让你审查，`continue` 放行进入下一步（check 失败自动重试不打扰你） |
 | 中途回退与上下文重置 | `/ralphflow-rewind` 倒退状态机到上游已通过 CHECK 的步骤（`reason` 必填、跨会话注入）；`/ralphflow-reset` 换新会话重做当前步（可选 `reason`）；`reset: true` / `auto_reset: true` 在步骤边界自动换干净上下文，换入载体默认应用内换会话（`isNewOpen: true` 可选开启物理新窗口交接） |
 | 分支与恢复 | `on_fail` 路由到特定恢复步骤，不只是一个劲重试 |
 | 子工作流 | 组合可复用组件，最多 5 层嵌套 |

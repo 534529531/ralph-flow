@@ -119,7 +119,7 @@ manual_step: [design]
 manual_step: design, review
 ```
 
-手动步骤在 **DO 完成后、验证开始前**暂停：会话用 📋 消息停下，好让你审查工作成果。你运行 `/ralphflow-continue` 之前工作流**不会**推进 —— 这条命令**就是**启动独立验证的批准。你要改，会话就改并再次输出 `<promise>done</promise>`，审查门重新武装。
+手动步骤在 **CHECK 通过后**暂停：独立验证先跑，通过后会话用 🙋 消息停下，让你审查**已验证的产物**。你运行 `/ralphflow-continue` 是**放行**——直接进入下一步，不重复验证（该步骤没写 `check` 时，你的审查即最终验证）。check 失败只会自动重试，**不会**把你卷进"改 → 审 → 再改"的循环；你要改，会话就改并再次输出 `<promise>done</promise>`，自动重新验证、通过后再停下等你审查。
 
 > `manual_step` 里对不上真实步骤 id 的条目是**硬错误** —— 工作流无法加载。打错字绝不能静默跳过你指望的审查门。
 
@@ -140,7 +140,7 @@ auto_reset: true
 ```yaml
 description: 带设计审查门的功能开发
 
-manual_step: [design]        # design 步骤 DO 完成后停下审查
+manual_step: [design]        # design 步骤 CHECK 通过后停下审查
 
 steps:
   - id: design
@@ -167,8 +167,8 @@ steps:
 运行时会发生什么：
 
 1. **design** 步骤跑 DO 阶段，最后输出 `<promise>done</promise>`。
-2. 因为 `design` 在 `manual_step` 里，会话**停下**并显示 📋 消息，而不是去验证 —— 你去读 `design.md`。
-3. 你运行 `/ralphflow-continue`。*这时*独立验证者才检查 `design.md`；通过后工作流推进到 **implement**。
+2. 独立验证者**先**检查 `design.md`；通过后，因为 `design` 在 `manual_step` 里，会话**停下**显示 🙋 消息 —— 你去读 `design.md`。
+3. 你运行 `/ralphflow-continue` **放行**进入 **implement**（不再重复验证）。你要改，就说要改哪里，模型修改后自动重新验证、通过后再停下等你。
 4. **implement** 是普通步骤，会自动验证，不会为你停下。
 
 ### `adversarial_check`
@@ -291,7 +291,7 @@ steps:
 什么情况下适合不写 check：
 
 - 纯编排、文档整理这类不需要独立复核的步骤；
-- `manual_step` 人工审查门**默认**就相当于跳过对抗验证——你审过即通过；只有在该步骤显式写了 `check` 时才两者叠加。
+- `manual_step` 人工审查门**默认**就相当于跳过对抗验证——你先跑 check，通过后停下等你审；没写 check 时你审过即通过。只有在该步骤显式写了 `check` 时才两者叠加。
 
 注意两点（doctor 会提醒）：
 

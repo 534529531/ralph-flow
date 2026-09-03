@@ -94,7 +94,7 @@
 - 每次 `ralphflow_start` 在 `.opencode/ralph-flow/instances/<id>/` 下创建一个实例。
 - 一个会话最多驱动一个实例；同一项目的多个会话各驱动各的。
 - 属主是实例 `state.json` 里的 `session_id` 字段。任何会话的 `/ralphflow-continue` 都可接管某个实例 —— 项目内只有一个实例时自动接管，多个时需显式传 `instance`（支持唯一前缀）。（没有会话存活探测，所有权是建议性的。）
-- 接管中断于 DO 中途的实例会重发 DO 提示词；中断于 done 标记之后的直接进入验证。
+- 接管中断于 DO 中途的实例会重发 DO 提示词；中断于 done 标记之后的会自动进入验证。
 
 ---
 
@@ -176,7 +176,7 @@ tail -10 .opencode/ralph-flow/instances/<id>/logs/execution.log
 | `state-stack.json` | 子工作流嵌套栈 |
 
 | `artifacts-dir` | 本实例产出目录的名字 |
-| `.manual-step-active` / `.manual-gate` | 手动审查门标记 |
+| `.manual-step-active` / `.manual-gate` / `.manual-gate-last` / `.manual-gate-approved` | 手动审查门标记（当前步骤是 manual / 门已布防 / 布防时模型最后输出的摘要 / 用户已批准待放行） |
 | `.done-tag-detected` | DO 已完成，等待 `ralphflow_continue` |
 | `.do-prompt-cache` | 当前 DO 提示词（保活时重新注入） |
 | `.adversarial-session` | 运行中的验证会话 id（多验证者时为 JSON 数组） |

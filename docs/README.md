@@ -14,7 +14,7 @@
 |------|----------|------|
 | [创建设计一个工作流](custom-workflows.md#快速示例) | ✅ | YAML 从零到一，附示例 |
 | [产出目录与模板变量](custom-workflows.md#产出目录与模板变量) | ✅ | 交付物放哪、唯一模板记号 |
-| [人工审查门](custom-workflows.md#manual_step) | ✅ | 在验证前停下来让你审查 |
+| [人工审查门](custom-workflows.md#manual_step) | ✅ | 先自动验证、通过后停下请你审查 |
 | [上下文重置门（reset）](custom-workflows.md#上下文重置门reset) | | 步骤级 `reset`、工作流级 `auto_reset`、手动 `/ralphflow-reset`、`isNewOpen` 交接载体 |
 | [中途回退（rewind）](custom-workflows.md#中途回退rewind) | | 倒退到上游已通过步骤重做 |
 | [子工作流与嵌套](custom-workflows.md#工作流嵌套) | | 组合可复用工作流组件，含输入传递 |
