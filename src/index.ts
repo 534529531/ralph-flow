@@ -1,25 +1,12 @@
-/**
- * Ralph Flow plugin for opencode — wiring layer.
- *
- * Composition (workflow logic mirrors the Claude plugin; runtime is native):
- *   MCP server (tools)   → Hooks.tool (src/tools.ts)
- *   Stop hook             → session.idle event (src/driver.ts)
- *   PostToolUse hook      → not needed (tool context carries sessionID)
- *   skills/ (commands)    → Hooks.config command registration (src/commands.ts);
- *                           every launchable workflow ALSO gets its own slash
- *                           command there (/loop, /spec, …) — see the config hook
- *   spawned `claude -p`   → independent SDK session (src/check.ts)
- *
- * Ownership is just the session_id in each instance's state.json — no session
- * liveness probe (opencode can't cheaply tell whether a session is still open),
- * so instance takeover is explicit (`/ralphflow-continue`, optionally with an
- * instance id) or automatic when a single instance exists.
- */
+/** Ralph Flow 的 OpenCode V2 服务插件边界。 */
 
-import type { Plugin, PluginModule, Config } from "@opencode-ai/plugin";
-import { RALPH_COMMANDS, registerWorkflowCommands } from "./commands.js";
-import { createEngine, type Platform, RALPH_CHECK_AGENT_PERMISSION } from "./engine.js";
+import { Plugin } from "@opencode/plugin";
+import type { Context as PluginContext } from "@opencode/plugin/promise/plugin";
+import { RALPH_COMMANDS, registerWorkflowCommands, type RalphCommandDef } from "./commands.js";
+import { createEngine, type Engine, type Platform } from "./engine.js";
 import { createTools } from "./tools.js";
+import { toV2Tool } from "./v2-tool.js";
+import { createV2ClientAdapter } from "./v2-client.js";
 import { handleSessionIdle, handleSessionGone } from "./driver.js";
 import { abortActiveCheck, isCheckSession } from "./check.js";
 import { deleteVotingProgress } from "./voting-progress.js";
@@ -28,148 +15,158 @@ import { setup } from "./setup.js";
 const setupDirs = new Set<string>();
 const orphanCleanedDirs = new Set<string>();
 
-/**
- * Plugin-load orphan cleanup (design §6.2): after a process restart, verifier
- * sessions created by the previous process are orphans — nobody will ever
- * collect their results. Delete them so the next idle re-runs the check
- * instead of stalling on a stale .adversarial-session. Also fixes the
- * single-verifier "restart then idle-stuck" behavior.
- */
-async function cleanupOrphanVerifiers(client: any, engine: ReturnType<typeof createEngine>): Promise<void> {
+type ServerEvent = {
+  type: string;
+  data?: {
+    sessionID?: string;
+    reason?: string;
+    status?: { type?: string };
+  };
+};
+
+async function cleanupOrphanVerifiers(client: any, engine: Engine): Promise<void> {
   try {
-    const instances = engine.listInstances();
-    for (const inst of instances) {
-      if (inst.state.current_phase !== "check") continue;
-      const orphans = engine.readAdversarialSessions(inst.id);
+    for (const instance of engine.listInstances()) {
+      if (instance.state.current_phase !== "check") continue;
+      const orphans = engine.readAdversarialSessions(instance.id);
       if (orphans.length === 0) continue;
-      for (const sid of orphans) {
-        try { await client.session.delete({ path: { id: sid } }); } catch {}
+      for (const id of orphans) {
+        try { await client.session.delete({ path: { id } }); } catch {}
       }
-      engine.clearAdversarialSession(inst.id);
-      deleteVotingProgress(engine, inst.id);
-      engine.logEvent(inst.id, "info", "orphan_verifier_cleaned", { count: orphans.length });
+      engine.clearAdversarialSession(instance.id);
+      deleteVotingProgress(engine, instance.id);
+      engine.logEvent(instance.id, "info", "orphan_verifier_cleaned", { count: orphans.length });
     }
   } catch {}
 }
 
-const RalphFlowPlugin: Plugin = async ({ client, directory }) => {
+function expandCommand(template: string, input: string): string {
+  const value = input.trim();
+  if (template.includes("$ARGUMENTS")) return template.split("$ARGUMENTS").join(value);
+  return [template, value].filter(Boolean).join("\n\n");
+}
+
+async function registerCommands(context: PluginContext, engine: Engine): Promise<void> {
+  const current = await context.command.list();
+  const existing = new Set(current.data.map((command) => command.name));
+  const definitions: Record<string, RalphCommandDef | undefined> = { ...RALPH_COMMANDS };
+  registerWorkflowCommands(definitions, engine.listWorkflows());
+
+  await context.command.transform((editor) => {
+    for (const [name, definition] of Object.entries(definitions)) {
+      if (!definition || existing.has(name)) continue;
+      editor.add({
+        name,
+        description: definition.description,
+        async execute({ sessionID, prompt, delivery }) {
+          await context.session.prompt({
+            ...prompt,
+            sessionID,
+            text: expandCommand(definition.template, prompt.text),
+            delivery,
+          });
+        },
+      });
+    }
+  });
+}
+
+export async function handleOpenCodeEvent(
+  event: ServerEvent,
+  client: ReturnType<typeof createV2ClientAdapter>,
+  engine: Engine,
+): Promise<void> {
+  const id = event.data?.sessionID;
+  if (!id) return;
+
+  const reachedIdle =
+    event.type === "session.idle" ||
+    event.type === "session.compacted" ||
+    event.type === "session.execution.succeeded" ||
+    (event.type === "session.status" && event.data?.status?.type === "idle");
+  if (reachedIdle) {
+    if (isCheckSession(id)) return;
+    await handleSessionIdle(client, engine, id).catch(() => {});
+    return;
+  }
+
+  if (event.type === "session.execution.interrupted") {
+    await handleSessionGone(engine, id, "aborted").catch(() => {});
+    return;
+  }
+
+  if (event.type === "session.deleted") {
+    await handleSessionGone(engine, id, "deleted").catch(() => {});
+  }
+}
+
+async function setupPlugin(context: PluginContext) {
+  const directory = context.location.directory;
   if (!setupDirs.has(directory)) {
     setup(directory);
     setupDirs.add(directory);
   }
 
+  // setup() 可能刚写入全局 agent/skill 文件；显式 reload 保证热加载和首会话
+  // 都能立即看见 ralph-check，而不依赖下一次进程启动。
+  await Promise.all([context.agent.reload(), context.skill.reload()]);
+
+  const verifierSystemPrompts = new Map<string, string>();
+  const client = createV2ClientAdapter(context, { verifierSystemPrompts });
   const platform: Platform = {
-    abortActiveCheck(instId) {
-      abortActiveCheck(client, instId);
+    abortActiveCheck(instanceID) {
+      abortActiveCheck(client, instanceID);
     },
   };
-
   const engine = createEngine(directory, platform);
   engine.ensureProjectWorkflows();
   engine.migrateLegacyInstance();
 
-  // Orphan verifier cleanup: once per project per process (design §6.2).
-  if (!orphanCleanedDirs.has(directory)) {
-    orphanCleanedDirs.add(directory);
-    void cleanupOrphanVerifiers(client, engine);
-  }
+  await context.session.hook("context", (event) => {
+    const system = verifierSystemPrompts.get(event.sessionID);
+    if (system) event.system.push({ type: "text", text: system });
+  });
 
   const tools = createTools(engine, client);
+  await context.tool.transform((editor) => {
+    for (const [name, definition] of Object.entries(tools)) {
+      editor.add(toV2Tool(name, definition));
+    }
+  });
+  await registerCommands(context, engine);
 
-  return {
-    config: async (input: Config) => {
-      input.command = input.command ?? {};
-      for (const [name, def] of Object.entries(RALPH_COMMANDS)) {
-        if (!input.command[name]) {
-          input.command[name] = def;
-        }
+  await context.permission.hook("evaluate", (event) => {
+    try {
+      if (isCheckSession(event.sessionID)) return;
+      if (engine.listInstances().some((instance) => instance.owner === event.sessionID)) {
+        event.effect = "allow";
       }
+    } catch {
+      // 插件异常不能把权限请求变成误拒绝或悬挂。
+    }
+  });
 
-      // 动态注册：每个可启动的工作流各得到一个快捷 slash 命令（/loop、
-      // /spec……），补全列表里显示为 "loop (ralph-flow) <描述>"。省去
-      // list → start 的两步旅程。静态管理命令先注册，撞名一律不覆盖。
-      registerWorkflowCommands(input.command, engine.listWorkflows());
+  if (!orphanCleanedDirs.has(directory)) {
+    orphanCleanedDirs.add(directory);
+    await cleanupOrphanVerifiers(client, engine);
+  }
 
-      // Register the ralph-check agent dynamically as well, so the very first
-      // session works even before setup() has written the agent file.
-      input.agent = input.agent ?? {};
-      if (!input.agent["ralph-check"]) {
-        input.agent["ralph-check"] = {
-          description: "Ralph Flow 检查阶段 agent —— 验证者",
-          mode: "all",
-          // edit hard-denied, bash open. See RALPH_CHECK_AGENT_PERMISSION —
-          // mutation safety is anchored on `edit: deny` + the system prompt,
-          // NOT a bash allow-list (overlay with opencode's own plan/explore agents).
-          permission: RALPH_CHECK_AGENT_PERMISSION,
-        } as any;
-      }
-    },
+  const controller = new AbortController();
+  const eventTask = (async () => {
+    for await (const event of context.event.subscribe({ signal: controller.signal })) {
+      await handleOpenCodeEvent(event as unknown as ServerEvent, client, engine);
+    }
+  })().catch(() => {});
 
-    tool: tools,
-
-    // Full-automation permission gate. Ralph Flow drives the model unattended,
-    // so an interactive permission prompt would stall the loop forever. Auto-allow
-    // permissions, but ONLY for the session that owns an active ralph-flow instance
-    // — never for arbitrary sessions, and never for the verifier session (its
-    // agent-level `edit: deny` in RALPH_CHECK_AGENT_PERMISSION must stand so the
-    // checker can't mutate the workspace it is judging).
-    "permission.ask": async (input: any, output: { status: "ask" | "deny" | "allow" }) => {
-      try {
-        const sessionId: string | undefined = input?.sessionID;
-        if (!sessionId) return;
-        if (isCheckSession(sessionId)) return; // verifier session: leave its gate untouched
-        const ownsActiveInstance = engine.listInstances().some((i) => i.owner === sessionId);
-        if (ownsActiveInstance) output.status = "allow";
-      } catch {
-        // Never let a plugin error turn into a denied/hung permission prompt.
-      }
-    },
-
-    event: async ({ event }) => {
-      const props: any = (event as any).properties || {};
-
-      if (event.type === "session.idle") {
-        const sessionId: string | undefined = props.sessionID;
-        if (!sessionId) return;
-        // The verifier's own session also idles in this project — never drive it.
-        if (isCheckSession(sessionId)) return;
-        await handleSessionIdle(client, engine, sessionId).catch(() => {});
-        return;
-      }
-
-      if (event.type === "session.compacted") {
-        // After compaction the session forgot its task — re-drive it exactly
-        // like an idle (the keep-alive re-injects the cached DO prompt).
-        const sessionId: string | undefined = props.sessionID;
-        if (!sessionId || isCheckSession(sessionId)) return;
-        await handleSessionIdle(client, engine, sessionId).catch(() => {});
-        return;
-      }
-
-      if (event.type === "session.error") {
-        const error = props.error;
-        const sessionId: string | undefined = props.sessionID;
-        if (error?.name === "MessageAbortedError" && sessionId) {
-          await handleSessionGone(engine, sessionId, "aborted").catch(() => {});
-        }
-        return;
-      }
-
-      if (event.type === "session.deleted") {
-        const deletedSessionId: string | undefined = props?.info?.id;
-        if (!deletedSessionId) return;
-        await handleSessionGone(engine, deletedSessionId, "deleted").catch(() => {});
-        return;
-      }
-    },
+  return async () => {
+    controller.abort();
+    await eventTask;
   };
-};
+}
 
-// V1 PluginModule format (opencode >= 1.3.x)
-export default {
+export const RalphFlowPlugin = Plugin.define({
   id: "ralph-flow",
-  server: RalphFlowPlugin,
-} satisfies PluginModule;
+  setup: setupPlugin,
+});
 
-// Legacy format for older opencode versions
-export { RalphFlowPlugin as RalphFlow };
+export default RalphFlowPlugin;

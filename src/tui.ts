@@ -1,17 +1,17 @@
-import type { TuiPluginModule } from "@opencode-ai/plugin/tui";
+import { Plugin } from "@opencode/plugin/tui";
 
-export default {
+export const RalphFlowTuiPlugin = Plugin.define({
   id: "ralph-flow",
-  tui: async (api) => {
-    api.event.on("session.created", (evt) => {
-      const info = (evt as any).properties?.info;
-      // Reset sessions are top-level (no parentID) so they show up in /session;
-      // the server side also publishes tui.session.select directly, this is the
-      // redundant path for installs where that publish is rejected (old server).
-      if (info?.title?.startsWith("🔄") && !info?.parentID) {
-        api.route.navigate("session", { sessionID: info.id });
-        api.ui.toast({ variant: "info", message: "工作流已在干净上下文中继续" });
+  setup(context) {
+    return context.data.on("session.created", (event) => {
+      const info = event.data;
+      // reset/rewind 会话必须是顶层会话，才能出现在会话列表并成为长期工作地。
+      if ((info.title?.startsWith("🔄") || info.title?.startsWith("🔙")) && !info.parentID) {
+        context.ui.router.navigate({ type: "session", sessionID: info.sessionID });
+        context.ui.toast.show({ variant: "info", message: "工作流已在干净上下文中继续" });
       }
     });
   },
-} satisfies TuiPluginModule;
+});
+
+export default RalphFlowTuiPlugin;

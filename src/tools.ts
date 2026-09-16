@@ -18,7 +18,7 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { tool } from "@opencode-ai/plugin";
+import { tool } from "./v2-tool.js";
 import type { Engine } from "./engine.js";
 import { isSubWorkflowStep, MAX_NESTING_DEPTH, MAX_DO_REINJECT, MANUAL_GATE_MARKER, MANUAL_GATE_APPROVED_MARKER, DONE_TAG_MARKER, type NormalStepDef, type RalphFlowState } from "./engine.js";
 import { hasActiveCheck } from "./check.js";

@@ -2530,4 +2530,11 @@ export const RALPH_CHECK_AGENT_PERMISSION = {
   bash: "allow" as PermissionAction,
 };
 
+/** V2 会话级兜底规则：即使自定义 agent 配置漂移，验证器也不能直接改文件。 */
+export const RALPH_CHECK_SESSION_PERMISSIONS = [
+  { action: "webfetch", resource: "*", effect: "allow" as const },
+  { action: "external_directory", resource: "*", effect: "allow" as const },
+  { action: "bash", resource: "*", effect: "allow" as const },
+  { action: "edit", resource: "*", effect: "deny" as const },
+];
 

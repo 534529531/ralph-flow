@@ -17,7 +17,7 @@
 
 import fs from "fs";
 import type { Engine, NormalStepDef, AdversarialCheckConfig, CheckResult } from "./engine.js";
-import { DEFAULT_ADVERSARIAL_SYSTEM_PROMPT, DEFAULT_ADVERSARIAL_TIMEOUT_MS, resolveCheckModel } from "./engine.js";
+import { DEFAULT_ADVERSARIAL_SYSTEM_PROMPT, DEFAULT_ADVERSARIAL_TIMEOUT_MS, RALPH_CHECK_SESSION_PERMISSIONS, resolveCheckModel } from "./engine.js";
 
 // Loose client typing: only the session sub-API is used, and the SDK's
 // generated option types are far stricter than what we need here.
@@ -236,7 +236,11 @@ export async function runSingleVoter(
     const checkSession = await client.session.create({
       body: {
         title: `Ralph Check: ${step.id}${voterTag} - ${(userTask || "").substring(0, 50)}`,
-        ...(ownerSessionId ? { parentID: ownerSessionId } : {}),
+        // V2 的公开 SessionCreateInput 没有 parentID；验证器使用临时顶层
+        // 会话，并在判定完成后删除。会话级规则是 agent 配置之外的硬兜底。
+        agent,
+        ...(model ? { model } : {}),
+        permissions: RALPH_CHECK_SESSION_PERMISSIONS,
       },
       query: { directory: engine.projectDir },
     });
