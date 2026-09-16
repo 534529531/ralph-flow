@@ -118,8 +118,15 @@ export function createV2ClientAdapter(context: PluginContext, options: V2ClientA
     const body = request.body ?? {};
     await preparePrompt(id, body);
     const text = promptText(request);
+    // OpenCode V2 deliberately hides synthetic messages unless `description` is
+    // non-empty. Ralph Flow uses noReply for user-facing state transitions
+    // (CHECK starts/results, voting progress, pauses), so omitting it made those
+    // transitions run correctly but disappear from the TUI. Keep the full text
+    // as model context and attach a compact, stable label solely to make the
+    // corresponding phase card visible to the user.
+    const description = body.noReply ? "Ralph Flow 状态更新" : undefined;
     const data = body.noReply
-      ? await context.session.synthetic({ sessionID: id, text, resume: false })
+      ? await context.session.synthetic({ sessionID: id, text, description, resume: false })
       : await context.session.prompt({ sessionID: id, text, resume: true });
     return { data };
   };
