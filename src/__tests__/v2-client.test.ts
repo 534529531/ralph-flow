@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createV2ClientAdapter } from "../v2-client.js";
+import { readOwnerSessionModel } from "../check.js";
 
 describe("OpenCode V2 client adapter", () => {
   it("marks noReply phase updates visible in the V2 TUI", async () => {
@@ -56,5 +57,32 @@ describe("OpenCode V2 client adapter", () => {
       resume: true,
     });
     expect(synthetic).not.toHaveBeenCalled();
+  });
+
+  it("preserves the owner's OpenCode V2 variant across a reset handoff", async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const context = {
+      session: {
+        context: vi.fn().mockResolvedValue([{ type: "user", text: "reset me" }]),
+        get: vi.fn().mockResolvedValue({ model: { providerID: "openai", id: "gpt-5.6-luna", variant: "high" } }),
+        synthetic: vi.fn(),
+        prompt: vi.fn().mockResolvedValue({ id: "msg_prompt" }),
+        switchAgent: vi.fn(),
+        switchModel,
+      },
+    } as any;
+    const client = createV2ClientAdapter(context, { verifierSystemPrompts: new Map() });
+
+    const model = await readOwnerSessionModel(client, "ses_owner");
+    expect(model).toEqual({ providerID: "openai", modelID: "gpt-5.6-luna", variant: "high" });
+
+    await client.session.promptAsync({
+      path: { id: "ses_successor" },
+      body: { model, parts: [{ type: "text", text: "continue in a fresh context" }] },
+    });
+    expect(switchModel).toHaveBeenCalledWith({
+      sessionID: "ses_successor",
+      model: { providerID: "openai", id: "gpt-5.6-luna", variant: "high" },
+    });
   });
 });

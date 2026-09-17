@@ -96,7 +96,7 @@ function extractRequestError(response: unknown): string | null {
   return String(err);
 }
 
-type ModelRef = { providerID: string; modelID: string };
+type ModelRef = { providerID: string; modelID: string; variant?: string };
 
 /**
  * The verifier agent's EXPLICITLY configured model (e.g. opencode.json
@@ -108,11 +108,11 @@ type ModelRef = { providerID: string; modelID: string };
 async function readAgentModel(client: Client, agentName: string): Promise<ModelRef | undefined> {
   try {
     const res = await client.app.agents();
-    const list = (res as { data?: Array<{ name?: string; model?: { providerID?: string; modelID?: string } }> })?.data ?? [];
+    const list = (res as { data?: Array<{ name?: string; model?: { providerID?: string; modelID?: string; variant?: string } }> })?.data ?? [];
     const found = list.find((a) => a?.name === agentName);
     const m = found?.model;
     if (m && typeof m.providerID === "string" && m.providerID && typeof m.modelID === "string" && m.modelID) {
-      return { providerID: m.providerID, modelID: m.modelID };
+      return { providerID: m.providerID, modelID: m.modelID, ...(typeof m.variant === "string" && m.variant ? { variant: m.variant } : {}) };
     }
   } catch {}
   return undefined;
@@ -130,12 +130,12 @@ export async function readOwnerSessionModel(client: Client, ownerSessionId: stri
   if (!ownerSessionId) return undefined;
   try {
     const res = await client.session.messages({ path: { id: ownerSessionId } });
-    const list = (res as { data?: Array<{ info?: { role?: string; model?: { providerID?: string; modelID?: string } } }> })?.data ?? [];
+    const list = (res as { data?: Array<{ info?: { role?: string; model?: { providerID?: string; modelID?: string; variant?: string } } }> })?.data ?? [];
     for (let i = list.length - 1; i >= 0; i--) {
       const info = list[i]?.info;
       const m = info?.model;
       if (info?.role === "user" && m && typeof m.providerID === "string" && m.providerID && typeof m.modelID === "string" && m.modelID) {
-        return { providerID: m.providerID, modelID: m.modelID };
+        return { providerID: m.providerID, modelID: m.modelID, ...(typeof m.variant === "string" && m.variant ? { variant: m.variant } : {}) };
       }
     }
   } catch {}

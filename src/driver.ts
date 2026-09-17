@@ -97,7 +97,7 @@ export async function injectPrompt(
   sessionId: string,
   prompt: string,
   noReply = false,
-  model?: { providerID: string; modelID: string }
+  model?: { providerID: string; modelID: string; variant?: string }
 ): Promise<boolean> {
   try {
     const body: any = { parts: [{ type: "text", text: prompt }], noReply };

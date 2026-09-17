@@ -5,6 +5,8 @@ import type { Context as PluginContext } from "@opencode/plugin/promise/plugin";
 export interface LegacyModelRef {
   providerID: string;
   modelID: string;
+  /** OpenCode V2 model effort/variant (for example, `high`). */
+  variant?: string;
 }
 
 interface LegacyRequest {
@@ -13,7 +15,7 @@ interface LegacyRequest {
   body?: {
     title?: string;
     agent?: string;
-    model?: LegacyModelRef | { providerID: string; id: string };
+    model?: LegacyModelRef | { providerID: string; id: string; variant?: string };
     permissions?: ReadonlyArray<{ action: string; resource: string; effect: "allow" | "deny" | "ask" }>;
     parts?: Array<{ type: string; text?: string }>;
     system?: string;
@@ -40,14 +42,14 @@ function promptText(request: LegacyRequest): string {
     .join("\n");
 }
 
-function toV2Model(model: LegacyRequest["body"] extends infer _ ? LegacyModelRef | { providerID: string; id: string } | undefined : never) {
+function toV2Model(model: LegacyRequest["body"] extends infer _ ? LegacyModelRef | { providerID: string; id: string; variant?: string } | undefined : never) {
   if (!model) return undefined;
   const id = "modelID" in model ? model.modelID : model.id;
-  return { providerID: model.providerID, id };
+  return { providerID: model.providerID, id, ...(model.variant ? { variant: model.variant } : {}) };
 }
 
-function toLegacyModel(model: { providerID: string; id: string } | undefined): LegacyModelRef | undefined {
-  return model ? { providerID: model.providerID, modelID: model.id } : undefined;
+function toLegacyModel(model: { providerID: string; id: string; variant?: string } | undefined): LegacyModelRef | undefined {
+  return model ? { providerID: model.providerID, modelID: model.id, ...(model.variant ? { variant: model.variant } : {}) } : undefined;
 }
 
 function assistantParts(message: Extract<SessionMessageInfo, { type: "assistant" }>) {
