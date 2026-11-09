@@ -2,6 +2,11 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 2.11.1 (2026-11-09)
+
+### 变更
+- **npm 发布迁移到 trusted publishing（OIDC）**：`.github/workflows/publish.yml` 改用 GitHub Actions 的短时身份换取发布凭据，删除对 `NPM_TOKEN` 密钥的依赖，不再受 granular token 90 天有效期影响（旧 token 已于 2026-11-08 到期）。工作流改用 Node 24 并显式安装 npm@11，以满足 trusted publishing 的 npm ≥ 11.5.1 要求。无运行时行为变化。
+
 ## 2.11.0 (2026-09-03)
 
 ### 变更
