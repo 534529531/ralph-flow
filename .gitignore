@@ -17,3 +17,6 @@ dist/
 
 # DSH harness local artifacts
 .dsh/
+
+# npm pack output
+*.tgz

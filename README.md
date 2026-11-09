@@ -66,8 +66,15 @@ CHECK 不是同一个会话再问一遍"你做完了吗"。它是一个独立的
 
 ### 安装
 
+需要 **OpenCode 2.x**（当前验证于 2.2.5 / 2.2.6）。OpenCode 1.x 请留在 `@yibener/ralph-flow@2`。
+
+```bash
+opencode plugin add @yibener/ralph-flow
+```
+
+或在 `~/.config/opencode/opencode.json` 里声明：
+
 ```json
-// ~/.config/opencode/opencode.json 或项目 opencode.json
 { "plugin": ["@yibener/ralph-flow"] }
 ```
 
@@ -194,7 +201,22 @@ flowchart LR
 
 ## 安装
 
+### 版本对应
+
+| ralph-flow | OpenCode | 说明 |
+|---|---|---|
+| **3.x** | **2.x**（验证于 2.2.5 / 2.2.6） | 当前版本，`latest` 指向它 |
+| 2.11.x | 1.x | 旧版。OpenCode 1.x 用户请锁定 `@yibener/ralph-flow@2` |
+
+两个大版本的插件模型不兼容：3.x 的入口是 `Plugin.define({ id, setup })`，装到 1.x 上不会生效；反之 2.x 也拒绝加载 1.x 形态的入口。
+
 ### npm（推荐）
+
+```bash
+opencode plugin add @yibener/ralph-flow
+```
+
+等价于在全局配置里加一行：
 
 ```json
 { "plugin": ["@yibener/ralph-flow"] }
@@ -207,24 +229,14 @@ git clone https://github.com/534529531/ralph-flow.git ~/.config/opencode/plugins
 cd ~/.config/opencode/plugins/ralph-flow && npm install && npm run build
 ```
 
-本地克隆是 file 形态——需要两个入口文件：
+目录插件不需要额外入口文件：仓库根目录的 `index.ts`（server 入口）与 `tui.ts`（TUI 入口）会转出 `dist/`，OpenCode 2.x 直接发现并加载。
 
-```ts
-// ~/.config/opencode/plugins/ralph-flow.ts（server 入口，必须）
-export { default } from "./ralph-flow/dist/index.js";
-```
-
-```ts
-// ~/.config/opencode/plugins/ralph-flow-tui.ts（TUI 入口，可选）
-export { default } from "./ralph-flow/dist/tui.js";
-```
-
-首次加载时插件会注册命令、写入 `ralph-check` 验证者 agent 到 `~/.config/opencode/agent/`，并同步自带 skills 到 `~/.config/opencode/skills/`。
+首次加载时插件会注册命令、写入 `ralph-check` 验证者 agent 到 `~/.config/opencode/agent/`；若包内带 skills，则同步到 `~/.config/opencode/skills/`。
 
 ### 升级
 
 ```bash
-npm update @yibener/ralph-flow
+opencode plugin update
 ```
 
 ## 致谢

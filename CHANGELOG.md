@@ -2,6 +2,31 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 3.0.0 (2026-11-10)
+
+> **兼容性断裂**：本版本只支持 **OpenCode 2.x**。仍在使用 OpenCode 1.x 的用户请继续使用 `@yibener/ralph-flow@2`（2.11.x），不要升级到 3.x——两者的插件模型不兼容。
+
+### 适配
+- **迁移到 OpenCode 2.x 的 Promise 插件模型**：入口从 v1 的 `async (ctx) => Hooks` 改为 `Plugin.define({ id, setup })`。v1 的默认导出在 2.x 上会被加载器以 `Plugin must export a default definition with an id and an effect or setup function` 拒绝，且每 5 秒重试一次——命令、工具、`ralph-check` agent 全部不可用，这正是用户反馈的「ralph-flow 用不了」。
+- **客户端适配层 `src/v2-client.ts`**：把核心代码仍在用的 v1 SDK 窄接口（`session.create/delete/abort/messages/prompt/promptAsync`、`app.agents`、`tui.publish/showToast`）映射到 2.x 的 `context.session/agent/command/tool/permission/event`。刻意只实现 Ralph Flow 真正调用的方法，不伪造完整旧客户端。
+  - 会话删除：2.x 的 Promise 上下文没有 `session.remove`，改为连接同版本已注册服务执行（`@opencode/client/service` 的 `discover` + `OpenCode.make`），验证者会话不会残留。
+  - 模型/agent 切换：`session.switchAgent` / `session.switchModel` 在真正的 prompt 之前应用，并保留 `variant`（模型 effort）。
+  - 状态更新消息：2.x 会隐藏 `noReply` 的合成消息，改为 `session.synthetic` 并带 `description`，CHECK 阶段/结果与投票进度重新可见。
+  - 阻塞式 prompt：`prompt` → `session.prompt(resume:true)` + `session.wait` + `session.context`，验证者的错误原样返回。
+- **工具注册 `src/v2-tool.ts`**：zod 定义转成 2.x 的 Standard Schema 输入与结构化 `Tool.Result`，工具名与参数保持 `ralphflow_*` 不变。
+- **命令注册**：改用 `context.command.transform`，11 个固定命令 + 每个可运行工作流的动态命令（`/loop`、`/spec`…）语义不变。
+- **事件桥**：`session.idle` / `session.compacted` / `session.execution.succeeded` / `session.status(idle)` 统一驱动 idle 路径；`session.execution.interrupted` / `session.deleted` 映射到会话消失路径；验证者会话永不驱动。
+- **TUI 入口 `src/tui.ts`**：reset/rewind 的新会话（顶层、标题以 🔄/🔙 开头）自动跳转 + toast；验证者与子会话不抢屏。
+- **权限**：用 `context.permission.hook("evaluate")` 放行工作流属主会话，插件异常绝不把权限请求变成误拒绝。
+
+### 修复
+- **换会话保留模型 variant**：2.x 的 handoff 会丢掉 `variant`（如 `#high`），reset 后的新会话退回默认 effort；现在跨 handoff 透传。
+- **CHECK 阶段在 2.x TUI 不可见**：合成消息需要非空 `description` 才显示，已补上稳定标签。
+
+### 验证
+- **真实 e2e（不是 mock）**：在 `opencode v2.2.5` 与 `v2.2.6`（当前最新稳定版）上各跑一遍完整 `loop` 工作流：命令注册 → `ralphflow_start` → DO → 3 验证者投票 CHECK → 失败（带原因）→ 上下文重置到新会话 → 重做 → CHECK 全过 → 归档报告；验证者会话在检查后全部删除、`/ralphflow-status` 正常。
+- 单测新增 `plugin-entry`（入口形状回归，防再次发出不可加载的包）与 V2 客户端/事件/TUI 套件；全量 19 文件 / 284 断言绿，`tsc --noEmit` 干净。
+
 ## 2.11.1 (2026-11-09)
 
 ### 变更
