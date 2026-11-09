@@ -14,3 +14,6 @@ dist/
 /ralph-flow.md
 /ralph-flow/
 /openspec/
+
+# DSH harness local artifacts
+.dsh/
